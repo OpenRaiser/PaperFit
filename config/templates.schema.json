@@ -187,6 +187,9 @@
         },
         "title_affiliation_style": {
           "type": ["string", "null"]
+        },
+        "package_options_for_visible_authors": {
+          "type": ["string", "null"]
         }
       },
       "additionalProperties": false
