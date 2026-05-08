@@ -1,0 +1,64 @@
+# 写作规范配置
+# 供 semantic-polish-agent 遵循的硬规则
+
+version: "1.0"
+
+# 禁止的表达
+forbidden:
+  contractions:                             # 禁止口语缩写
+    - "don't"
+    - "isn't"
+    - "can't"
+    - "won't"
+    - "it's"
+    - "that's"
+    - "we're"
+    - "they're"
+  filler_phrases:                           # 禁止无意义填充短语
+    - "It is worth noting that"
+    - "It should be emphasized that"
+    - "It is interesting to note that"
+    - "Needless to say"
+    - "As a matter of fact"
+
+# 时态规则
+tense:
+  introduction: present                     # 引言：现在时
+  related_work: present                     # 相关工作：现在时
+  method: past                              # 方法：过去时
+  experiments: past                         # 实验：过去时
+  results: present                          # 结果描述：现在时
+  conclusion: present                       # 结论：现在时
+
+# 术语规范
+terminology:
+  # 要求统一使用的术语（同一概念只用一个词）
+  preferred:
+    - preferred: "state-of-the-art"
+      avoid: ["SOTA", "cutting-edge", "leading"]
+    - preferred: "method"
+      avoid: ["approach", "framework", "technique"]
+    - preferred: "dataset"
+      avoid: ["corpus", "data set"]
+  # 缩写定义要求
+  abbreviations:
+    require_first_definition: true
+    allowed_without_definition: ["NLP", "CV", "ML", "AI"]
+
+# 引用规范
+citations:
+  style: "numerical"                        # 数值引用
+  forbid_manual_brackets: true              # 禁止手写 [1] 而不使用 \cite
+
+# 数学规范
+math:
+  vector_notation: "\\mathbf"               # 向量用粗体
+  scalar_notation: "italic"                 # 标量用斜体
+  function_names: "\\mathrm"                # 函数名用正体
+
+# 语义改写约束
+semantic_polish:
+  max_word_change_per_edit: 15              # 单次改写最大增删词数
+  forbidden_edit_sections: ["abstract", "acknowledgments"]  # 禁止改写的章节
+  preferred_expand_sections: ["discussion", "conclusion", "related_work"]
+  preferred_shorten_sections: ["introduction", "related_work"]

@@ -1,0 +1,51 @@
+name: Verify
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Create virtual environment
+        run: python -m venv .venv
+
+      - name: Install Python dependencies
+        run: |
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+
+      - name: Validate config
+        run: npm run validate:config
+
+      - name: Check CLI syntax
+        run: npm run check:node
+
+      - name: Check Python warnings
+        run: npm run check:py-warnings
+
+      - name: Run verify
+        run: npm run verify

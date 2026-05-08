@@ -1,0 +1,224 @@
+version: "1.0"
+generated_at: "2026-04-15"
+generated_by: "codex"
+asset_root: "config/host_assets/template_kits"
+validation:
+  latest_official_confirmed_as_of: "2026-04-15"
+  checks:
+    - "Downloaded assets have size_bytes recorded."
+    - "Zip assets were validated with unzip -l."
+    - "AAAI 2026 was saved as a public Overleaf mirror fallback because aaai.org did not expose a resolvable direct package URL during automated fetch."
+
+assets:
+  AAAI2026_OVERLEAF_MIRROR:
+    venue_family: "AAAI"
+    year: 2026
+    asset_type: "public_mirror_html"
+    status: "fallback_saved"
+    official_page: "https://aaai.org/conference/aaai/aaai-26/submission-instructions/"
+    official_template_hint: "https://aaai.org/authorkit26/"
+    mirror_page: "https://www.overleaf.com/latex/templates/aaai-2026-author-kit/qnpmwrzmddjj"
+    local_path: "config/host_assets/template_kits/AAAI2026/overleaf_template_page.html"
+    size_bytes: 587
+    machine_verified: true
+    notes:
+      - "The public Overleaf page states that its source is the official AAAI website."
+      - "The checked-in mirror is sanitized and omits session metadata, signed asset URLs, analytics identifiers, and web API keys."
+      - "Use this only as a seed fallback until a direct official AAAI package URL is collected."
+
+  ICLR2025_MASTER_TEMPLATE:
+    venue_family: "ICLR"
+    year: 2025
+    asset_type: "repo_snapshot_zip"
+    status: "downloaded"
+    official_page: "https://www.iclr.cc/Conferences/2025/CallForPapers"
+    download_url: "https://codeload.github.com/ICLR/Master-Template/zip/refs/heads/master"
+    local_path: "config/host_assets/template_kits/ICLR2025/Master-Template-master.zip"
+    size_bytes: 2597256
+    machine_verified: true
+    contains:
+      - "Master-Template-master/iclr2025.zip"
+      - "Master-Template-master/iclr2025/iclr2025_conference.sty"
+      - "Master-Template-master/iclr2025/iclr2025_conference.tex"
+
+  ICML2025_STYLE_ZIP:
+    venue_family: "ICML"
+    year: 2025
+    asset_type: "official_zip"
+    status: "downloaded"
+    official_page: "https://icml.cc/Conferences/2025/AuthorInstructions"
+    download_url: "https://media.icml.cc/Conferences/ICML2025/Styles/icml2025.zip"
+    local_path: "config/host_assets/template_kits/ICML2025/icml2025.zip"
+    size_bytes: 258356
+    machine_verified: true
+    contains:
+      - "icml2025/icml2025.sty"
+      - "icml2025/example_paper.tex"
+      - "icml2025/icml2025.bst"
+
+  NEURIPS2025_STYLE_ZIP:
+    venue_family: "NeurIPS"
+    year: 2025
+    asset_type: "official_zip"
+    status: "downloaded"
+    official_page: "https://neurips.cc/Conferences/2025/CallForPapers"
+    download_url: "https://media.neurips.cc/Conferences/NeurIPS2025/Styles.zip"
+    local_path: "config/host_assets/template_kits/NeurIPS2025/Styles.zip"
+    size_bytes: 188273
+    machine_verified: true
+    contains:
+      - "Styles/neurips_2025.sty"
+      - "Styles/neurips_2025.tex"
+
+  ICCV2025_AUTHOR_KIT:
+    venue_family: "ICCV"
+    year: 2025
+    asset_type: "official_zip"
+    status: "downloaded"
+    official_page: "https://iccv.thecvf.com/Conferences/2025/AuthorGuidelines"
+    download_url: "https://media.eventhosts.cc/Conferences/ICCV2025/ICCV2025-Author-Kit-Feb.zip"
+    local_path: "config/host_assets/template_kits/ICCV2025/ICCV2025-Author-Kit-Feb.zip"
+    size_bytes: 33439
+    machine_verified: true
+    contains:
+      - "ICCV2025-Author-Kit-Feb/main.tex"
+      - "ICCV2025-Author-Kit-Feb/preamble.tex"
+      - "ICCV2025-Author-Kit-Feb/ieeenat_fullname.bst"
+
+  CVPR2026_AUTHOR_KIT:
+    venue_family: "CVPR"
+    year: 2026
+    asset_type: "release_archive_zip"
+    status: "downloaded"
+    official_page: "https://github.com/cvpr-org/author-kit/releases"
+    download_url: "https://codeload.github.com/cvpr-org/author-kit/zip/refs/tags/CVPR2026-v1%28latex%29"
+    local_path: "config/host_assets/template_kits/CVPR2026/author-kit-CVPR2026-v1-latex.zip"
+    size_bytes: 29800
+    machine_verified: true
+    contains:
+      - "author-kit-CVPR2026-v1-latex-/cvpr.sty"
+      - "author-kit-CVPR2026-v1-latex-/main.tex"
+      - "author-kit-CVPR2026-v1-latex-/preamble.tex"
+
+  ECCV2026_TEMPLATE:
+    venue_family: "ECCV"
+    year: 2026
+    asset_type: "release_archive_zip"
+    status: "downloaded"
+    official_page: "https://eccv.ecva.net/Conferences/2026/SubmissionPolicies"
+    download_url: "https://codeload.github.com/paolo-favaro/paper-template/zip/refs/tags/Latest"
+    local_path: "config/host_assets/template_kits/ECCV2026/paper-template-Latest.zip"
+    size_bytes: 656170
+    machine_verified: true
+    contains:
+      - "paper-template-Latest/eccv.sty"
+      - "paper-template-Latest/llncs.cls"
+      - "paper-template-Latest/main.tex"
+
+  ACL_STYLE_FAMILY:
+    venue_family: "ACL"
+    year: 2025
+    asset_type: "repo_snapshot_zip"
+    status: "downloaded"
+    official_page: "https://2025.aclweb.org/calls/main_conference_papers/"
+    download_url: "https://codeload.github.com/acl-org/acl-style-files/zip/refs/heads/master"
+    local_path: "config/host_assets/template_kits/ACL_STYLE_FAMILY/acl-style-files-master.zip"
+    size_bytes: 32190
+    machine_verified: true
+    contains:
+      - "acl-style-files-master/acl.sty"
+      - "acl-style-files-master/acl_latex.tex"
+      - "acl-style-files-master/acl_natbib.bst"
+
+  ACM_ACMART:
+    venue_family: "ACM"
+    year: 2025
+    asset_type: "ctan_package_zip"
+    status: "downloaded"
+    official_page: "https://sigir2025.dei.unipd.it/call-full-papers.html"
+    package_page: "https://ctan.org/pkg/acmart"
+    download_url: "https://mirrors.ctan.org/macros/latex/contrib/acmart.zip"
+    local_path: "config/host_assets/template_kits/ACM_ACMART/acmart.zip"
+    size_bytes: 13072997
+    machine_verified: true
+    contains:
+      - "acmart/acmart.dtx"
+      - "acmart/acmart.ins"
+      - "acmart/ACM-Reference-Format.bst"
+      - "acmart/samples/sample-sigconf.pdf"
+
+venues:
+  AAAI2026:
+    family: "AAAI"
+    year: 2026
+    status: "partial"
+    asset_ref: "AAAI2026_OVERLEAF_MIRROR"
+    notes:
+      - "Official AAAI instructions were confirmed."
+      - "Direct machine-downloadable author-kit URL remains unresolved; fallback mirror saved."
+
+  ICLR2025:
+    family: "ICLR"
+    year: 2025
+    status: "downloaded"
+    asset_ref: "ICLR2025_MASTER_TEMPLATE"
+
+  ICML2025:
+    family: "ICML"
+    year: 2025
+    status: "downloaded"
+    asset_ref: "ICML2025_STYLE_ZIP"
+
+  NeurIPS2025:
+    family: "NeurIPS"
+    year: 2025
+    status: "downloaded"
+    asset_ref: "NEURIPS2025_STYLE_ZIP"
+
+  ICCV2025:
+    family: "ICCV"
+    year: 2025
+    status: "downloaded"
+    asset_ref: "ICCV2025_AUTHOR_KIT"
+
+  CVPR2026:
+    family: "CVPR"
+    year: 2026
+    status: "downloaded"
+    asset_ref: "CVPR2026_AUTHOR_KIT"
+
+  ECCV2026:
+    family: "ECCV"
+    year: 2026
+    status: "downloaded"
+    asset_ref: "ECCV2026_TEMPLATE"
+
+  ACL2025:
+    family: "ACL"
+    year: 2025
+    status: "downloaded"
+    asset_ref: "ACL_STYLE_FAMILY"
+
+  EMNLP2025:
+    family: "EMNLP"
+    year: 2025
+    status: "shared_asset"
+    asset_ref: "ACL_STYLE_FAMILY"
+    notes:
+      - "This is an inference from the official EMNLP 2025 submission page, which points authors to the EMNLP 2022 two-column style family."
+
+  SIGIR2025:
+    family: "SIGIR"
+    year: 2025
+    status: "shared_asset"
+    asset_ref: "ACM_ACMART"
+    notes:
+      - "Official SIGIR 2025 full-paper instructions use the ACM format based on acmart and sigconf."
+
+  KDD2025:
+    family: "KDD"
+    year: 2025
+    status: "shared_asset"
+    asset_ref: "ACM_ACMART"
+    notes:
+      - "Official KDD 2025 research-track instructions use the ACM style family."

@@ -1,0 +1,8 @@
+# PaperFit Python Dependencies
+PyYAML>=6.0              # templates.yaml / paperfit-project.yaml（configure_wizard）
+questionary>=2.0.0       # 终端交互问卷（可选；无则 wizard 退回数字菜单）
+pdf2image>=1.16.0        # PDF to image conversion
+Pillow>=9.0.0            # Image processing
+opencv-python-headless>=4.8.0  # A5 列内竖向空洞：行向墨迹投影（detect_column_void.py）
+numpy>=1.24.0            # 与 OpenCV 配合
+jsonschema>=4.0.0        # State validation

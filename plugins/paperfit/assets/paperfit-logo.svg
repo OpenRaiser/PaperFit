@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="PaperFit">
+  <rect width="256" height="256" rx="44" fill="#1F5E4A"/>
+  <path d="M68 48h82l38 38v110c0 11-9 20-20 20H68c-11 0-20-9-20-20V68c0-11 9-20 20-20Z" fill="#F4EFE3"/>
+  <path d="M150 48v44h44" fill="none" stroke="#1F5E4A" stroke-width="12" stroke-linejoin="round"/>
+  <path d="M86 118h84M86 148h84M86 178h56" fill="none" stroke="#1F5E4A" stroke-width="12" stroke-linecap="round"/>
+</svg>

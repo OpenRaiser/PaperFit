@@ -1,0 +1,1321 @@
+version: "2.0"
+description: "PaperFit template registry for migration, portraiting, and compatibility checks"
+
+templates:
+  ICLR2025:
+    id: "ICLR2025"
+    name: "ICLR 2025"
+    family: "ICLR"
+    year: 2025
+    publisher: "OpenReview"
+    venue_type: "conference"
+    documentclass: '\documentclass{article}'
+    column_type: "single"
+    paper_size: "letter"
+    default_font_size_pt: 10
+    text_width: "6.5in"
+    column_width: null
+    default_figure_width: '\linewidth'
+    default_table_width: '\linewidth'
+    expected_pages:
+      main_body: 9
+      with_refs: null
+      with_appendix: null
+    bibliography_policy:
+      refs_count_in_limit: false
+      appendix_allowed: true
+    page_margins:
+      top: "1in"
+      bottom: "1in"
+      left: "1in"
+      right: "1in"
+    official_assets:
+      class_files: ["iclr2025_conference.sty"]
+      bibliography_files: []
+      template_files: ["iclr2025_conference.tex"]
+      source_url: null
+      source_sha256: null
+      downloaded_at: null
+    required_packages: ["iclr2025_conference", "times"]
+    required_preamble_lines:
+      - '\usepackage{iclr2025_conference,times}'
+      - '\input{math_commands.tex}'
+    forbidden_packages: ["fullpage", "geometry"]
+    discouraged_packages: []
+    package_replacements: {}
+    macro_substitutions:
+      '\theoremstyle': 'Use \newtheorem directly when amsthm is unavailable'
+    macro_compatibility:
+      removed_macros: []
+      substitutions: {}
+      required_shims: []
+    float_behavior: "Single-column floats only"
+    float_policy:
+      wide_figure_env: "figure"
+      wide_table_env: "table"
+      wide_float_placement: ["h", "t", "b", "p"]
+      single_float_placement: ["h", "t", "b", "p"]
+      allow_bottom_double_float: false
+    width_policy:
+      single_column_graphics: '\linewidth'
+      double_column_graphics: '\linewidth'
+      wide_graphics: '\linewidth'
+      single_column_tables: '\linewidth'
+      wide_tables: '\linewidth'
+    migration_hints:
+      normalize_figure_star_when_target_single: true
+      normalize_table_star_when_target_single: true
+      add_bibliographystyle_if_missing: "plainnat"
+      title_affiliation_style: "iclr"
+    variants:
+      submission:
+        anonymized: true
+      camera_ready:
+        anonymized: false
+    tags: ["conference", "single-column", "ml"]
+    notes: "ICLR 2025 uses article plus iclr2025_conference; migrations target the final camera-ready mode."
+
+  ECCV2024:
+    id: "ECCV2024"
+    name: "ECCV 2024"
+    family: "ECCV"
+    year: 2024
+    publisher: "Springer"
+    venue_type: "conference"
+    documentclass: '\documentclass[10pt,twocolumn]{article}'
+    column_type: "double"
+    paper_size: "a4"
+    default_font_size_pt: 10
+    text_width: "7.0in"
+    column_width: "3.3in"
+    default_figure_width: '\columnwidth'
+    default_table_width: '\columnwidth'
+    expected_pages:
+      main_body: 14
+      with_refs: null
+      with_appendix: null
+    bibliography_policy:
+      refs_count_in_limit: false
+      appendix_allowed: true
+    page_margins:
+      top: "1in"
+      bottom: "1in"
+      left: "0.75in"
+      right: "0.75in"
+    official_assets:
+      class_files: ["eccv.sty"]
+      bibliography_files: []
+      template_files: ["eccv.tex"]
+      source_url: null
+      source_sha256: null
+      downloaded_at: null
+    required_packages: ["graphicx", "amsmath", "amssymb", "subfigure"]
+    forbidden_packages: ["amsthm", "algorithm2e"]
+    discouraged_packages: []
+    package_replacements:
+      "algorithm2e": "algorithmic"
+    macro_substitutions:
+      '\theoremstyle': 'Remove and use \newtheorem without amsthm'
+    macro_compatibility:
+      removed_macros: ['\theoremstyle']
+      substitutions: {}
+      required_shims: []
+    float_behavior: "Wide floats should use figure* or table* at page top"
+    float_policy:
+      wide_figure_env: "figure*"
+      wide_table_env: "table*"
+      wide_float_placement: ["t"]
+      single_float_placement: ["h", "t", "b", "p"]
+      allow_bottom_double_float: false
+    width_policy:
+      single_column_graphics: '\columnwidth'
+      double_column_graphics: '\columnwidth'
+      wide_graphics: '\textwidth'
+      single_column_tables: '\columnwidth'
+      wide_tables: '\textwidth'
+    migration_hints:
+      normalize_figure_star_when_target_single: true
+      normalize_table_star_when_target_single: true
+      add_bibliographystyle_if_missing: "splncs04"
+      title_affiliation_style: "eccv"
+    variants:
+      submission:
+        anonymized: true
+      camera_ready:
+        anonymized: false
+    tags: ["conference", "double-column", "vision"]
+    notes: "ECCV is two-column and prefers wide floats only at page top."
+
+  NeurIPS2025:
+    id: "NeurIPS2025"
+    name: "NeurIPS 2025"
+    family: "NeurIPS"
+    year: 2025
+    publisher: "NeurIPS"
+    venue_type: "conference"
+    documentclass: '\documentclass{article}'
+    column_type: "single"
+    paper_size: "letter"
+    default_font_size_pt: 11
+    text_width: "5.5in"
+    column_width: null
+    default_figure_width: '\linewidth'
+    default_table_width: '\linewidth'
+    expected_pages:
+      main_body: 9
+      with_refs: null
+      with_appendix: null
+    bibliography_policy:
+      refs_count_in_limit: false
+      appendix_allowed: true
+    page_margins:
+      top: "1in"
+      bottom: "1in"
+      left: "1in"
+      right: "1in"
+    official_assets:
+      class_files: ["neurips_2025.sty"]
+      bibliography_files: []
+      template_files: ["neurips_2025.tex"]
+      source_url: null
+      source_sha256: null
+      downloaded_at: null
+    required_packages: ["neurips_2025"]
+    required_preamble_lines:
+      - '\usepackage[final,main]{neurips_2025}'
+      - '\usepackage[utf8]{inputenc}'
+      - '\usepackage[T1]{fontenc}'
+      - '\usepackage{hyperref}'
+      - '\usepackage{url}'
+    forbidden_packages: ["fullpage", "setspace", "titlesec"]
+    discouraged_packages: []
+    package_replacements: {}
+    macro_substitutions: {}
+    macro_compatibility:
+      removed_macros: []
+      substitutions: {}
+      required_shims:
+        - '\providecommand{\href}[2]{#2}'
+        - '\providecommand{\url}[1]{#1}'
+    float_behavior: "Standard single-column floats"
+    float_policy:
+      wide_figure_env: "figure"
+      wide_table_env: "table"
+      wide_float_placement: ["h", "t", "b", "p"]
+      single_float_placement: ["h", "t", "b", "p"]
+      allow_bottom_double_float: false
+    width_policy:
+      single_column_graphics: '\linewidth'
+      double_column_graphics: '\linewidth'
+      wide_graphics: '\linewidth'
+      single_column_tables: '\linewidth'
+      wide_tables: '\linewidth'
+    migration_hints:
+      normalize_figure_star_when_target_single: true
+      normalize_table_star_when_target_single: true
+      add_bibliographystyle_if_missing: "plainnat"
+      title_affiliation_style: "neurips"
+      package_options_for_visible_authors: "final,main"
+    variants:
+      submission:
+        anonymized: true
+      camera_ready:
+        anonymized: false
+    tags: ["conference", "single-column", "ml"]
+    notes: "NeurIPS 2025 uses article plus neurips_2025; migrations target the final camera-ready mode."
+
+  CVPR2024:
+    id: "CVPR2024"
+    name: "CVPR 2024"
+    family: "CVPR"
+    year: 2024
+    publisher: "CVF"
+    venue_type: "conference"
+    documentclass: '\documentclass[10pt,twocolumn,letterpaper]{article}'
+    column_type: "double"
+    paper_size: "letter"
+    default_font_size_pt: 10
+    text_width: "7.0in"
+    column_width: "3.3in"
+    default_figure_width: '\columnwidth'
+    default_table_width: '\columnwidth'
+    expected_pages:
+      main_body: 8
+      with_refs: null
+      with_appendix: null
+    bibliography_policy:
+      refs_count_in_limit: false
+      appendix_allowed: true
+    page_margins:
+      top: "1in"
+      bottom: "1in"
+      left: "0.75in"
+      right: "0.75in"
+    official_assets:
+      class_files: ["cvpr.sty"]
+      bibliography_files: []
+      template_files: ["cvpr.tex"]
+      source_url: null
+      source_sha256: null
+      downloaded_at: null
+    required_packages: ["cvpr", "graphicx", "amsmath"]
+    forbidden_packages: ["amsthm"]
+    discouraged_packages: []
+    package_replacements: {}
+    macro_substitutions:
+      '\theoremstyle': 'Use \newtheorem directly'
+    macro_compatibility:
+      removed_macros: ['\theoremstyle']
+      substitutions: {}
+      required_shims: []
+    float_behavior: "Wide floats should stay at page top"
+    float_policy:
+      wide_figure_env: "figure*"
+      wide_table_env: "table*"
+      wide_float_placement: ["t"]
+      single_float_placement: ["h", "t", "b", "p"]
+      allow_bottom_double_float: false
+    width_policy:
+      single_column_graphics: '\columnwidth'
+      double_column_graphics: '\columnwidth'
+      wide_graphics: '\textwidth'
+      single_column_tables: '\columnwidth'
+      wide_tables: '\textwidth'
+    migration_hints:
+      normalize_figure_star_when_target_single: true
+      normalize_table_star_when_target_single: true
+      add_bibliographystyle_if_missing: "ieeenat_fullname"
+      title_affiliation_style: "cvpr"
+    variants:
+      submission:
+        anonymized: true
+      camera_ready:
+        anonymized: false
+    tags: ["conference", "double-column", "vision"]
+    notes: "CVPR main paper is two-column and references do not count toward the limit."
+
+  IEEE:
+    id: "IEEE"
+    name: "IEEE Transactions"
+    family: "IEEE"
+    year: 2025
+    publisher: "IEEE"
+    venue_type: "journal"
+    documentclass: '\documentclass[10pt,twocolumn,twoside]{IEEEtran}'
+    column_type: "double"
+    paper_size: "letter"
+    default_font_size_pt: 10
+    text_width: "7.0in"
+    column_width: "3.3in"
+    default_figure_width: '\columnwidth'
+    default_table_width: '\columnwidth'
+    expected_pages:
+      main_body: null
+      with_refs: null
+      with_appendix: null
+    bibliography_policy:
+      refs_count_in_limit: true
+      appendix_allowed: true
+    page_margins:
+      top: "1in"
+      bottom: "1in"
+      left: "0.75in"
+      right: "0.75in"
+    official_assets:
+      class_files: ["IEEEtran.cls"]
+      bibliography_files: ["IEEEtran.bst"]
+      template_files: ["bare_jrnl.tex"]
+      source_url: null
+      source_sha256: null
+      downloaded_at: null
+    required_packages: ["graphicx", "amsmath", "cite"]
+    forbidden_packages: ["algorithm2e", "subfigure"]
+    discouraged_packages: []
+    package_replacements:
+      "algorithm2e": "algorithmic"
+      "subfigure": "subfig"
+    macro_substitutions:
+      "algorithm2e": "Use algorithmic or compatible IEEE algorithm package"
+    macro_compatibility:
+      removed_macros: []
+      substitutions: {}
+      required_shims: []
+    float_behavior: "IEEEtran has special double-column float behavior"
+    float_policy:
+      wide_figure_env: "figure*"
+      wide_table_env: "table*"
+      wide_float_placement: ["t"]
+      single_float_placement: ["t", "b", "p"]
+      allow_bottom_double_float: true
+    width_policy:
+      single_column_graphics: '\columnwidth'
+      double_column_graphics: '\columnwidth'
+      wide_graphics: '\textwidth'
+      single_column_tables: '\columnwidth'
+      wide_tables: '\textwidth'
+    migration_hints:
+      normalize_figure_star_when_target_single: true
+      normalize_table_star_when_target_single: true
+      add_bibliographystyle_if_missing: "IEEEtran"
+      title_affiliation_style: "ieee"
+    variants:
+      submission:
+        anonymized: false
+    tags: ["journal", "double-column", "ieee"]
+    notes: "Generic IEEE two-column journal configuration."
+
+  ACL2024:
+    id: "ACL2024"
+    name: "ACL 2024"
+    family: "ACL"
+    year: 2024
+    publisher: "ACL"
+    venue_type: "conference"
+    documentclass: '\documentclass[11pt]{article}'
+    column_type: "single"
+    paper_size: "letter"
+    default_font_size_pt: 11
+    text_width: "6.0in"
+    column_width: null
+    default_figure_width: '\linewidth'
+    default_table_width: '\linewidth'
+    expected_pages:
+      main_body: 8
+      with_refs: null
+      with_appendix: null
+    bibliography_policy:
+      refs_count_in_limit: false
+      appendix_allowed: true
+    page_margins:
+      top: "1in"
+      bottom: "1in"
+      left: "1in"
+      right: "1in"
+    official_assets:
+      class_files: ["acl.sty"]
+      bibliography_files: ["acl_natbib.bst"]
+      template_files: ["acl.tex"]
+      source_url: null
+      source_sha256: null
+      downloaded_at: null
+    required_packages: ["acl", "times"]
+    forbidden_packages: ["geometry"]
+    discouraged_packages: []
+    package_replacements: {}
+    macro_substitutions: {}
+    macro_compatibility:
+      removed_macros: []
+      substitutions: {}
+      required_shims: []
+    float_behavior: "Standard single-column floats"
+    float_policy:
+      wide_figure_env: "figure"
+      wide_table_env: "table"
+      wide_float_placement: ["h", "t", "b", "p"]
+      single_float_placement: ["h", "t", "b", "p"]
+      allow_bottom_double_float: false
+    width_policy:
+      single_column_graphics: '\linewidth'
+      double_column_graphics: '\linewidth'
+      wide_graphics: '\linewidth'
+      single_column_tables: '\linewidth'
+      wide_tables: '\linewidth'
+    migration_hints:
+      normalize_figure_star_when_target_single: true
+      normalize_table_star_when_target_single: true
+      add_bibliographystyle_if_missing: "acl_natbib"
+      title_affiliation_style: "acl"
+    variants:
+      submission:
+        anonymized: true
+      camera_ready:
+        anonymized: false
+    tags: ["conference", "single-column", "nlp"]
+    notes: "ACL uses acl.sty on top of article."
+
+  ICML2024:
+    id: "ICML2024"
+    name: "ICML 2024"
+    family: "ICML"
+    year: 2024
+    publisher: "PMLR"
+    venue_type: "conference"
+    documentclass: '\documentclass{article}'
+    column_type: "single"
+    paper_size: "letter"
+    default_font_size_pt: 10
+    text_width: "6.0in"
+    column_width: null
+    default_figure_width: '\linewidth'
+    default_table_width: '\linewidth'
+    expected_pages:
+      main_body: 8
+      with_refs: null
+      with_appendix: null
+    bibliography_policy:
+      refs_count_in_limit: false
+      appendix_allowed: true
+    page_margins:
+      top: "1in"
+      bottom: "1in"
+      left: "1in"
+      right: "1in"
+    official_assets:
+      class_files: ["icml2025.sty"]
+      bibliography_files: []
+      template_files: ["example_paper.tex"]
+      source_url: null
+      source_sha256: null
+      downloaded_at: null
+    required_packages: ["icml2025"]
+    required_preamble_lines:
+      - '\usepackage{icml2025}'
+    forbidden_packages: ["geometry"]
+    discouraged_packages: []
+    package_replacements: {}
+    macro_substitutions: {}
+    macro_compatibility:
+      removed_macros: []
+      substitutions: {}
+      required_shims: []
+    float_behavior: "Standard single-column floats"
+    float_policy:
+      wide_figure_env: "figure"
+      wide_table_env: "table"
+      wide_float_placement: ["h", "t", "b", "p"]
+      single_float_placement: ["h", "t", "b", "p"]
+      allow_bottom_double_float: false
+    width_policy:
+      single_column_graphics: '\linewidth'
+      double_column_graphics: '\linewidth'
+      wide_graphics: '\linewidth'
+      single_column_tables: '\linewidth'
+      wide_tables: '\linewidth'
+    migration_hints:
+      normalize_figure_star_when_target_single: true
+      normalize_table_star_when_target_single: true
+      add_bibliographystyle_if_missing: "plainnat"
+      title_affiliation_style: "icml"
+    variants:
+      submission:
+        anonymized: true
+      camera_ready:
+        anonymized: false
+    tags: ["conference", "single-column", "ml"]
+    notes: "ICML 2024 falls back to the locally prepared ICML 2025 style asset in this benchmark environment."
+
+  AAAI2025:
+    id: "AAAI2025"
+    name: "AAAI 2025"
+    family: "AAAI"
+    year: 2025
+    publisher: "AAAI"
+    venue_type: "conference"
+    documentclass: '\documentclass[letterpaper,twocolumn,10pt]{article}'
+    column_type: "double"
+    paper_size: "letter"
+    default_font_size_pt: 10
+    text_width: "7.0in"
+    column_width: "3.3in"
+    default_figure_width: '\columnwidth'
+    default_table_width: '\columnwidth'
+    expected_pages:
+      main_body: 7
+      with_refs: null
+      with_appendix: null
+    bibliography_policy:
+      refs_count_in_limit: false
+      appendix_allowed: true
+    page_margins:
+      top: "1in"
+      bottom: "1in"
+      left: "0.75in"
+      right: "0.75in"
+    official_assets:
+      class_files: ["aaai25.sty"]
+      bibliography_files: []
+      template_files: ["aaai25.tex"]
+      source_url: null
+      source_sha256: null
+      downloaded_at: null
+    required_packages: ["aaai25", "times"]
+    forbidden_packages: []
+    discouraged_packages: []
+    package_replacements: {}
+    macro_substitutions: {}
+    macro_compatibility:
+      removed_macros: []
+      substitutions: {}
+      required_shims: []
+    float_behavior: "Two-column, wide floats should stay at top"
+    float_policy:
+      wide_figure_env: "figure*"
+      wide_table_env: "table*"
+      wide_float_placement: ["t"]
+      single_float_placement: ["h", "t", "b", "p"]
+      allow_bottom_double_float: false
+    width_policy:
+      single_column_graphics: '\columnwidth'
+      double_column_graphics: '\columnwidth'
+      wide_graphics: '\textwidth'
+      single_column_tables: '\columnwidth'
+      wide_tables: '\textwidth'
+    migration_hints:
+      normalize_figure_star_when_target_single: true
+      normalize_table_star_when_target_single: true
+      add_bibliographystyle_if_missing: "aaai25"
+      title_affiliation_style: "aaai"
+    variants:
+      submission:
+        anonymized: true
+      camera_ready:
+        anonymized: false
+    tags: ["conference", "double-column", "ai"]
+    notes: "AAAI main body is typically 7 pages."
+
+  AAAI2026:
+    id: "AAAI2026"
+    name: "AAAI 2026"
+    family: "AAAI"
+    year: 2026
+    publisher: "AAAI"
+    venue_type: "conference"
+    documentclass: '\documentclass[letterpaper]{article}'
+    column_type: "double"
+    paper_size: "letter"
+    default_font_size_pt: 10
+    text_width: "6.875in"
+    column_width: "3.28in"
+    default_figure_width: '\columnwidth'
+    default_table_width: '\columnwidth'
+    expected_pages:
+      main_body: 7
+      with_refs: null
+      with_appendix: null
+    bibliography_policy:
+      refs_count_in_limit: false
+      appendix_allowed: true
+    page_margins:
+      top: "1in"
+      bottom: "1in"
+      left: "0.75in"
+      right: "0.75in"
+    official_assets:
+      class_files: ["aaai2026.sty"]
+      bibliography_files: []
+      template_files: ["anonymous-submission-latex-2026.tex"]
+      source_url: null
+      source_sha256: null
+      downloaded_at: null
+    required_packages: ["aaai2026", "times"]
+    required_preamble_lines:
+      - '\usepackage{aaai2026}'
+    forbidden_packages: []
+    discouraged_packages: []
+    package_replacements: {}
+    macro_substitutions: {}
+    macro_compatibility:
+      removed_macros: []
+      substitutions: {}
+      required_shims: []
+    float_behavior: "Two-column AAAI layout; wide floats should stay at the top"
+    float_policy:
+      wide_figure_env: "figure*"
+      wide_table_env: "table*"
+      wide_float_placement: ["t"]
+      single_float_placement: ["h", "t", "b", "p"]
+      allow_bottom_double_float: false
+    width_policy:
+      single_column_graphics: '\columnwidth'
+      double_column_graphics: '\columnwidth'
+      wide_graphics: '\textwidth'
+      single_column_tables: '\columnwidth'
+      wide_tables: '\textwidth'
+    migration_hints:
+      normalize_figure_star_when_target_single: true
+      normalize_table_star_when_target_single: true
+      add_bibliographystyle_if_missing: "aaai25"
+      title_affiliation_style: "aaai"
+    variants:
+      submission:
+        anonymized: true
+      camera_ready:
+        anonymized: false
+    tags: ["conference", "double-column", "ai"]
+    notes: "AAAI 2026 uses article plus aaai2026; the local asset currently comes from the saved public mirror fallback."
+
+  CVPR2026:
+    id: "CVPR2026"
+    name: "CVPR 2026"
+    family: "CVPR"
+    year: 2026
+    publisher: "CVF"
+    venue_type: "conference"
+    documentclass: '\documentclass[10pt,twocolumn,letterpaper]{article}'
+    column_type: "double"
+    paper_size: "letter"
+    default_font_size_pt: 10
+    text_width: "6.875in"
+    column_width: "3.28in"
+    default_figure_width: '\columnwidth'
+    default_table_width: '\columnwidth'
+    expected_pages:
+      main_body: 8
+      with_refs: null
+      with_appendix: null
+    bibliography_policy:
+      refs_count_in_limit: false
+      appendix_allowed: true
+    page_margins:
+      top: "1in"
+      bottom: "1in"
+      left: "0.75in"
+      right: "0.75in"
+    official_assets:
+      class_files: ["cvpr.sty"]
+      bibliography_files: ["ieeenat_fullname.bst"]
+      template_files: ["main.tex", "preamble.tex"]
+      source_url: null
+      source_sha256: null
+      downloaded_at: null
+    required_packages: ["cvpr", "graphicx", "amsmath"]
+    required_preamble_lines:
+      - '\usepackage{cvpr}'
+      - '\input{preamble}'
+    forbidden_packages: ["amsthm"]
+    discouraged_packages: []
+    package_replacements: {}
+    macro_substitutions:
+      '\theoremstyle': 'Use \newtheorem directly'
+    macro_compatibility:
+      removed_macros: ['\theoremstyle']
+      substitutions: {}
+      required_shims: []
+    float_behavior: "CVPR two-column format with wide floats at page top"
+    float_policy:
+      wide_figure_env: "figure*"
+      wide_table_env: "table*"
+      wide_float_placement: ["t"]
+      single_float_placement: ["h", "t", "b", "p"]
+      allow_bottom_double_float: false
+    width_policy:
+      single_column_graphics: '\columnwidth'
+      double_column_graphics: '\columnwidth'
+      wide_graphics: '\textwidth'
+      single_column_tables: '\columnwidth'
+      wide_tables: '\textwidth'
+    migration_hints:
+      normalize_figure_star_when_target_single: true
+      normalize_table_star_when_target_single: true
+      add_bibliographystyle_if_missing: "ieeenat_fullname"
+      title_affiliation_style: "cvpr"
+    variants:
+      submission:
+        anonymized: true
+      camera_ready:
+        anonymized: false
+    tags: ["conference", "double-column", "vision"]
+    notes: "CVPR 2026 uses article plus cvpr package; review mode is opt-in and is not the default migration target."
+
+  ICCV2025:
+    id: "ICCV2025"
+    name: "ICCV 2025"
+    family: "ICCV"
+    year: 2025
+    publisher: "CVF"
+    venue_type: "conference"
+    documentclass: '\documentclass[10pt,twocolumn,letterpaper]{article}'
+    column_type: "double"
+    paper_size: "letter"
+    default_font_size_pt: 10
+    text_width: "6.875in"
+    column_width: "3.28in"
+    default_figure_width: '\columnwidth'
+    default_table_width: '\columnwidth'
+    expected_pages:
+      main_body: 8
+      with_refs: null
+      with_appendix: null
+    bibliography_policy:
+      refs_count_in_limit: false
+      appendix_allowed: true
+    page_margins:
+      top: "1in"
+      bottom: "1in"
+      left: "0.75in"
+      right: "0.75in"
+    official_assets:
+      class_files: ["iccv.sty"]
+      bibliography_files: ["ieeenat_fullname.bst"]
+      template_files: ["main.tex", "preamble.tex"]
+      source_url: null
+      source_sha256: null
+      downloaded_at: null
+    required_packages: ["iccv", "graphicx", "amsmath"]
+    required_preamble_lines:
+      - '\usepackage{iccv}'
+      - '\input{preamble}'
+    forbidden_packages: ["amsthm"]
+    discouraged_packages: []
+    package_replacements: {}
+    macro_substitutions:
+      '\theoremstyle': 'Use \newtheorem directly'
+    macro_compatibility:
+      removed_macros: ['\theoremstyle']
+      substitutions: {}
+      required_shims: []
+    float_behavior: "ICCV two-column format with wide floats at page top"
+    float_policy:
+      wide_figure_env: "figure*"
+      wide_table_env: "table*"
+      wide_float_placement: ["t"]
+      single_float_placement: ["h", "t", "b", "p"]
+      allow_bottom_double_float: false
+    width_policy:
+      single_column_graphics: '\columnwidth'
+      double_column_graphics: '\columnwidth'
+      wide_graphics: '\textwidth'
+      single_column_tables: '\columnwidth'
+      wide_tables: '\textwidth'
+    migration_hints:
+      normalize_figure_star_when_target_single: true
+      normalize_table_star_when_target_single: true
+      add_bibliographystyle_if_missing: "ieeenat_fullname"
+      title_affiliation_style: "iccv"
+    variants:
+      submission:
+        anonymized: true
+      camera_ready:
+        anonymized: false
+    tags: ["conference", "double-column", "vision"]
+    notes: "ICCV 2025 uses article plus iccv package; review mode is opt-in and is not the default migration target."
+
+  ECCV2026:
+    id: "ECCV2026"
+    name: "ECCV 2026"
+    family: "ECCV"
+    year: 2026
+    publisher: "Springer"
+    venue_type: "conference"
+    documentclass: '\documentclass[runningheads]{llncs}'
+    column_type: "single"
+    paper_size: "a4"
+    default_font_size_pt: 10
+    text_width: "6.75in"
+    column_width: null
+    default_figure_width: '\linewidth'
+    default_table_width: '\linewidth'
+    expected_pages:
+      main_body: 14
+      with_refs: null
+      with_appendix: null
+    bibliography_policy:
+      refs_count_in_limit: false
+      appendix_allowed: true
+    page_margins:
+      top: "1in"
+      bottom: "1in"
+      left: "0.75in"
+      right: "0.75in"
+    official_assets:
+      class_files: ["eccv.sty", "llncs.cls", "eccvabbrv.sty"]
+      bibliography_files: ["splncs04.bst"]
+      template_files: ["main.tex"]
+      source_url: null
+      source_sha256: null
+      downloaded_at: null
+    required_packages: ["eccv", "eccvabbrv", "graphicx", "booktabs"]
+    required_preamble_lines:
+      - '\usepackage[final,year=2026,ID=*****]{eccv}'
+      - '\usepackage{eccvabbrv}'
+    forbidden_packages: ["amsthm", "algorithm2e"]
+    discouraged_packages: []
+    package_replacements:
+      "algorithm2e": "algorithmic"
+    macro_substitutions:
+      '\theoremstyle': 'Remove and use \newtheorem without amsthm'
+    macro_compatibility:
+      removed_macros: ['\theoremstyle']
+      substitutions: {}
+      required_shims: []
+    float_behavior: "LNCS-style single-column floats"
+    float_policy:
+      wide_figure_env: "figure"
+      wide_table_env: "table"
+      wide_float_placement: ["h", "t", "b", "p"]
+      single_float_placement: ["h", "t", "b", "p"]
+      allow_bottom_double_float: false
+    width_policy:
+      single_column_graphics: '\linewidth'
+      double_column_graphics: '\linewidth'
+      wide_graphics: '\linewidth'
+      single_column_tables: '\linewidth'
+      wide_tables: '\linewidth'
+    migration_hints:
+      normalize_figure_star_when_target_single: true
+      normalize_table_star_when_target_single: true
+      add_bibliographystyle_if_missing: "splncs04"
+      title_affiliation_style: "eccv"
+    variants:
+      submission:
+        anonymized: true
+      camera_ready:
+        anonymized: false
+    tags: ["conference", "double-column", "vision"]
+    notes: "ECCV 2026 uses llncs plus eccv/eccvabbrv; the class is not LaTeX twocolumn mode."
+
+  ICML2025:
+    id: "ICML2025"
+    name: "ICML 2025"
+    family: "ICML"
+    year: 2025
+    publisher: "PMLR"
+    venue_type: "conference"
+    documentclass: '\documentclass{article}'
+    column_type: "double"
+    paper_size: "letter"
+    default_font_size_pt: 10
+    text_width: "6.75in"
+    column_width: "3.25in"
+    default_figure_width: '\columnwidth'
+    default_table_width: '\columnwidth'
+    expected_pages:
+      main_body: 9
+      with_refs: null
+      with_appendix: null
+    bibliography_policy:
+      refs_count_in_limit: false
+      appendix_allowed: true
+    page_margins:
+      top: "1in"
+      bottom: "1in"
+      left: "0.75in"
+      right: "0.75in"
+    official_assets:
+      class_files: ["icml2025.sty"]
+      bibliography_files: []
+      template_files: ["example_paper.tex"]
+      source_url: null
+      source_sha256: null
+      downloaded_at: null
+    required_packages: ["icml2025"]
+    required_preamble_lines:
+      - '\usepackage{icml2025}'
+    forbidden_packages: ["geometry"]
+    discouraged_packages: []
+    package_replacements: {}
+    macro_substitutions: {}
+    macro_compatibility:
+      removed_macros: []
+      substitutions: {}
+      required_shims: []
+    float_behavior: "ICML uses a two-column article layout via icml2025"
+    float_policy:
+      wide_figure_env: "figure*"
+      wide_table_env: "table*"
+      wide_float_placement: ["t"]
+      single_float_placement: ["h", "t", "b", "p"]
+      allow_bottom_double_float: false
+    width_policy:
+      single_column_graphics: '\columnwidth'
+      double_column_graphics: '\columnwidth'
+      wide_graphics: '\textwidth'
+      single_column_tables: '\columnwidth'
+      wide_tables: '\textwidth'
+    migration_hints:
+      normalize_figure_star_when_target_single: true
+      normalize_table_star_when_target_single: true
+      add_bibliographystyle_if_missing: "plainnat"
+      title_affiliation_style: "icml"
+    variants:
+      submission:
+        anonymized: true
+      camera_ready:
+        anonymized: false
+    tags: ["conference", "double-column", "ml"]
+    notes: "ICML 2025 uses article plus icml2025 and renders in two columns."
+
+  ACL2025:
+    id: "ACL2025"
+    name: "ACL 2025"
+    family: "ACL"
+    year: 2025
+    publisher: "ACL"
+    venue_type: "conference"
+    documentclass: '\documentclass[11pt]{article}'
+    column_type: "double"
+    paper_size: "letter"
+    default_font_size_pt: 11
+    text_width: "6.75in"
+    column_width: "3.26in"
+    default_figure_width: '\columnwidth'
+    default_table_width: '\columnwidth'
+    expected_pages:
+      main_body: 8
+      with_refs: null
+      with_appendix: null
+    bibliography_policy:
+      refs_count_in_limit: false
+      appendix_allowed: true
+    page_margins:
+      top: "1in"
+      bottom: "1in"
+      left: "0.75in"
+      right: "0.75in"
+    official_assets:
+      class_files: ["acl.sty"]
+      bibliography_files: ["acl_natbib.bst"]
+      template_files: ["acl_latex.tex"]
+      source_url: null
+      source_sha256: null
+      downloaded_at: null
+    required_packages: ["acl", "times"]
+    required_preamble_lines:
+      - '\usepackage[final]{acl}'
+    forbidden_packages: ["geometry"]
+    discouraged_packages: []
+    package_replacements: {}
+    macro_substitutions: {}
+    macro_compatibility:
+      removed_macros: []
+      substitutions: {}
+      required_shims: []
+    float_behavior: "ACL uses article plus acl.sty and renders in two columns"
+    float_policy:
+      wide_figure_env: "figure*"
+      wide_table_env: "table*"
+      wide_float_placement: ["t"]
+      single_float_placement: ["h", "t", "b", "p"]
+      allow_bottom_double_float: false
+    width_policy:
+      single_column_graphics: '\columnwidth'
+      double_column_graphics: '\columnwidth'
+      wide_graphics: '\textwidth'
+      single_column_tables: '\columnwidth'
+      wide_tables: '\textwidth'
+    migration_hints:
+      normalize_figure_star_when_target_single: true
+      normalize_table_star_when_target_single: true
+      add_bibliographystyle_if_missing: "acl_natbib"
+      title_affiliation_style: "acl"
+    variants:
+      submission:
+        anonymized: true
+      camera_ready:
+        anonymized: false
+    tags: ["conference", "double-column", "nlp"]
+    notes: "ACL 2025 uses article plus acl final package mode."
+
+  EMNLP2025:
+    id: "EMNLP2025"
+    name: "EMNLP 2025"
+    family: "EMNLP"
+    year: 2025
+    publisher: "ACL"
+    venue_type: "conference"
+    documentclass: '\documentclass[11pt]{article}'
+    column_type: "double"
+    paper_size: "letter"
+    default_font_size_pt: 11
+    text_width: "6.75in"
+    column_width: "3.26in"
+    default_figure_width: '\columnwidth'
+    default_table_width: '\columnwidth'
+    expected_pages:
+      main_body: 8
+      with_refs: null
+      with_appendix: null
+    bibliography_policy:
+      refs_count_in_limit: false
+      appendix_allowed: true
+    page_margins:
+      top: "1in"
+      bottom: "1in"
+      left: "0.75in"
+      right: "0.75in"
+    official_assets:
+      class_files: ["acl.sty"]
+      bibliography_files: ["acl_natbib.bst"]
+      template_files: ["acl_latex.tex"]
+      source_url: null
+      source_sha256: null
+      downloaded_at: null
+    required_packages: ["acl", "times"]
+    required_preamble_lines:
+      - '\usepackage[final]{acl}'
+    forbidden_packages: ["geometry"]
+    discouraged_packages: []
+    package_replacements: {}
+    macro_substitutions: {}
+    macro_compatibility:
+      removed_macros: []
+      substitutions: {}
+      required_shims: []
+    float_behavior: "EMNLP 2025 reuses the ACL style family in two-column article layout"
+    float_policy:
+      wide_figure_env: "figure*"
+      wide_table_env: "table*"
+      wide_float_placement: ["t"]
+      single_float_placement: ["h", "t", "b", "p"]
+      allow_bottom_double_float: false
+    width_policy:
+      single_column_graphics: '\columnwidth'
+      double_column_graphics: '\columnwidth'
+      wide_graphics: '\textwidth'
+      single_column_tables: '\columnwidth'
+      wide_tables: '\textwidth'
+    migration_hints:
+      normalize_figure_star_when_target_single: true
+      normalize_table_star_when_target_single: true
+      add_bibliographystyle_if_missing: "acl_natbib"
+      title_affiliation_style: "acl"
+    variants:
+      submission:
+        anonymized: true
+      camera_ready:
+        anonymized: false
+    tags: ["conference", "double-column", "nlp"]
+    notes: "EMNLP 2025 is configured against the ACL style family asset."
+
+  SIGIR2025:
+    id: "SIGIR2025"
+    name: "SIGIR 2025"
+    family: "SIGIR"
+    year: 2025
+    publisher: "ACM"
+    venue_type: "conference"
+    documentclass: '\documentclass[sigconf]{acmart}'
+    column_type: "double"
+    paper_size: "letter"
+    default_font_size_pt: 9
+    text_width: "7.00in"
+    column_width: "3.33in"
+    default_figure_width: '\columnwidth'
+    default_table_width: '\columnwidth'
+    expected_pages:
+      main_body: 9
+      with_refs: null
+      with_appendix: null
+    bibliography_policy:
+      refs_count_in_limit: false
+      appendix_allowed: true
+    page_margins:
+      top: "1in"
+      bottom: "1in"
+      left: "0.75in"
+      right: "0.75in"
+    official_assets:
+      class_files: ["acmart.dtx", "acmart.ins"]
+      bibliography_files: ["ACM-Reference-Format.bst"]
+      template_files: []
+      source_url: null
+      source_sha256: null
+      downloaded_at: null
+    required_packages: []
+    forbidden_packages: ["geometry"]
+    discouraged_packages: []
+    package_replacements: {}
+    macro_substitutions: {}
+    macro_compatibility:
+      removed_macros: []
+      substitutions: {}
+      required_shims: []
+    float_behavior: "ACM sigconf two-column format"
+    float_policy:
+      wide_figure_env: "figure*"
+      wide_table_env: "table*"
+      wide_float_placement: ["t"]
+      single_float_placement: ["t", "b", "p"]
+      allow_bottom_double_float: false
+    width_policy:
+      single_column_graphics: '\columnwidth'
+      double_column_graphics: '\columnwidth'
+      wide_graphics: '\textwidth'
+      single_column_tables: '\columnwidth'
+      wide_tables: '\textwidth'
+    migration_hints:
+      normalize_figure_star_when_target_single: true
+      normalize_table_star_when_target_single: true
+      add_bibliographystyle_if_missing: "ACM-Reference-Format"
+      title_affiliation_style: "acm"
+    variants:
+      submission:
+        anonymized: true
+      camera_ready:
+        anonymized: false
+    tags: ["conference", "double-column", "acm", "ir"]
+    notes: "SIGIR 2025 uses the ACM acmart sigconf format."
+
+  KDD2025:
+    id: "KDD2025"
+    name: "KDD 2025"
+    family: "KDD"
+    year: 2025
+    publisher: "ACM"
+    venue_type: "conference"
+    documentclass: '\documentclass[sigconf]{acmart}'
+    column_type: "double"
+    paper_size: "letter"
+    default_font_size_pt: 9
+    text_width: "7.00in"
+    column_width: "3.33in"
+    default_figure_width: '\columnwidth'
+    default_table_width: '\columnwidth'
+    expected_pages:
+      main_body: 10
+      with_refs: null
+      with_appendix: null
+    bibliography_policy:
+      refs_count_in_limit: false
+      appendix_allowed: true
+    page_margins:
+      top: "1in"
+      bottom: "1in"
+      left: "0.75in"
+      right: "0.75in"
+    official_assets:
+      class_files: ["acmart.dtx", "acmart.ins"]
+      bibliography_files: ["ACM-Reference-Format.bst"]
+      template_files: []
+      source_url: null
+      source_sha256: null
+      downloaded_at: null
+    required_packages: []
+    forbidden_packages: ["geometry"]
+    discouraged_packages: []
+    package_replacements: {}
+    macro_substitutions: {}
+    macro_compatibility:
+      removed_macros: []
+      substitutions: {}
+      required_shims: []
+    float_behavior: "ACM sigconf two-column format"
+    float_policy:
+      wide_figure_env: "figure*"
+      wide_table_env: "table*"
+      wide_float_placement: ["t"]
+      single_float_placement: ["t", "b", "p"]
+      allow_bottom_double_float: false
+    width_policy:
+      single_column_graphics: '\columnwidth'
+      double_column_graphics: '\columnwidth'
+      wide_graphics: '\textwidth'
+      single_column_tables: '\columnwidth'
+      wide_tables: '\textwidth'
+    migration_hints:
+      normalize_figure_star_when_target_single: true
+      normalize_table_star_when_target_single: true
+      add_bibliographystyle_if_missing: "ACM-Reference-Format"
+      title_affiliation_style: "acm"
+    variants:
+      submission:
+        anonymized: true
+      camera_ready:
+        anonymized: false
+    tags: ["conference", "double-column", "acm", "data-mining"]
+    notes: "KDD 2025 uses the ACM acmart sigconf format."
+
+defaults:
+  required_template_fields:
+    - "id"
+    - "name"
+    - "family"
+    - "year"
+    - "venue_type"
+    - "documentclass"
+    - "column_type"
+    - "default_font_size_pt"
+    - "default_figure_width"
+    - "default_table_width"
+    - "expected_pages"
+    - "bibliography_policy"
+  single_column:
+    default_figure_width: '\linewidth'
+    default_table_width: '\linewidth'
+  double_column:
+    default_figure_width: '\columnwidth'
+    default_table_width: '\columnwidth'
+    wide_figure_env: "figure*"
+    wide_table_env: "table*"
+
+detection_rules:
+  - id: "iclr2025-package"
+    priority: 100
+    match:
+      any_regex:
+        - '\\usepackage(?:\[[^\]]*\])?\{iclr2025_conference(?:,times)?\}'
+    template: "ICLR2025"
+  - id: "neurips2025-docclass"
+    priority: 100
+    match:
+      any_regex:
+        - '\\usepackage(?:\[[^\]]*\])?\{neurips_2025\}'
+    template: "NeurIPS2025"
+  - id: "cvpr-package"
+    priority: 100
+    match:
+      any_regex:
+        - '\\usepackage(?:\[[^\]]*\])?\{cvpr\}'
+    template: "CVPR2026"
+  - id: "iccv-package"
+    priority: 100
+    match:
+      any_regex:
+        - '\\usepackage(?:\[[^\]]*\])?\{iccv\}'
+    template: "ICCV2025"
+  - id: "eccv-package"
+    priority: 100
+    match:
+      any_regex:
+        - '\\usepackage(?:\[[^\]]*\])?\{eccv\}'
+    template: "ECCV2026"
+  - id: "ieeetran-docclass"
+    priority: 100
+    match:
+      any_regex:
+        - '\\documentclass(?:\[[^\]]*\])?\{IEEEtran\}'
+    template: "IEEE"
+  - id: "acl-package"
+    priority: 100
+    match:
+      any_regex:
+        - '\\usepackage(?:\[[^\]]*\])?\{acl\}'
+    template: "ACL2025"
+  - id: "icml2025-package"
+    priority: 100
+    match:
+      any_regex:
+        - '\\usepackage(?:\[[^\]]*\])?\{icml2025\}'
+    template: "ICML2025"
+  - id: "aaai2026-package"
+    priority: 100
+    match:
+      any_regex:
+        - '\\usepackage(?:\[[^\]]*\])?\{aaai2026\}'
+    template: "AAAI2026"
+  - id: "aaai-legacy-package"
+    priority: 90
+    match:
+      any_regex:
+        - '\\usepackage\{aaai25\}'
+        - '\\usepackage\{aaai24\}'
+    template: "AAAI2025"
+  - id: "generic-twocolumn"
+    priority: 10
+    match:
+      any_regex:
+        - 'twocolumn'
+    template: null
+    patch:
+      column_type: "double"
+
+source_registry:
+  official_domains:
+    - "aaai.org"
+    - "openreview.net"
+    - "neurips.cc"
+    - "thecvf.com"
+    - "aclanthology.org"
+    - "icml.cc"
+    - "ieee.org"
+  refresh_policy_days: 180

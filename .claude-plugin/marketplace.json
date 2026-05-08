@@ -1,0 +1,44 @@
+{
+  "name": "paperfit-vto",
+  "owner": {
+    "name": "OpenRaiser"
+  },
+  "metadata": {
+    "description": "PaperFit marketplace — natural-language LaTeX visual typesetting agent for Claude Code",
+    "version": "1.0.5"
+  },
+  "plugins": [
+    {
+      "name": "paperfit",
+      "description": "Natural-language paper layout analysis, repair, migration, and visual acceptance for Claude Code",
+      "version": "1.0.5",
+      "author": {
+        "name": "OpenRaiser"
+      },
+      "homepage": "https://github.com/OpenRaiser/PaperFit",
+      "repository": "https://github.com/OpenRaiser/PaperFit",
+      "license": "MIT",
+      "category": "developer-tools",
+      "tags": [
+        "latex",
+        "typesetting",
+        "academic",
+        "pdf",
+        "vto",
+        "claude-code"
+      ],
+      "keywords": [
+        "latex",
+        "typesetting",
+        "vto",
+        "pdf",
+        "agents",
+        "skills"
+      ],
+      "source": {
+        "source": "github",
+        "repo": "OpenRaiser/PaperFit"
+      }
+    }
+  ]
+}

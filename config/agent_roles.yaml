@@ -1,0 +1,67 @@
+# Agent 角色定义与调度策略
+# 供 orchestrator-agent 参考
+
+version: "1.0"
+
+agents:
+  orchestrator:
+    primary: true
+    description: "主调度器，管理闭环状态机"
+    triggers: ["/fix-layout", "/adjust-length", "/migrate-template"]
+    tools: ["paperfit run", "paperfit render", "state_manager"]
+
+  rule-engine:
+    order: 1
+    description: "解析编译日志，产出编译状态和硬约束报告"
+    input: ["compile.log"]
+    output: ["rule_report.json"]
+    blocking: true
+    tools: ["parse_log"]
+
+  layout-detective:
+    order: 2
+    description: "基于页图、日志和机检信号识别视觉缺陷"
+    input: ["page_images/", "rule_report.json"]
+    output: ["visual_diagnosis.json"]
+    requires_page_images: true
+    tools: ["visual-inspector", "detect_column_void", "extract_crossrefs"]
+
+  code-surgeon:
+    order: 3
+    description: "按缺陷类别调用修复技能，对 LaTeX 源码做最小修改"
+    input: ["visual_diagnosis.json", "rule_report.json"]
+    output: ["modified_files/", "code_changes.json"]
+    skills: ["overflow-repair", "float-optimizer", "consistency-polisher", "space-util-fixer", "template-migrator"]
+    tools: ["latex_fixers", "content_integrity_check"]
+
+  semantic-polish:
+    order: 4
+    description: "在排版修复不足时执行受控语义微调并产出审计报告"
+    input: ["semantic_request.json"]
+    output: ["semantic_changes.json"]
+    triggered_by: ["code-surgeon", "space-util-fixer"]
+    tools: ["semantic_budgeter", "writing-polish"]
+
+  quality-gatekeeper:
+    order: 5
+    description: "汇总证据链并做 DONE/CONTINUE/BLOCKED 裁决"
+    input: ["all_reports/", "evidence/"]
+    output: ["decision.json", "diagnostic_report.md"]
+    final: true
+    tools: ["gatekeeper_enforcer", "evidence_collector"]
+
+routing:
+  # 缺陷类别到修复技能的映射
+  A: space-util-fixer
+  B: float-optimizer
+  C: consistency-polisher
+  D: overflow-repair
+  E: template-migrator
+
+  # 修复技能到 Agent 的映射
+  skill_owner:
+    space-util-fixer: code-surgeon
+    float-optimizer: code-surgeon
+    consistency-polisher: code-surgeon
+    overflow-repair: code-surgeon
+    template-migrator: code-surgeon

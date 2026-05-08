@@ -1,0 +1,30 @@
+{
+  "asset_id": "ICCV2025_AUTHOR_KIT",
+  "status": "prepared",
+  "asset_type": "official_zip",
+  "source_local_path": "config/host_assets/template_kits/ICCV2025/ICCV2025-Author-Kit-Feb.zip",
+  "prepared_dir": "config/host_assets/template_kits_prepared/ICCV2025_AUTHOR_KIT",
+  "payload_dir": "config/host_assets/template_kits_prepared/ICCV2025_AUTHOR_KIT/payload",
+  "effective_root": "config/host_assets/template_kits_prepared/ICCV2025_AUTHOR_KIT/payload",
+  "zip_entry_count": 28,
+  "stripped_top_level_prefix": null,
+  "main_tex_candidates": [
+    "ICCV2025-Author-Kit-Feb/main.tex",
+    "ICCV2025-Author-Kit-Feb/preamble.tex",
+    "ICCV2025-Author-Kit-Feb/rebuttal.tex",
+    "ICCV2025-Author-Kit-Feb/sec/0_abstract.tex",
+    "ICCV2025-Author-Kit-Feb/sec/1_intro.tex",
+    "ICCV2025-Author-Kit-Feb/sec/2_formatting.tex",
+    "ICCV2025-Author-Kit-Feb/sec/3_finalcopy.tex"
+  ],
+  "style_candidates": [
+    "ICCV2025-Author-Kit-Feb/iccv.sty"
+  ],
+  "bibliography_candidates": [
+    "ICCV2025-Author-Kit-Feb/ieeenat_fullname.bst",
+    "ICCV2025-Author-Kit-Feb/main.bib"
+  ],
+  "source_candidates": [],
+  "main_tex_sample": "% ICCV 2025 Paper Template\n\\documentclass[10pt,twocolumn,letterpaper]{article}\n%%%%%%%%% PAPER TYPE  - PLEASE UPDATE FOR FINAL VERSION\n% \\usepackage{iccv}              % To produce the CAMERA-READY version\n\\usepackage[review]{iccv}      % To produce the REVIEW version\n% \\usepackage[pagenumbers]{iccv} % To force page numbers, e.g. for an arXiv version\n% Import additional packages in the preamble file, before hyperref\n\\input{preamble}",
+  "style_sample": "% ---------------------------------------------------------------\n%\n% No guarantee is given that the format corresponds perfectly to\n% IEEE 8.5\" x 11\" Proceedings, but most features should be ok.\n%\n% ---------------------------------------------------------------\n% with LaTeX2e:\n% ============="
+}

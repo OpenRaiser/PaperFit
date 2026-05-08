@@ -1,0 +1,416 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://paperfit.local/schemas/templates.schema.json",
+  "title": "PaperFit Template Registry",
+  "type": "object",
+  "required": ["version", "templates", "defaults"],
+  "properties": {
+    "version": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "templates": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/template"
+      }
+    },
+    "defaults": {
+      "$ref": "#/$defs/defaults"
+    },
+    "detection_rules": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/detection_rule"
+      }
+    },
+    "source_registry": {
+      "$ref": "#/$defs/source_registry"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "string_list": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "page_budget": {
+      "type": "object",
+      "required": ["main_body", "with_refs", "with_appendix"],
+      "properties": {
+        "main_body": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "with_refs": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "with_appendix": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "bibliography_policy": {
+      "type": "object",
+      "required": ["refs_count_in_limit", "appendix_allowed"],
+      "properties": {
+        "refs_count_in_limit": {
+          "type": "boolean"
+        },
+        "appendix_allowed": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "page_margins": {
+      "type": "object",
+      "properties": {
+        "top": {
+          "type": ["string", "null"]
+        },
+        "bottom": {
+          "type": ["string", "null"]
+        },
+        "left": {
+          "type": ["string", "null"]
+        },
+        "right": {
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "official_assets": {
+      "type": "object",
+      "properties": {
+        "class_files": {
+          "$ref": "#/$defs/string_list"
+        },
+        "bibliography_files": {
+          "$ref": "#/$defs/string_list"
+        },
+        "template_files": {
+          "$ref": "#/$defs/string_list"
+        },
+        "source_url": {
+          "type": ["string", "null"]
+        },
+        "source_sha256": {
+          "type": ["string", "null"]
+        },
+        "downloaded_at": {
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "macro_compatibility": {
+      "type": "object",
+      "properties": {
+        "removed_macros": {
+          "$ref": "#/$defs/string_list"
+        },
+        "substitutions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "required_shims": {
+          "$ref": "#/$defs/string_list"
+        }
+      },
+      "additionalProperties": false
+    },
+    "float_policy": {
+      "type": "object",
+      "properties": {
+        "wide_figure_env": {
+          "type": "string"
+        },
+        "wide_table_env": {
+          "type": "string"
+        },
+        "wide_float_placement": {
+          "$ref": "#/$defs/string_list"
+        },
+        "single_float_placement": {
+          "$ref": "#/$defs/string_list"
+        },
+        "allow_bottom_double_float": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "width_policy": {
+      "type": "object",
+      "properties": {
+        "single_column_graphics": {
+          "type": "string"
+        },
+        "double_column_graphics": {
+          "type": "string"
+        },
+        "wide_graphics": {
+          "type": "string"
+        },
+        "single_column_tables": {
+          "type": "string"
+        },
+        "wide_tables": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "migration_hints": {
+      "type": "object",
+      "properties": {
+        "normalize_figure_star_when_target_single": {
+          "type": "boolean"
+        },
+        "normalize_table_star_when_target_single": {
+          "type": "boolean"
+        },
+        "add_bibliographystyle_if_missing": {
+          "type": ["string", "null"]
+        },
+        "title_affiliation_style": {
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "variants": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "template": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "family",
+        "year",
+        "venue_type",
+        "documentclass",
+        "column_type",
+        "default_font_size_pt",
+        "default_figure_width",
+        "default_table_width",
+        "expected_pages",
+        "bibliography_policy"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "family": {
+          "type": "string"
+        },
+        "year": {
+          "type": "integer",
+          "minimum": 1900
+        },
+        "publisher": {
+          "type": ["string", "null"]
+        },
+        "venue_type": {
+          "type": "string",
+          "enum": ["conference", "journal", "workshop", "preprint", "generic"]
+        },
+        "documentclass": {
+          "type": "string"
+        },
+        "column_type": {
+          "type": "string",
+          "enum": ["single", "double"]
+        },
+        "paper_size": {
+          "type": ["string", "null"]
+        },
+        "default_font_size_pt": {
+          "type": "integer",
+          "minimum": 8,
+          "maximum": 14
+        },
+        "text_width": {
+          "type": ["string", "null"]
+        },
+        "column_width": {
+          "type": ["string", "null"]
+        },
+        "default_figure_width": {
+          "type": "string"
+        },
+        "default_table_width": {
+          "type": "string"
+        },
+        "expected_pages": {
+          "$ref": "#/$defs/page_budget"
+        },
+        "bibliography_policy": {
+          "$ref": "#/$defs/bibliography_policy"
+        },
+        "page_margins": {
+          "$ref": "#/$defs/page_margins"
+        },
+        "official_assets": {
+          "$ref": "#/$defs/official_assets"
+        },
+        "required_packages": {
+          "$ref": "#/$defs/string_list"
+        },
+        "required_preamble_lines": {
+          "$ref": "#/$defs/string_list"
+        },
+        "forbidden_packages": {
+          "$ref": "#/$defs/string_list"
+        },
+        "discouraged_packages": {
+          "$ref": "#/$defs/string_list"
+        },
+        "package_replacements": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "macro_substitutions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "macro_compatibility": {
+          "$ref": "#/$defs/macro_compatibility"
+        },
+        "float_behavior": {
+          "type": ["string", "null"]
+        },
+        "float_policy": {
+          "$ref": "#/$defs/float_policy"
+        },
+        "width_policy": {
+          "$ref": "#/$defs/width_policy"
+        },
+        "migration_hints": {
+          "$ref": "#/$defs/migration_hints"
+        },
+        "variants": {
+          "$ref": "#/$defs/variants"
+        },
+        "validation_targets": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "tags": {
+          "$ref": "#/$defs/string_list"
+        },
+        "notes": {
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": true
+    },
+    "defaults": {
+      "type": "object",
+      "required": ["single_column", "double_column"],
+      "properties": {
+        "required_template_fields": {
+          "$ref": "#/$defs/string_list"
+        },
+        "single_column": {
+          "type": "object",
+          "properties": {
+            "default_figure_width": {
+              "type": "string"
+            },
+            "default_table_width": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        "double_column": {
+          "type": "object",
+          "properties": {
+            "default_figure_width": {
+              "type": "string"
+            },
+            "default_table_width": {
+              "type": "string"
+            },
+            "wide_figure_env": {
+              "type": "string"
+            },
+            "wide_table_env": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "detection_rule": {
+      "type": "object",
+      "required": ["id", "priority", "match", "template"],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "match": {
+          "type": "object",
+          "properties": {
+            "any_regex": {
+              "$ref": "#/$defs/string_list"
+            }
+          },
+          "required": ["any_regex"],
+          "additionalProperties": false
+        },
+        "template": {
+          "type": ["string", "null"]
+        },
+        "patch": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "source_registry": {
+      "type": "object",
+      "properties": {
+        "official_domains": {
+          "$ref": "#/$defs/string_list"
+        },
+        "refresh_policy_days": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,647 @@
+# VTO Taxonomy Configuration
+# Visual Typesetting Optimization 缺陷分类体系
+# 用于 layout-detective-agent 的诊断依据和修复策略路由
+
+version: "1.0"
+description: "学术论文视觉排版缺陷的层次化分类体系，定义 VTO 任务的评价维度"
+
+observation_primitives:
+  - id: OP1
+    name: "页内密度分布"
+    description: "按页、栏、区域统计文本/图表/空白的面积和纵向投影，用于 A2/A4/A5/A6"
+  - id: OP2
+    name: "边界接触"
+    description: "检测文本、公式、图片是否接触或越过页/栏边界，用于 D 类"
+  - id: OP3
+    name: "对象簇与间距"
+    description: "检测图表块、表格块的连续堆叠和正文夹层缺失，用于 B3/B5"
+  - id: OP4
+    name: "跨页引用-对象对应"
+    description: "结合 crossrefs、页码和对象定位判断图表距首次引用的距离，用于 B1"
+  - id: OP5
+    name: "跨页一致性"
+    description: "比较多页 caption、表格字号、图像风格和视觉尺度一致性，用于 C 类"
+
+categories:
+  - id: A
+    name: "空间利用缺陷"
+    name_en: "Space Utilization Defects"
+    description: "页面空间分配不合理，导致留白、孤行、页数失衡等问题"
+    severity_default: major
+
+  - id: B
+    name: "浮动体缺陷"
+    name_en: "Float Placement Defects"
+    description: "图表浮动体位置不当，影响阅读流畅性和版式美观"
+    severity_default: major
+
+  - id: C
+    name: "排版一致性缺陷"
+    name_en: "Consistency Defects"
+    description: "全篇排版风格不一致，如字号、图片质量、标题格式参差"
+    severity_default: minor
+
+  - id: D
+    name: "溢出与对齐缺陷"
+    name_en: "Overflow & Alignment Defects"
+    description: "内容超出栏宽或未正确断行，导致视觉溢出或对齐混乱"
+    severity_default: major
+
+  - id: E
+    name: "跨模板迁移缺陷"
+    name_en: "Cross-Template Transfer Defects"
+    description: "切换模板后产生的图表尺寸失配、页数预算改变等问题"
+    severity_default: critical
+
+defects:
+  # ------------------------------------------------------------
+  # Category A: Space Utilization Defects
+  # ------------------------------------------------------------
+  - id: A1
+    category: A
+    name: "孤行/寡行"
+    name_en: "Widow/Orphan Lines"
+    severity: major
+    description: "段落最后一行单独出现在下一页顶部（孤行），或段落第一行单独留在上一页底部（寡行）；也包括段尾仅含两三个单词的'小尾巴'"
+    detection:
+      visual_indicators:
+        - "页面顶部或底部出现极短的文本行"
+        - "段尾行长度小于栏宽的 1/4"
+        - "跨页段落断开位置不自然"
+      log_signals: [] # 无日志信号
+      page_image_required: true
+    fix_strategy:
+      primary_skill: space-util-fixer
+      approaches:
+        - '全局 penalty 防护（\widowpenalty=10000, \clubpenalty=10000）'
+        - '\looseness=-1 紧缩排版（消除小尾巴）'
+        - '\looseness=1 扩展排版（填充空白）'
+        - "语义级微调（最后手段，增删 3-8 词）"
+      semantic_allowed: true
+      semantic_constraints:
+        - "仅允许增删 3-8 个单词"
+        - "不改变数据、结论、引用含义"
+        - "优先使用排版手段，语义干预为最后手段"
+    evaluation_metric:
+      name: "widow_orphan_count"
+      target: 0
+
+  - id: A2
+    category: A
+    name: "末页大面积留白"
+    name_en: "Excessive Trailing Whitespace"
+    severity: major
+    description: "论文最后一页（参考文献之前或之后）存在过大的空白区域，显得内容单薄"
+    detection:
+      visual_indicators:
+        - "末页空白面积超过页面高度的 20%"
+        - "参考文献页底部大面积空白"
+      log_signals: []
+      page_image_required: true
+      threshold:
+        max_whitespace_ratio: 0.20
+    fix_strategy:
+      primary_skill: space-util-fixer
+      approaches:
+        - "调整浮动体位置，将图表前移填充空白"
+        - '微调段落间距或 \looseness'
+        - "适当扩写结论/讨论部分（语义级）"
+        - "压缩过宽的页边距（谨慎）"
+      semantic_allowed: true
+      semantic_constraints:
+        - "仅限结论、分析段落、方法末尾"
+        - "不可引入新实验或数据"
+    evaluation_metric:
+      name: "last_page_whitespace_ratio"
+      target: "<0.20"
+
+  - id: A3
+    category: A
+    name: "页数预算违反"
+    name_en: "Page Budget Violation"
+    severity: critical
+    description: "论文总页数超出或不足会议/期刊规定页数（如要求 9 页，实际 8 或 10 页）"
+    detection:
+      visual_indicators:
+        - "PDF 总页数与用户指定目标不符"
+      log_signals: []
+      page_image_required: false
+    fix_strategy:
+      primary_skill: space-util-fixer
+      approaches:
+        - "若超页：压缩浮动体、缩减参考文献、精炼文字"
+        - "若不满页：扩写结论/讨论、微调图表尺寸、增加分析深度"
+      semantic_allowed: true
+      semantic_constraints:
+        - "不引入新数据或虚构内容"
+        - "优先调整非核心章节"
+    evaluation_metric:
+      name: "page_count_match"
+      target: true
+
+  - id: A4
+    category: A
+    name: "双栏末页左右栏高度不齐"
+    name_en: "Unbalanced Column Heights"
+    severity: minor
+    description: "双栏排版的最后一页，左右两栏底部高度不一致，影响视觉平衡"
+    detection:
+      visual_indicators:
+        - "双栏布局末页左右栏底部高度差超过 2 行"
+      log_signals: []
+      page_image_required: true
+    fix_strategy:
+      primary_skill: space-util-fixer
+      approaches:
+        - '使用 \balance 或 \flushend 宏包'
+        - "手动调整最后一节的分栏断点"
+        - "微调浮动体位置"
+      semantic_allowed: false
+    evaluation_metric:
+      name: "column_height_diff_lines"
+      target: "<=2"
+
+  - id: A5
+    category: A
+    name: "双栏页内列竖向空洞"
+    name_en: "Intra-Column Vertical Void (Two-Column)"
+    severity: major
+    description: >-
+      双栏排版某一页中，左栏或右栏在标题/段落后出现占该栏可排版高度很大比例的连续空白，
+      且该空白内无正文、无图、无表；而另一栏在相近纵坐标区间仍有连续正文。与末页留白(A2)、
+      末页栏底不齐(A4)不同，多由跨栏浮动体占位、不当 \\ 或 \\newpage、\\FloatBarrier、
+      [H] 固定浮动体、\\vfill 等破坏纵向节奏引起。
+    detection:
+      visual_indicators:
+        - "将单栏按水平一分为二，分别估计左右栏的「墨迹」纵坐标覆盖；若一栏出现高度 > 栏高 30% 的无墨迹竖带，且相邻上下均有正文块，则高度怀疑"
+        - "同一纵坐标窗口内，一栏为大片白而另一栏为连续段落（列间密度严重失衡）"
+        - "节标题（如 Experiments）正下方出现异常大段空白，正文在栏底部才继续"
+        - '可选自动化：paperfit run scripts/detect_column_void.py（OpenCV 行向墨迹投影，输出 a5_candidates）'
+      log_signals:
+        - "LaTeX Warning: Float too large for page"
+        - 'Underfull \vbox (badness ...)'
+      page_image_required: true
+      threshold:
+        min_void_ratio_of_column: 0.30
+        min_void_height_lines: 8
+    fix_strategy:
+      primary_skill: space-util-fixer
+      approaches:
+        - '检查本页及前后页的 figure*/table* 与 \\clearpage、\\FloatBarrier；必要时前移/后移源码中的浮动环境'
+        - '移除不当的 \\、\\newpage、\\vfill；避免滥用 float 宏包 [H]'
+        - '微调段落 \\looseness 或局部措辞，使分栏断点避开大块空白（语义手段为最后选择）'
+      semantic_allowed: true
+      semantic_constraints:
+        - "语义微调仅限消除断裂，不引入新结论或数据"
+    evaluation_metric:
+      name: "intra_column_void_ratio"
+      target: "<0.30"
+
+  - id: A6
+    category: A
+    name: "页内密度突变"
+    name_en: "Abrupt Intra-Page Density Shift"
+    severity: minor
+    description: "同页相邻区域文本密度或块级节奏突变，虽未形成 A5 级大空洞，但已造成明显视觉断裂"
+    detection:
+      visual_indicators:
+        - "相邻上下区域文本密度变化过大，出现非自然的疏密跳变"
+        - "标题后或浮动体后出现异常松散但未达到 A5 阈值的区域"
+      log_signals:
+        - 'Underfull \vbox (badness ...)'
+      page_image_required: true
+      observation_primitives: [OP1]
+    fix_strategy:
+      primary_skill: space-util-fixer
+      approaches:
+        - "先调整 float placement 和段落松紧，再决定是否语义微调"
+        - "避免把 A6 误用成 A5 或 A2"
+      semantic_allowed: false
+    evaluation_metric:
+      name: "local_density_shift_ratio"
+      target: "<=0.18"
+
+  # ------------------------------------------------------------
+  # Category B: Float Placement Defects
+  # ------------------------------------------------------------
+  - id: B1
+    category: B
+    name: "浮动体远离首次引用"
+    name_en: "Float-Reference Distance"
+    severity: major
+    description: '图表出现在距离其首次被引用的页面过远的位置，读者需翻页查找；或者图表被挤压到异常小的尺寸（如指定 0.98\linewidth 但实际渲染宽度不足栏宽的 50%）'
+    detection:
+      visual_indicators:
+        - "图表所在页码与首次引用页码差值 >= 2"
+        - '图表渲染尺寸显著小于源码指定的\linewidth 比例（如指定 0.98\linewidth 但实际宽度不足栏宽 50%）'
+        - "多个图表被压缩到同一页，导致所有图表尺寸异常偏小"
+      log_signals:
+        - "LaTeX Warning: Float too large for page"
+        - "LaTeX Warning: Float too large for column"
+      page_image_required: true
+      cross_reference_check: |
+        第一步：运行源码交叉引用分析
+        paperfit run scripts/extract_crossrefs.py main.tex --output data/crossrefs.json
+
+        第二步：解读输出
+        - 从 data/crossrefs.json 读取每个图表的首次引用行号 (ref_line) 和图表定义行号 (figure_line)
+        - 计算源码距离：line_distance = |ref_line - figure_line|
+        - 若 line_distance < 50 且 section_distance = 0 → 源码组织良好
+        - 若 line_distance > 100 或 section_distance >= 1 → 源码层面引用与定义相距较远
+
+        第三步：结合视觉检测
+        - 从 PDF 页图或文本层提取图表实际渲染页码与首次引用页码
+        - 若视觉页码差值 >= 2，记录缺陷
+        - 若源码距离近但视觉距离远 → 典型 LaTeX 浮动体放置问题（使用 float-optimizer）
+        - 若源码距离远且视觉距离远 → 需调整源码结构（移动引用或图表定义）
+
+        第四步：尺寸异常检测
+        - 从页图测量图表实际渲染宽度，与源码指定的\linewidth 比例对比
+        - 若指定 0.9\linewidth 但实际宽度不足栏宽 50%，或图表被异常压缩 → 标记为 B1-B（placement 异常导致的尺寸压缩）
+    fix_strategy:
+      primary_skill: float-optimizer
+      approaches:
+        - "调整浮动体位置参数为 [htbp]（增加 placement 灵活性）"
+        - '使用 \FloatBarrier 或\clearpage 控制浮动体边界'
+        - "微调图表前后正文数量，改变浮动体落点"
+        - "调整 float placement 参数：\renewcommand{\topfraction}{0.85} 等"
+        - "必要时将 figure 改为 figure*（跨栏）或反之"
+      semantic_allowed: false
+    evaluation_metric:
+      name: "float_reference_distance_pages"
+      target: "<=1"
+
+  - id: B2
+    category: B
+    name: "浮动体大小不适配栏宽"
+    name_en: "Float Width Mismatch"
+    severity: major
+    description: '图片或表格的宽度未充分利用当前栏宽，过窄或过宽；表格使用 \resizebox 暴力缩放导致字号不一'
+    detection:
+      visual_indicators:
+        - "图表宽度明显小于栏宽（两侧留白过大）"
+        - "图表超出栏宽导致内容被截断或溢出"
+        - '表格使用 \resizebox 导致字号不一致'
+      log_signals:
+        - 'Overfull \hbox (图片相关)'
+      page_image_required: true
+    fix_strategy:
+      primary_skill: float-optimizer
+      approaches:
+        - '图片设置 \includegraphics[width=\textwidth]'
+        - '表格使用 tabularx + \textwidth + 弹性 X 列'
+        - '微调 \tabcolsep 列间距'
+        - "双栏模板使用 table*/figure* 跨栏"
+        - '绝对禁止 \resizebox 暴力缩放'
+      semantic_allowed: false
+    evaluation_metric:
+      name: "float_width_utilization"
+      target: ">0.95 且 <=1.0"
+
+  - id: B3
+    category: B
+    name: "浮动体连续堆叠"
+    name_en: "Float Clustering"
+    severity: minor
+    description: "连续多个图表堆叠在一起，中间缺少正文间隔，形成'图表页'"
+    detection:
+      visual_indicators:
+        - "同一页或连续两页出现 >=3 个图表且正文极少"
+      log_signals: []
+      page_image_required: true
+    fix_strategy:
+      primary_skill: float-optimizer
+      approaches:
+        - "分散浮动体位置参数"
+        - "在图表间插入少量正文"
+        - "将部分图表移至附录"
+      semantic_allowed: false
+    evaluation_metric:
+      name: "max_consecutive_floats"
+      target: "<=2"
+
+  - id: B4
+    category: B
+    name: "浮动体跨页分裂"
+    name_en: "Float Page Orphaning"
+    severity: minor
+    description: "一个图表（特别是跨页的长表格）在不适当的位置断开，跨两页显示"
+    detection:
+      visual_indicators:
+        - "表格被分页符截断，表头未在第二页重复"
+      log_signals: []
+      page_image_required: true
+    fix_strategy:
+      primary_skill: float-optimizer
+      approaches:
+        - "对于表格，使用 longtable 或 supertabular"
+        - "调整浮动体大小避免分页"
+        - "手动控制分页点"
+      semantic_allowed: false
+    evaluation_metric:
+      name: "float_split_improper"
+      target: 0
+
+  - id: B5
+    category: B
+    name: "浮动体页正文支撑不足"
+    name_en: "Float-Dominated Page"
+    severity: major
+    description: "页面主要被图表占据，正文支撑不足，虽未严格形成连续堆叠，但阅读流中断明显"
+    detection:
+      visual_indicators:
+        - "单页浮动体面积显著高于正文面积"
+        - "图表之间或图表与正文之间缺少过渡文本"
+      log_signals:
+        - "LaTeX Warning: Float too large for page"
+      page_image_required: true
+      observation_primitives: [OP1, OP3]
+    fix_strategy:
+      primary_skill: float-optimizer
+      approaches:
+        - "重新分散浮动体到相邻页面"
+        - "为图表前后恢复必要正文支撑"
+      semantic_allowed: false
+    evaluation_metric:
+      name: "float_area_ratio_per_page"
+      target: "<=0.65"
+
+  # ------------------------------------------------------------
+  # Category C: Consistency Defects
+  # ------------------------------------------------------------
+  - id: C1
+    category: C
+    name: "表格字号不统一"
+    name_en: "Inconsistent Table Font Sizes"
+    severity: minor
+    description: '全篇表格使用了不同字号，通常由 \resizebox 或手动 \tiny/\small 滥用造成'
+    detection:
+      visual_indicators:
+        - "不同表格的字号大小明显不一致"
+      log_signals:
+        - '\resizebox 命令的过度使用'
+      page_image_required: true
+    fix_strategy:
+      primary_skill: consistency-polisher
+      approaches:
+        - '移除 \resizebox，重构表格列格式'
+        - '统一使用 \small 或模板默认字号'
+        - "确保所有表格风格一致"
+      semantic_allowed: false
+    evaluation_metric:
+      name: "table_font_size_consistency"
+      target: true
+
+  - id: C2
+    category: C
+    name: "图片分辨率/风格不一致"
+    name_en: "Inconsistent Figure Quality/Style"
+    severity: minor
+    description: "论文中图片分辨率差异大，或风格（如字体、配色）不统一"
+    detection:
+      visual_indicators:
+        - "图片模糊、锯齿严重"
+        - "矢量图与低分辨率位图混用"
+        - "不同图的配色、线条风格差异大"
+      log_signals: []
+      page_image_required: true
+    fix_strategy:
+      primary_skill: consistency-polisher
+      approaches:
+        - "提示用户替换低质量图片"
+        - "若为矢量图，检查编译方式"
+        - "（本系统不自动重绘图片，仅诊断）"
+      semantic_allowed: false
+    evaluation_metric:
+      name: "figure_quality_consistency"
+      target: true
+      note: "依赖用户手动替换"
+
+  - id: C3
+    category: C
+    name: "Caption 格式不统一"
+    name_en: "Inconsistent Caption Format"
+    severity: minor
+    description: "图表标题的字体、间距、编号格式、结尾标点不一致"
+    detection:
+      visual_indicators:
+        - "有的 caption 加粗，有的未加粗"
+        - "有的以句号结尾，有的无标点"
+        - "表格标题位置不一致（有的在上，有的在下）"
+      log_signals: []
+      page_image_required: true
+    fix_strategy:
+      primary_skill: consistency-polisher
+      approaches:
+        - '使用 \captionsetup 统一设置'
+        - "确保所有 caption 命令前后一致"
+        - "检查并统一标点"
+      semantic_allowed: false
+    evaluation_metric:
+      name: "caption_format_consistency"
+      target: true
+
+  - id: C4
+    category: C
+    name: "对象间距节奏不一致"
+    name_en: "Object Spacing Rhythm Inconsistency"
+    severity: minor
+    description: "caption、图表、正文之间的垂直间距在跨页或跨对象时明显不一致"
+    detection:
+      visual_indicators:
+        - "同类图表/表格在跨页时上下留白差异明显"
+        - "caption 与对象主体的距离不一致"
+      log_signals: []
+      page_image_required: true
+      observation_primitives: [OP5]
+    fix_strategy:
+      primary_skill: consistency-polisher
+      approaches:
+        - "统一 caption skip 和对象周围垂直间距"
+        - "消除局部人工 vspace 的节奏破坏"
+      semantic_allowed: false
+    evaluation_metric:
+      name: "object_spacing_variance"
+      target: "<=configured_threshold"
+
+  # ------------------------------------------------------------
+  # Category D: Overflow & Alignment Defects
+  # ------------------------------------------------------------
+  - id: D1
+    category: D
+    name: "Overfull hbox"
+    name_en: "Overfull hbox"
+    severity: major
+    description: "文本行或表格单元格内容超出栏宽，LaTeX 无法自动断行"
+    detection:
+      visual_indicators:
+        - "内容伸出右边界，可能被截断"
+      log_signals:
+        - 'Overfull \hbox (pt 值) in paragraph'
+        - 'Overfull \hbox (pt 值) in alignment'
+      page_image_required: true
+    fix_strategy:
+      primary_skill: overflow-repair
+      approaches:
+        - '对于文本：调整断词、引入 \- 连字符、微调句子'
+        - "对于表格：重构列格式、允许换行"
+        - "对于公式：改用 align/multline 环境"
+      semantic_allowed: true
+      semantic_constraints:
+        - "仅允许局部微调单词或句子结构"
+    evaluation_metric:
+      name: "overfull_hbox_count"
+      target: 0
+
+  - id: D2
+    category: D
+    name: "长公式未合理断行"
+    name_en: "Unbroken Long Equations"
+    severity: major
+    description: "过长的数学公式未在多行环境中断行，导致溢出或视觉拥挤"
+    detection:
+      visual_indicators:
+        - "公式明显超出栏宽"
+        - "公式在等号处未对齐"
+      log_signals:
+        - 'Overfull \hbox 在 equation 环境'
+      page_image_required: true
+    fix_strategy:
+      primary_skill: overflow-repair
+      approaches:
+        - "将 equation 替换为 align、multline 或 split"
+        - "在运算符处断行并合理对齐"
+      semantic_allowed: false
+    evaluation_metric:
+      name: "long_equation_overflow_count"
+      target: 0
+
+  - id: D3
+    category: D
+    name: "URL/长标识符溢出"
+    name_en: "URL/Long Identifier Overflow"
+    severity: minor
+    description: "参考文献或正文中的 URL、DOI、长标识符超出栏宽"
+    detection:
+      visual_indicators:
+        - "URL 伸出右边界"
+      log_signals:
+        - 'Overfull \hbox 在参考文献区域'
+      page_image_required: true
+    fix_strategy:
+      primary_skill: overflow-repair
+      approaches:
+        - '使用 \url 命令（可自动断行）'
+        - "在参考文献样式中启用断行"
+        - "手动添加断行点"
+      semantic_allowed: false
+    evaluation_metric:
+      name: "url_overflow_count"
+      target: 0
+
+  # ------------------------------------------------------------
+  # Category E: Cross-Template Transfer Defects
+  # ------------------------------------------------------------
+  - id: E1
+    category: E
+    name: "单栏↔双栏图表尺寸失配"
+    name_en: "Single/Double Column Figure Mismatch"
+    severity: critical
+    description: "模板切换后，原为全宽的图表在新模板下尺寸不当（过小或溢出）"
+    detection:
+      visual_indicators:
+        - "原单栏全宽图在双栏中仍占单栏，显得过小"
+        - "原双栏跨栏图在单栏中尺寸异常"
+      log_signals: []
+      page_image_required: true
+    fix_strategy:
+      primary_skill: template-migrator
+      approaches:
+        - "检测图片宽高比，智能决定使用 figure 还是 figure*"
+        - '将 \textwidth 替换为 \linewidth 或 \columnwidth'
+        - "重新计算图表尺寸"
+      semantic_allowed: false
+    evaluation_metric:
+      name: "figure_width_adaptation"
+      target: true
+
+  - id: E2
+    category: E
+    name: "页数预算不匹配"
+    name_en: "Page Budget Mismatch"
+    severity: critical
+    description: "模板切换后总页数与目标页数相差较大（如 9 页→14 页）"
+    detection:
+      visual_indicators:
+        - "PDF 总页数与目标模板预期不符"
+      log_signals: []
+      page_image_required: false
+    fix_strategy:
+      primary_skill: template-migrator
+      approaches:
+        - "分析各章节信息密度，计算扩写/缩写弹性"
+        - "在 Discussion、Related Work 等处进行语义级扩写或精炼"
+        - "调整图表尺寸和浮动体位置"
+      semantic_allowed: true
+      semantic_constraints:
+        - "优先在非核心章节操作"
+        - "不引入新实验数据"
+    evaluation_metric:
+      name: "page_budget_match"
+      target: true
+
+  - id: E3
+    category: E
+    name: "模板特定宏兼容性"
+    name_en: "Template-Specific Macro Compatibility"
+    severity: critical
+    description: "新模板中使用了已废弃或冲突的宏包、命令"
+    detection:
+      visual_indicators:
+        - "编译失败或部分内容未渲染"
+      log_signals:
+        - "Undefined control sequence"
+        - "Option clash for package"
+      page_image_required: false
+    fix_strategy:
+      primary_skill: template-migrator
+      approaches:
+        - "根据新模板文档替换或删除冲突命令"
+        - "使用条件编译适配不同模板"
+        - "提供替代宏包建议"
+      semantic_allowed: false
+    evaluation_metric:
+      name: "compilation_success"
+      target: true
+
+# 全局严重等级定义
+severity_levels:
+  critical:
+    description: "必须修复，否则论文不符合投稿要求"
+    gate_blocking: true
+  major:
+    description: "严重影响视觉专业度，强烈建议修复"
+    gate_blocking: true
+  minor:
+    description: "影响美观但不致命，可在时间充裕时修复"
+    gate_blocking: false
+
+confidence_policy:
+  high_confidence:
+    requires:
+      - "至少一条机器信号与页图直观证据一致"
+  medium_confidence:
+    requires:
+      - "仅有单一证据源，或跨页关系未完全确认"
+  low_confidence:
+    requires:
+      - "纯视觉猜测，缺少机器信号或日志佐证"
+
+# 修复策略到 Skill 的映射表（供 orchestrator 路由）
+skill_routing:
+  space-util-fixer: [A1, A2, A3, A4, A5, A6]
+  float-optimizer: [B1, B2, B3, B4, B5]
+  consistency-polisher: [C1, C2, C3, C4]
+  overflow-repair: [D1, D2, D3]
+  template-migrator: [E1, E2, E3]
+  semantic-micro-tuning: [A1, A2, A3, E2]

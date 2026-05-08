@@ -1,0 +1,132 @@
+# 版式硬规则与阈值配置
+# 供 layout-detective-agent 和 quality-gatekeeper-agent 使用
+
+version: "1.0"
+
+# 页面空白阈值
+whitespace:
+  trailing_whitespace_max_ratio: 0.20      # 末页最大允许空白比例
+  float_page_whitespace_warning: 0.40      # 浮动页空白超过此比例则警告
+  column_balance_max_diff_lines: 2          # 双栏末页允许的最大高度差（行数）
+
+# 双栏页内单列竖向空洞（A5），与末页留白(A2)、末页栏底不齐(A4)区分
+intra_column_void:
+  min_void_ratio_of_column: 0.30             # 单列内连续无正文的竖区占该栏可排版高度比例超过此值则 flag
+  min_void_height_lines: 8                 # 且竖区高度至少相当于此行数（与模板字号联动目测）
+
+# 表格规则
+table:
+  min_width_utilization: 0.85               # 表格宽度最低利用率（低于此值为过窄）
+  max_width_utilization: 1.0                # 表格宽度最高利用率（超过此值为溢出）
+  allowed_font_sizes: ["small", "footnotesize"]  # 允许的表格字号
+  forbid_resizebox: true                    # 禁止使用 \resizebox
+  preserve_font_appearance: true            # 宽度修复不得改变表格字体风格/家族观感
+  prefer_tabular_for_numeric_tables: true   # 数值型表优先保留原始 tabular 与对齐语义
+
+# 浮动体规则
+float:
+  max_reference_distance_pages: 1           # 图表距首次引用的最大页数差
+  max_consecutive_floats: 2                 # 连续浮动体最大数量
+  min_text_between_floats_lines: 3          # 浮动体之间最少正文行数
+  forbidden_position_params: ["p", "!p"]   # 禁止把浮动体直接推入 float page
+
+# 公式规则
+equation:
+  max_width_ratio: 0.95                     # 公式最大宽度占栏宽比例
+  overflow_severity_threshold_pt: 5.0       # 溢出超过此值视为 major
+
+# 段落规则
+paragraph:
+  widow_orphan_detection: true              # 检测孤行寡行
+  short_last_line_max_ratio: 0.25           # 段末行长度小于此比例视为"小尾巴"
+  looseness_max_attempts: 2                 # \looseness 最大尝试次数
+  global_penalty_enabled: true              # 启用全局孤行防护（\widowpenalty=10000）
+
+# 字体规则
+font:
+  enforce_consistency: true                 # 强制全文字体一致性
+  forbidden_commands: ["\\tiny", "\\scriptsize"]  # 禁止在正文/表格中使用的字号
+  preserve_body_font_appearance: true       # repair 不得修改正文模板字体家族/字重/观感
+  preserve_table_font_appearance: true      # repair 不得改变表格字体家族/字重/观感
+  forbid_font_family_switch_in_repairs: true  # repair 不得引入新的字体家族切换命令
+
+# 语义微调规则
+semantic:
+  min_words_to_modify: 3                  # 最少修改单词数
+  max_words_to_modify: 15                 # 最多修改单词数
+  allowed_sections: ["Conclusion", "Discussion", "Results", "Analysis"]  # 允许语义干预的章节
+  expand_phrases_enabled: true            # 启用逻辑连接词扩展
+  shorten_fillers_enabled: true           # 启用填充词精简
+  passive_to_active_enabled: true         # 启用被动转主动语态
+
+# 全局一致性
+consistency:
+  caption_style_enforce: true               # 强制统一标题风格
+  table_font_size_enforce: true             # 强制统一表格字号
+
+# 结构化视觉信号融合
+visual_signals:
+  min_confidence_to_route: 0.75             # 低于此值的单页 CV 信号不直接进入高优先级修复路由
+  min_major_signals_per_page: 1             # 单页 major 信号达到此数量时标为优先审查页
+  prefer_machine_summary_before_vlm: true   # 优先让 agent 读取 visual_signal_report 再看裸页图
+  require_cross_page_comparison_for_b1: true
+  require_log_corroboration_for_d_class: true
+  object_width_min_ratio: 0.95              # figure/table 宽度利用率低于此值时提示 B2
+  caption_gap_variance_px: 40               # caption 与对象间距最大允许波动
+  caption_pair_max_gap_px: 120              # 同页 caption-object 配对最大像素距离
+  priority_object_top_k: 6                  # 输出最高优先级对象数量上限
+  priority_object_max_per_page: 2          # 单页最多保留多少个优先对象，避免路由被单页噪声淹没
+  priority_object_missing_caption_score: 35 # 缺失 caption 配对时的基础风险分
+  priority_object_low_width_score: 25       # 宽度利用不足时的基础风险分
+  priority_object_large_gap_score: 18       # caption 间距过大时的基础风险分
+
+cv_detector:
+  content_binary_threshold: 240
+  float_kernel_size: 15
+  float_min_width_ratio: 0.30
+  float_min_height_px: 150
+  float_max_height_ratio: 0.80
+  float_min_density: 0.10
+  text_band_density_factor: 0.55
+  text_band_min_rows: 12
+  caption_band_min_height_px: 12
+  caption_band_max_height_px: 80
+  caption_band_min_width_ratio: 0.20
+  caption_band_max_width_ratio: 0.85
+  whitespace_pixel_threshold: 240
+  trailing_whitespace_major_ratio: 0.30
+  bottom_region_start_ratio: 0.70
+  bottom_whitespace_threshold: 0.15
+  overflow_margin_px: 20
+  overflow_dark_pixel_threshold: 50
+  overflow_min_pixels: 100
+  column_binarize_threshold: 200
+  column_imbalance_threshold: 0.10
+  column_imbalance_major_threshold: 0.15
+  float_clustering_min_distance_px: 100
+  density_shift_threshold: 0.18
+  density_shift_major_delta: 0.08
+  float_dominated_threshold: 0.65
+  short_line_binarize_threshold: 200
+  short_line_projection_threshold: 10
+  short_line_width_ratio: 0.30
+
+gatekeeper:
+  require_visual_signal_report_when_rendered: true
+  require_visual_summary_when_rendered: true
+  block_repair_execution_statuses: ["failed", "error"]
+  category_thresholds:
+    normal:
+      A: ["critical", "major"]
+      B: ["critical", "major"]
+      C: ["critical", "major"]
+      D: ["critical", "major"]
+      E: ["critical", "major", "minor", "unknown"]
+      SYSTEM: ["critical", "major", "unknown"]
+    strict:
+      A: ["critical", "major", "minor", "unknown"]
+      B: ["critical", "major", "minor", "unknown"]
+      C: ["critical", "major", "minor", "unknown"]
+      D: ["critical", "major", "minor", "unknown"]
+      E: ["critical", "major", "minor", "unknown"]
+      SYSTEM: ["critical", "major", "minor", "unknown"]

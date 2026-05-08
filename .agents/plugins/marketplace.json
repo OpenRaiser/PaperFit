@@ -1,0 +1,20 @@
+{
+  "name": "paperfit-local",
+  "interface": {
+    "displayName": "PaperFit Local"
+  },
+  "plugins": [
+    {
+      "name": "paperfit",
+      "source": {
+        "source": "local",
+        "path": "./plugins/paperfit"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Coding"
+    }
+  ]
+}

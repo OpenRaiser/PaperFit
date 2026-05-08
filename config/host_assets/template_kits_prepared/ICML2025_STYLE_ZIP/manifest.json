@@ -1,0 +1,27 @@
+{
+  "asset_id": "ICML2025_STYLE_ZIP",
+  "status": "prepared",
+  "asset_type": "official_zip",
+  "source_local_path": "config/host_assets/template_kits/ICML2025/icml2025.zip",
+  "prepared_dir": "config/host_assets/template_kits_prepared/ICML2025_STYLE_ZIP",
+  "payload_dir": "config/host_assets/template_kits_prepared/ICML2025_STYLE_ZIP/payload",
+  "effective_root": "config/host_assets/template_kits_prepared/ICML2025_STYLE_ZIP/payload/icml2025",
+  "zip_entry_count": 10,
+  "stripped_top_level_prefix": "icml2025",
+  "main_tex_candidates": [
+    "example_paper.tex"
+  ],
+  "style_candidates": [
+    "algorithm.sty",
+    "algorithmic.sty",
+    "fancyhdr.sty",
+    "icml2025.sty"
+  ],
+  "bibliography_candidates": [
+    "icml2025.bst",
+    "example_paper.bib"
+  ],
+  "source_candidates": [],
+  "main_tex_sample": "%%%%%%%% ICML 2025 EXAMPLE LATEX SUBMISSION FILE %%%%%%%%%%%%%%%%%\n\\documentclass{article}\n% Recommended, but optional, packages for figures and better typesetting:\n\\usepackage{microtype}\n\\usepackage{graphicx}\n\\usepackage{subfigure}\n\\usepackage{booktabs} % for professional tables\n% hyperref makes hyperlinks in the resulting PDF.",
+  "style_sample": "% ALGORITHM STYLE -- Released 8 April 1996\n%    for LaTeX-2e\n% Copyright -- 1994 Peter Williams\n% E-mail Peter.Williams@dsto.defence.gov.au\n\\NeedsTeXFormat{LaTeX2e}\n\\ProvidesPackage{algorithm}\n\\typeout{Document Style `algorithm' - floating environment}\n\\RequirePackage{float}"
+}

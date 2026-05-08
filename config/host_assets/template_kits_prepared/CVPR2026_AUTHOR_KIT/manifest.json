@@ -1,0 +1,31 @@
+{
+  "asset_id": "CVPR2026_AUTHOR_KIT",
+  "status": "prepared",
+  "asset_type": "release_archive_zip",
+  "source_local_path": "config/host_assets/template_kits/CVPR2026/author-kit-CVPR2026-v1-latex.zip",
+  "prepared_dir": "config/host_assets/template_kits_prepared/CVPR2026_AUTHOR_KIT",
+  "payload_dir": "config/host_assets/template_kits_prepared/CVPR2026_AUTHOR_KIT/payload",
+  "effective_root": "config/host_assets/template_kits_prepared/CVPR2026_AUTHOR_KIT/payload/author-kit-CVPR2026-v1-latex-",
+  "zip_entry_count": 18,
+  "stripped_top_level_prefix": "author-kit-CVPR2026-v1-latex-",
+  "main_tex_candidates": [
+    "main.tex",
+    "preamble.tex",
+    "rebuttal.tex",
+    "sec/0_abstract.tex",
+    "sec/1_intro.tex",
+    "sec/2_formatting.tex",
+    "sec/3_finalcopy.tex",
+    "sec/X_suppl.tex"
+  ],
+  "style_candidates": [
+    "cvpr.sty"
+  ],
+  "bibliography_candidates": [
+    "ieeenat_fullname.bst",
+    "main.bib"
+  ],
+  "source_candidates": [],
+  "main_tex_sample": "% CVPR 2026 Paper Template; see https://github.com/cvpr-org/author-kit\n\\documentclass[10pt,twocolumn,letterpaper]{article}\n%%%%%%%%% PAPER TYPE  - PLEASE UPDATE FOR FINAL VERSION\n% \\usepackage{cvpr}              % To produce the CAMERA-READY version\n\\usepackage[review]{cvpr}      % To produce the REVIEW version\n% \\usepackage[pagenumbers]{cvpr} % To force page numbers, e.g. for an arXiv version\n% Import additional packages in the preamble file, before hyperref\n\\input{preamble}",
+  "style_sample": "% ---------------------------------------------------------------\n%\n% No guarantee is given that the format corresponds perfectly to\n% IEEE 8.5\" x 11\" Proceedings, but most features should be ok.\n%\n% ---------------------------------------------------------------\n% with LaTeX2e:\n% ============="
+}
