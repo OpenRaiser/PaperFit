@@ -51,9 +51,9 @@ PaperFit/
 ## How To Use In Claude Code
 
 1. Restart Claude Code or reload the window after installation.
-2. Open the paper project root.
-3. Prefer a natural-language request through `/paperfit` or a direct natural-language prompt.
-4. Use expert shortcut commands only when you want to force a specific PaperFit task type.
+2. Open the paper project root, where the main `.tex` file lives.
+3. Say what you want PaperFit to do. You can use `/paperfit ...` or a normal prompt.
+4. Use expert shortcut commands only when you want to force a specific task type.
 
 Examples:
 
@@ -62,6 +62,14 @@ Examples:
 /paperfit Repair this paper's layout with minimal semantic changes
 /fix-layout --target-pages 9 --strict
 /check-visual
+```
+
+Simple mental model:
+
+```text
+You describe the goal.
+PaperFit compiles the paper, renders page images, checks visual defects,
+patches LaTeX when needed, and verifies the result again.
 ```
 
 ## Operational Notes

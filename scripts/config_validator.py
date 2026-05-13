@@ -9,13 +9,21 @@ PaperFit 配置验证器
     python config_validator.py [--verbose]
 """
 
-import os
 import sys
-import yaml
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from typing import TypedDict
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover
+    print(
+        "Missing Python dependency: PyYAML. "
+        "Run `python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt`.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 try:
     import jsonschema

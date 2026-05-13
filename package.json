@@ -9,9 +9,9 @@
   },
   "scripts": {
     "verify": "npm run validate:config && npm run check:node && npm run check:py-warnings",
-    "validate:config": ".venv/bin/python scripts/config_validator.py",
+    "validate:config": "node scripts/run_python.js scripts/config_validator.py",
     "check:node": "node --check bin/paperfit.js",
-    "check:py-warnings": ".venv/bin/python -W error scripts/check_python_warnings.py",
+    "check:py-warnings": "node scripts/run_python.js -W error scripts/check_python_warnings.py",
     "postinstall": "node scripts/postinstall.js",
     "upgrade": "bash install.sh --update --local",
     "upgrade:registry": "bash install.sh --update"

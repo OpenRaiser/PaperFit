@@ -10,6 +10,8 @@
 
 PaperFit 是面向 `Claude Code`、`Codex`、`Cursor` 的 LaTeX 论文排版 Agent System。你只需要在论文项目根目录描述目标，PaperFit 会自动完成编译、页图渲染、视觉诊断、源码修复与最终验收。
 
+In plain English: PaperFit is a local agent toolkit that helps an AI coding assistant inspect and repair the visual layout of a LaTeX paper.
+
 <p>
   <img src="https://img.shields.io/badge/status-active%20development-2ea44f?style=for-the-badge" alt="Project Status">
   <img src="https://img.shields.io/badge/python-3.8%2B-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
@@ -25,6 +27,7 @@ PaperFit 是面向 `Claude Code`、`Codex`、`Cursor` 的 LaTeX 论文排版 Age
   <a href="#快速开始"><b>快速开始</b></a> ·
   <a href="#安装"><b>安装</b></a> ·
   <a href="#使用方法"><b>使用方法</b></a> ·
+  <a href="#api-与自动化"><b>API</b></a> ·
   <a href="#工作流"><b>工作流</b></a> ·
   <a href="#架构"><b>架构</b></a>
 </p>
@@ -63,15 +66,11 @@ PaperFit 把论文排版视为一个视觉闭环任务：先把 PDF 渲染成页
 下面的案例来自 PaperFit 的真实排版修复效果展示。
 
 <p align="center">
-  <a href="images/case1.pdf">
-    <img src="plugins/paperfit/assets/paperfit-case1.png" alt="PaperFit case 1 layout repair result" width="980" />
-  </a>
+  <img src="plugins/paperfit/assets/paperfit-case1.png" alt="PaperFit case 1 layout repair result" width="980" />
 </p>
 
 <p align="center">
-  <a href="images/case2.pdf">
-    <img src="plugins/paperfit/assets/paperfit-case2.png" alt="PaperFit case 2 layout repair result" width="980" />
-  </a>
+  <img src="plugins/paperfit/assets/paperfit-case2.png" alt="PaperFit case 2 layout repair result" width="980" />
 </p>
 
 ## 适合场景
@@ -84,25 +83,31 @@ PaperFit 把论文排版视为一个视觉闭环任务：先把 PDF 渲染成页
 
 ## 快速开始
 
-安装完成后，在论文项目根目录直接对宿主说目标即可：
+最简单的用法只有三步：
+
+1. 在电脑上安装 PaperFit 和依赖。
+2. 打开你的 LaTeX 论文项目根目录，也就是放 `main.tex` 或主 `.tex` 文件的目录。
+3. 在 `Claude Code`、`Codex` 或 `Cursor` 里直接说你想让 PaperFit 做什么。
+
+你不需要先记住内部脚本命令。像下面这样说就可以：
 
 ```text
-用 PaperFit 分析这篇论文的排版问题
+Use PaperFit to inspect this paper's layout.
 ```
 
 ```text
-Use the paperfit agent to inspect this paper's layout and tell me the main visual defects
+Use PaperFit to repair the layout issues in this LaTeX project.
 ```
 
 ```text
-用 PaperFit 把这篇论文迁移到 CVPR 模板，并尽量保持图表和引用稳定
+Use PaperFit to migrate this paper to the CVPR template.
 ```
 
 ```text
-用 PaperFit 把正文压到 8 页，尽量不要改学术内容
+Use PaperFit to fit the main paper into 8 pages with minimal wording changes.
 ```
 
-PaperFit 会自动推断主 `.tex` 文件、当前模板、页面预算和需要进入的修复路径。只有在项目结构不清楚、环境缺失或目标本身有歧义时，它才需要你补充信息。
+PaperFit 会尽量自动判断主 `.tex` 文件、当前模板、页数目标和需要执行的任务。只有在项目结构不清楚、环境缺失或目标有歧义时，它才会要求你补充信息。
 
 ## 安装
 
@@ -119,26 +124,28 @@ macOS 上可安装 Poppler：
 brew install poppler
 ```
 
-### npm 安装
+### 推荐安装
+
+安装 CLI：
 
 ```bash
 npm install -g paperfit-cli
-paperfit-install --target claude
 ```
 
-也可以安装到其他宿主：
+把 PaperFit 接入你使用的宿主：
 
 ```bash
+paperfit-install --target claude
 paperfit-install --target codex
 paperfit-install --target cursor --project /path/to/paper
 paperfit-install --target all
 ```
 
-安装后建议运行一次体检，并安装 Python 依赖：
+安装 Python 依赖并运行体检：
 
 ```bash
-paperfit doctor --target claude
 pip3 install -r "$(npm root -g)/paperfit-cli/requirements.txt"
+paperfit doctor --target claude
 ```
 
 ### 从源码安装
@@ -161,15 +168,15 @@ Codex provider 相关说明见 [docs/CODEX_PROVIDER_SETUP.md](docs/CODEX_PROVIDE
 
 ## 使用方法
 
-PaperFit 的推荐入口是自然语言，而不是记忆内部命令。
+PaperFit 的推荐入口是自然语言，而不是记忆内部命令。你描述目标，Agent 负责选择下面这些内部动作：编译 LaTeX、读取 `.log`、渲染 PDF 页图、检查视觉缺陷、修改源码、再次编译验收。
 
 | 宿主 | 推荐入口 |
 |------|------|
 | `Claude Code` | `/paperfit` 后描述排版目标；也可使用 `/fix-layout`、`/check-visual`、`/repair-table` 等快捷命令。 |
-| `Codex` | 明确请求 `Use the paperfit agent to ...`，之后可通过 `/agent` 切回已创建的 PaperFit agent 线程。 |
+| `Codex` | 明确请求 `Use PaperFit to ...` 或使用已安装的 PaperFit agent/commands。 |
 | `Cursor` | 在论文项目中描述任务，项目级 rule 会引导 Cursor 调用 PaperFit 能力。 |
 
-常见任务：
+常见任务可以这样说：
 
 | 任务 | 示例 |
 |------|------|
@@ -180,6 +187,31 @@ PaperFit 的推荐入口是自然语言，而不是记忆内部命令。
 | 模板迁移 | `用 PaperFit 把这篇论文迁移到 CVPR 模板` |
 | 长度调整 | `用 PaperFit 把正文压到 8 页，语义修改要最小` |
 | 状态查看 | `Use the paperfit agent to summarize the current layout status` |
+
+如果你是高级用户，也可以直接调用 CLI：
+
+```bash
+paperfit render main.pdf --output data/pages
+paperfit run scripts/parse_log.py main.log --output data/log.json
+paperfit runtime --state data/state.json run-round main.tex --template ICLR2025 --target-pages 9
+```
+
+这些 CLI 命令主要给 Agent 和自动化脚本使用。普通使用时，直接对宿主描述目标更稳。
+
+## API 与自动化
+
+PaperFit 目前不是一个托管 Web API，也没有内置 HTTP 服务端。它是一个本地 CLI + Agent 资产包。
+
+可以用的集成方式：
+
+| 方式 | 是否支持 | 说明 |
+|------|------|------|
+| Agent 宿主集成 | 支持 | 在 `Claude Code`、`Codex`、`Cursor` 中安装后，用自然语言触发 PaperFit。 |
+| CLI 自动化 | 支持 | 从 shell、CI、Makefile、Python `subprocess` 或 Node `child_process` 调用 `paperfit ...`。 |
+| Codex API/模型提供方 | 间接支持 | PaperFit 不绑定某个 API endpoint；Codex 自己可配置默认登录、OpenAI-compatible gateway 或企业代理。见 [docs/CODEX_PROVIDER_SETUP.md](docs/CODEX_PROVIDER_SETUP.md)。 |
+| HTTP API 服务 | 暂不内置 | 如果你需要远程调用，可以在自己的服务中封装 `paperfit` CLI。 |
+
+所以答案是：可以程序化使用，但当前推荐方式是本地 CLI 或 Agent 宿主，不是直接请求 PaperFit 自带的 REST API。
 
 ## 工作流
 
@@ -267,6 +299,8 @@ paperfit status
 更多安装和命令细节见：
 
 - [docs/COMMANDS_SETUP.md](docs/COMMANDS_SETUP.md)
+- [docs/API_AND_AUTOMATION.md](docs/API_AND_AUTOMATION.md)
+- [docs/CODEX_PROVIDER_SETUP.md](docs/CODEX_PROVIDER_SETUP.md)
 - [docs/RELEASE_AND_LOCAL_UPDATE.md](docs/RELEASE_AND_LOCAL_UPDATE.md)
 - [.claude-plugin/README.md](.claude-plugin/README.md)
 
