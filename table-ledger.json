@@ -1,0 +1,805 @@
+{
+  "tables": [
+    {
+      "file": "paper.tex",
+      "line": 470,
+      "environment": "table",
+      "label": "tab:model_comparison_difficulty",
+      "caption": "Difficulty-split VLM scores for the LLM comparison (20 cases). All four backends remain effective across difficulty levels, with score spread 0.14 on each split.",
+      "column_spec": "\\textwidth",
+      "header_rows": [
+        [
+          "@lccc@ LLM Backend",
+          "Easy (n=6)",
+          "Medium (n=8)",
+          "Hard (n=6)"
+        ]
+      ],
+      "data_rows": [
+        [
+          "GPT-5.4 [cite]",
+          "3.821",
+          "3.792",
+          "3.310"
+        ],
+        [
+          "Claude Opus 4.6 [cite]",
+          "3.598",
+          "3.442",
+          "3.638"
+        ],
+        [
+          "DeepSeek-V4 Pro [cite]",
+          "3.163",
+          "3.509",
+          "3.893"
+        ],
+        [
+          "MiMo-v2.5-pro [cite]",
+          "3.648",
+          "3.778",
+          "3.486"
+        ]
+      ],
+      "data_rows_truncated": false,
+      "raw_rows": 5,
+      "notes": [],
+      "central": true
+    },
+    {
+      "file": "paper.tex",
+      "line": 803,
+      "environment": "table",
+      "label": "tab:appendix_prompt_record",
+      "caption": "Prompt and artifact record for prompt-based methods.",
+      "column_spec": "\\textwidth",
+      "header_rows": [
+        [
+          "@llll@ Method",
+          "Prompt role",
+          "Template source",
+          "Saved artifacts"
+        ]
+      ],
+      "data_rows": [
+        [
+          "RuleLog",
+          "Rule/log only",
+          "None",
+          "Rule reports"
+        ],
+        [
+          "TextST",
+          "Source-only edit",
+          "Adapter prompts",
+          "Response, usage, boundary"
+        ],
+        [
+          "TextMR",
+          "Source + log edit",
+          "Adapter prompts",
+          "Responses, usage, boundaries"
+        ],
+        [
+          "VisualST",
+          "Source + image edit",
+          "Adapter prompts",
+          "Response, usage, boundary"
+        ],
+        [
+          "VisualMR",
+          "Fixed-round visual agent",
+          "Agent prompt builder",
+          "Prompt, response, usage"
+        ],
+        [
+          "PaperFit",
+          "Structured repair agent",
+          "PaperFit agent prompt",
+          "Prompt, response, usage"
+        ]
+      ],
+      "data_rows_truncated": false,
+      "raw_rows": 7,
+      "notes": [],
+      "not_central": true,
+      "omission_reason": "appendix/supporting listing omitted from project page; central benchmark/result evidence is rendered fully"
+    },
+    {
+      "file": "Tables/Benchmark_statistics.tex",
+      "line": 1,
+      "environment": "table*",
+      "label": "tab:benchmark_statistics",
+      "caption": "Benchmark papers statistics by conference.",
+      "column_spec": "\\textwidth",
+      "header_rows": [
+        [
+          "Conference",
+          "# Papers",
+          "Columns",
+          "Page Limit",
+          "Avg. Figures",
+          "Avg. Tables"
+        ]
+      ],
+      "data_rows": [
+        [
+          "AAAI",
+          "20",
+          "2",
+          "7",
+          "5.60",
+          "5.30"
+        ],
+        [
+          "ACM MM",
+          "20",
+          "2",
+          "8",
+          "7.25",
+          "6.40"
+        ],
+        [
+          "CVPR/ICCV",
+          "20",
+          "1",
+          "8",
+          "5.25",
+          "4.70"
+        ],
+        [
+          "ECCV",
+          "20",
+          "1",
+          "14",
+          "5.65",
+          "4.35"
+        ],
+        [
+          "ICLR",
+          "20",
+          "1",
+          "9",
+          "6.30",
+          "4.85"
+        ],
+        [
+          "ICML",
+          "20",
+          "2",
+          "8",
+          "5.55",
+          "5.05"
+        ],
+        [
+          "IEEE Trans",
+          "20",
+          "2",
+          "12",
+          "4.60",
+          "3.85"
+        ],
+        [
+          "IJCAI",
+          "20",
+          "2",
+          "7",
+          "5.80",
+          "4.70"
+        ],
+        [
+          "IJCV",
+          "20",
+          "2",
+          "10+",
+          "10.75",
+          "9.20"
+        ],
+        [
+          "NeurIPS",
+          "20",
+          "1",
+          "9",
+          "5.95",
+          "4.40"
+        ]
+      ],
+      "data_rows_truncated": false,
+      "raw_rows": 11,
+      "notes": [
+        "contains \\multicolumn — header alignment is approximate"
+      ],
+      "central": true
+    },
+    {
+      "file": "Tables/Perturbation_strategy.tex",
+      "line": 1,
+      "environment": "table*",
+      "label": "tab:perturbation_strategy",
+      "caption": "Summary of perturbation strategies. ``Validated'' column: ✓ = post-compilation semantic verification confirms the defect manifests (e.g., overfull log, page shift, or layout inspection), with results recorded in disturbance_manifest.json; = standard compilation check only, without defect-level verification.",
+      "column_spec": "\\textwidth",
+      "header_rows": [
+        [
+          "@ l c c p4cm c c @ Perturbation ID",
+          "Category",
+          "Defect",
+          "Implementation",
+          "Validated",
+          "Frequency"
+        ]
+      ],
+      "data_rows": [
+        [
+          "A1_widow_orphan",
+          "A",
+          "A1",
+          "Force widow/orphan lines via truncated short paragraphs",
+          "✓",
+          "59"
+        ],
+        [
+          "A2_trailing_whitespace",
+          "A",
+          "A2",
+          "Inject trailing whitespace before bibliography",
+          "",
+          "72"
+        ],
+        [
+          "A4_column_imbalance",
+          "A",
+          "A4",
+          "Inject vertical gaps on double-column final pages",
+          "✓",
+          "16"
+        ],
+        [
+          "A5_column_void",
+          "A",
+          "A5",
+          "Insert vertical voids within body text columns",
+          "✓",
+          "13"
+        ],
+        [
+          "B1_float_to_page",
+          "B",
+          "B1",
+          "Push selected floats to dedicated float-only pages",
+          "",
+          "50"
+        ],
+        [
+          "B2_oversize_graphics",
+          "B",
+          "B2",
+          "Enlarge graphics beyond available column width",
+          "",
+          "48"
+        ],
+        [
+          "B2_shrink_graphics",
+          "B",
+          "B2",
+          "Shrink graphics to noticeably undersized width",
+          "",
+          "51"
+        ],
+        [
+          "C1_table_resizebox",
+          "C",
+          "C1",
+          "Wrap tables in \\ resizebox to undersize",
+          "",
+          "73"
+        ],
+        [
+          "C2_table_oversize",
+          "C",
+          "C2",
+          "Widen tables beyond available column width",
+          "",
+          "79"
+        ],
+        [
+          "D1_long_token_overflow",
+          "D",
+          "D1",
+          "Append unbreakable tokens to trigger line overflow",
+          "",
+          "68"
+        ],
+        [
+          "D2_long_formula",
+          "D",
+          "D2",
+          "Insert ultra-wide formulas to trigger display overflow",
+          "✓",
+          "80"
+        ],
+        [
+          "E1_template_mismatch",
+          "E",
+          "E1",
+          "Cross-template migration with unreasonable image widths",
+          "✓",
+          "76"
+        ],
+        [
+          "E2_template_page_shift",
+          "E",
+          "E2",
+          "Cross-template migration with reduced \\ textheight",
+          "✓",
+          "76"
+        ]
+      ],
+      "data_rows_truncated": false,
+      "raw_rows": 14,
+      "notes": [
+        "contains \\multicolumn — header alignment is approximate"
+      ],
+      "central": true
+    },
+    {
+      "file": "Tables/Perturbation_difficulty.tex",
+      "line": 1,
+      "environment": "table*",
+      "label": "tab:perturbation_difficulty",
+      "caption": "Distribution of perturbation difficulty levels and most frequently used perturbation types.",
+      "column_spec": "\\textwidth",
+      "header_rows": [
+        [
+          "@ l c l @ Difficulty",
+          "Samples",
+          "Common Perturbation Types"
+        ]
+      ],
+      "data_rows": [
+        [
+          "Easy",
+          "60",
+          "9cm A2 (trailing whitespace), C1 (table resizebox), C2 (table oversize), D1 (long token overflow), D2 (long formula), E1 (template mismatch), E2 (template page shift)"
+        ],
+        [
+          "Medium",
+          "80",
+          "9cm A2 (trailing whitespace), C1 (table resizebox), C2 (table oversize), D2 (long formula), E2 (template page shift)"
+        ],
+        [
+          "Hard",
+          "60",
+          "9cm A2 (trailing whitespace), C2 (table oversize), D1 (long token overflow), D2 (long formula), E1 (template mismatch), E2 (template page shift)"
+        ]
+      ],
+      "data_rows_truncated": false,
+      "raw_rows": 4,
+      "notes": [
+        "contains \\multicolumn — header alignment is approximate"
+      ],
+      "central": true
+    },
+    {
+      "file": "Tables/Benchmark_comparison.tex",
+      "line": 1,
+      "environment": "table*",
+      "label": "tab:benchmark_comparison",
+      "caption": "Comparison with representative benchmarks. PaperFit-Bench is the only benchmark that combines systematic perturbation injection, visual evaluation from rendered pages, multi-modal evidence chains, and full-document iterative repair.",
+      "column_spec": "\\textwidth",
+      "header_rows": [
+        [
+          "@lllcccc@ Benchmark",
+          "Task",
+          "Perturbation",
+          "Visual Eval",
+          "Multi-Modal",
+          "Iterative"
+        ]
+      ],
+      "data_rows": [
+        [
+          "Im2Latex-100K",
+          "Formula reconstruction",
+          "--",
+          "✓",
+          "✓",
+          "✓"
+        ],
+        [
+          "TeXpert",
+          "LaTeX code generation",
+          "--",
+          "✓",
+          "✓",
+          "✓"
+        ],
+        [
+          "RoDLA",
+          "Layout robustness",
+          "Limited",
+          "Partial",
+          "✓",
+          "✓"
+        ],
+        [
+          "DocReward",
+          "Quality assessment",
+          "--",
+          "✓",
+          "✓",
+          "✓"
+        ],
+        [
+          "LATTE",
+          "Element-level refinement",
+          "--",
+          "✓",
+          "✓",
+          "✓"
+        ],
+        [
+          "PaperFit-Bench",
+          "Visual typesetting repair",
+          "13 strategies",
+          "✓",
+          "✓",
+          "✓"
+        ]
+      ],
+      "data_rows_truncated": false,
+      "raw_rows": 7,
+      "notes": [],
+      "central": true
+    },
+    {
+      "file": "Tables/Exp_main_results.tex",
+      "line": 1,
+      "environment": "table*",
+      "label": "tab:exp_main_results",
+      "caption": "Main results. VLM is the visual evaluation score; Program is the 0--5 composite programmatic score. All other quantities are rates in [0,1].",
+      "column_spec": "\\textwidth",
+      "header_rows": [
+        [
+          "@ccccccc@ Method",
+          "Compile",
+          "Render",
+          "VLM",
+          "Win",
+          "Program",
+          "Page hit"
+        ]
+      ],
+      "data_rows": [
+        [
+          "Perturbed",
+          "0.5800",
+          "0.8200",
+          "1.8275",
+          "0.0000",
+          "3.6344",
+          "0.3750"
+        ],
+        [
+          "RuleLog",
+          "0.5200",
+          "0.7600",
+          "2.1838",
+          "0.3800",
+          "3.3401",
+          "0.4444"
+        ],
+        [
+          "TextST",
+          "0.5850",
+          "0.5850",
+          "1.8522",
+          "0.2800",
+          "2.5738",
+          "0.4530"
+        ],
+        [
+          "TextMR",
+          "0.6100",
+          "0.6100",
+          "2.1601",
+          "0.4250",
+          "2.7433",
+          "0.6230"
+        ],
+        [
+          "VisualST",
+          "0.6250",
+          "0.6250",
+          "1.8741",
+          "0.2950",
+          "2.7681",
+          "0.4560"
+        ],
+        [
+          "VisualMR",
+          "0.9750",
+          "0.9750",
+          "2.8006",
+          "0.6500",
+          "4.5789",
+          "0.5487"
+        ],
+        [
+          "PaperFit",
+          "1.0000",
+          "1.0000",
+          "3.3907",
+          "0.8950",
+          "4.5790",
+          "0.8050"
+        ]
+      ],
+      "data_rows_truncated": false,
+      "raw_rows": 9,
+      "notes": [],
+      "central": true
+    },
+    {
+      "file": "Tables/External_capability_boundary.tex",
+      "line": 1,
+      "environment": "table*",
+      "label": "tab:external_capability_boundary",
+      "caption": "External capability boundary matrix. System families: DocParser denotes PDF/document parsers, including MinerU, Marker, and Nougat [cite]; LocalRecon denotes local LaTeX reconstruction systems, including LATTE, Table2LaTeX-RL, and LaTeX-OCR [cite]; CodeAgent denotes general coding agents, including OpenHands, Aider, and SWE-agent [cite]; B5-VisualAgent is our general-purpose visual coding-agent baseline; PaperFit is our full system. Capability abbreviations: MSI = multi-source input; Edit = LaTeX/code generation or editing; Loop = execution feedback loop; PVD = full-paper visual diagnosis from rendered page images; Layout = float/table/page-level layout repair; Gate = page-budget, template, and checklist-gated validation. ✓ indicates full coverage, ✓ indicates no coverage, and indicates partial coverage.",
+      "column_spec": "\\textwidth",
+      "header_rows": [
+        [
+          "@lcccccc@ System family",
+          "MSI",
+          "Edit",
+          "Loop",
+          "PVD",
+          "Layout",
+          "Gate"
+        ]
+      ],
+      "data_rows": [
+        [
+          "DocParser [cite]",
+          "✓",
+          "✓",
+          "✓",
+          "✓",
+          "✓",
+          "✓"
+        ],
+        [
+          "LocalRecon [cite]",
+          "✓",
+          "✓",
+          "",
+          "✓",
+          "✓",
+          "✓"
+        ],
+        [
+          "CodeAgent [cite]",
+          "✓",
+          "✓",
+          "✓",
+          "✓",
+          "✓",
+          "✓"
+        ],
+        [
+          "B5-VisualAgent",
+          "✓",
+          "✓",
+          "✓",
+          "",
+          "",
+          "✓"
+        ],
+        [
+          "PaperFit",
+          "✓",
+          "✓",
+          "✓",
+          "✓",
+          "✓",
+          "✓"
+        ]
+      ],
+      "data_rows_truncated": false,
+      "raw_rows": 6,
+      "notes": [],
+      "central": true
+    },
+    {
+      "file": "Tables/Model_comparison.tex",
+      "line": 1,
+      "environment": "table*",
+      "label": "tab:model_comparison",
+      "caption": "Model comparison on 20 representative cases (6 easy, 8 medium, 6 hard).",
+      "column_spec": "\\textwidth",
+      "header_rows": [
+        [
+          "@lccccc@ LLM Backend",
+          "Compile",
+          "Render",
+          "VLM",
+          "Win",
+          "Page hit"
+        ]
+      ],
+      "data_rows": [
+        [
+          "GPT-5.4 [cite]",
+          "100.00%",
+          "100.00%",
+          "3.656",
+          "95.00%",
+          "95.00%"
+        ],
+        [
+          "Claude Opus 4.6 [cite]",
+          "100.00%",
+          "100.00%",
+          "3.548",
+          "90.00%",
+          "100.00%"
+        ],
+        [
+          "DeepSeek-V4 Pro [cite]",
+          "95.00%",
+          "100.00%",
+          "3.521",
+          "95.00%",
+          "100.00%"
+        ],
+        [
+          "MiMo-v2.5-pro [cite]",
+          "100.00%",
+          "100.00%",
+          "3.652",
+          "100.00%",
+          "95.00%"
+        ]
+      ],
+      "data_rows_truncated": false,
+      "raw_rows": 5,
+      "notes": [],
+      "central": true
+    },
+    {
+      "file": "Tables/Benchmark_table.tex",
+      "line": 1,
+      "environment": "table*",
+      "label": "tab:benchmark1",
+      "caption": "Benchmark papers organized by conference.",
+      "column_spec": null,
+      "header_rows": [],
+      "data_rows": [],
+      "data_rows_truncated": false,
+      "raw_rows": 0,
+      "notes": [
+        "no tabular/longtable body found"
+      ],
+      "not_central": true,
+      "omission_reason": "appendix/supporting listing omitted from project page; central benchmark/result evidence is rendered fully"
+    },
+    {
+      "file": "Tables/Benchmark_table.tex",
+      "line": 36,
+      "environment": "table*",
+      "label": "tab:benchmark2",
+      "caption": "Benchmark papers organized by conference (cont.).",
+      "column_spec": null,
+      "header_rows": [],
+      "data_rows": [],
+      "data_rows_truncated": false,
+      "raw_rows": 0,
+      "notes": [
+        "no tabular/longtable body found"
+      ],
+      "not_central": true,
+      "omission_reason": "appendix/supporting listing omitted from project page; central benchmark/result evidence is rendered fully"
+    },
+    {
+      "file": "Tables/Benchmark_table.tex",
+      "line": 80,
+      "environment": "table*",
+      "label": "tab:benchmark3",
+      "caption": "Benchmark papers organized by conference (cont.).",
+      "column_spec": null,
+      "header_rows": [],
+      "data_rows": [],
+      "data_rows_truncated": false,
+      "raw_rows": 0,
+      "notes": [
+        "no tabular/longtable body found"
+      ],
+      "not_central": true,
+      "omission_reason": "appendix/supporting listing omitted from project page; central benchmark/result evidence is rendered fully"
+    },
+    {
+      "file": "Tables/Benchmark_table.tex",
+      "line": 123,
+      "environment": "table*",
+      "label": "tab:benchmark4",
+      "caption": "Benchmark papers organized by conference (cont.).",
+      "column_spec": null,
+      "header_rows": [],
+      "data_rows": [],
+      "data_rows_truncated": false,
+      "raw_rows": 0,
+      "notes": [
+        "no tabular/longtable body found"
+      ],
+      "not_central": true,
+      "omission_reason": "appendix/supporting listing omitted from project page; central benchmark/result evidence is rendered fully"
+    },
+    {
+      "file": "Tables/Benchmark_table.tex",
+      "line": 167,
+      "environment": "table*",
+      "label": "tab:benchmark5",
+      "caption": "Benchmark papers organized by conference (cont.).",
+      "column_spec": null,
+      "header_rows": [],
+      "data_rows": [],
+      "data_rows_truncated": false,
+      "raw_rows": 0,
+      "notes": [
+        "no tabular/longtable body found"
+      ],
+      "not_central": true,
+      "omission_reason": "appendix/supporting listing omitted from project page; central benchmark/result evidence is rendered fully"
+    },
+    {
+      "file": "Tables/Benchmark_table.tex",
+      "line": 212,
+      "environment": "table*",
+      "label": "tab:benchmark6",
+      "caption": "Benchmark papers organized by conference (cont.).",
+      "column_spec": null,
+      "header_rows": [],
+      "data_rows": [],
+      "data_rows_truncated": false,
+      "raw_rows": 0,
+      "notes": [
+        "no tabular/longtable body found"
+      ],
+      "not_central": true,
+      "omission_reason": "appendix/supporting listing omitted from project page; central benchmark/result evidence is rendered fully"
+    },
+    {
+      "file": "Tables/Benchmark_table.tex",
+      "line": 255,
+      "environment": "table*",
+      "label": "tab:benchmark7",
+      "caption": "Benchmark papers organized by conference (cont.).",
+      "column_spec": null,
+      "header_rows": [],
+      "data_rows": [],
+      "data_rows_truncated": false,
+      "raw_rows": 0,
+      "notes": [
+        "no tabular/longtable body found"
+      ],
+      "not_central": true,
+      "omission_reason": "appendix/supporting listing omitted from project page; central benchmark/result evidence is rendered fully"
+    },
+    {
+      "file": "Tables/Benchmark_table.tex",
+      "line": 299,
+      "environment": "table*",
+      "label": "tab:benchmark8",
+      "caption": "Benchmark papers organized by conference (cont.).",
+      "column_spec": null,
+      "header_rows": [],
+      "data_rows": [],
+      "data_rows_truncated": false,
+      "raw_rows": 0,
+      "notes": [
+        "no tabular/longtable body found"
+      ],
+      "not_central": true,
+      "omission_reason": "appendix/supporting listing omitted from project page; central benchmark/result evidence is rendered fully"
+    }
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "directory": "/Volumes/T7/PaperFit/TR_PaperFit/webpage/assets",
+  "assets": [
+    {
+      "source": "assets/OpenDataLab_0930.png",
+      "output": "webpage/assets/opendatalab-0930.png",
+      "kind": "raster",
+      "page": null,
+      "width": 516,
+      "height": 67,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 7.7015
+    },
+    {
+      "source": "assets/OpenDataLab_blue_no_words.pdf",
+      "output": "webpage/assets/opendatalab-blue-no-words.png",
+      "kind": "raster-from-pdf",
+      "page": null,
+      "width": 688,
+      "height": 130,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 5.2923
+    },
+    {
+      "source": "assets/github_logo.pdf",
+      "output": "webpage/assets/github-logo.png",
+      "kind": "raster-from-pdf",
+      "page": null,
+      "width": 245,
+      "height": 240,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 1.0208
+    },
+    {
+      "source": "assets/huggingface_logo.png",
+      "output": "webpage/assets/huggingface-logo.png",
+      "kind": "raster",
+      "page": null,
+      "width": 384,
+      "height": 384,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 1.0
+    },
+    {
+      "source": "assets/shlab.png",
+      "output": "webpage/assets/shlab.png",
+      "kind": "raster",
+      "page": null,
+      "width": 2610,
+      "height": 306,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 8.5294
+    },
+    {
+      "source": "assets/web_logo.pdf",
+      "output": "webpage/assets/web-logo.png",
+      "kind": "raster-from-pdf",
+      "page": null,
+      "width": 640,
+      "height": 640,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 1.0
+    }
+  ]
+}

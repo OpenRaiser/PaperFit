@@ -1,0 +1,1143 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PaperFit: Vision-in-the-Loop Typesetting Optimization for Scientific Documents</title>
+  <meta name="description"
+    content="PaperFit introduces visual closed-loop LaTeX typesetting optimization and PaperFit-Bench, a 200-paper benchmark across 10 templates and 13 defect types." />
+  <link rel="icon" type="image/png" href="assets/PaperFit_icon.png" />
+  <link rel="apple-touch-icon" href="assets/PaperFit_icon.png" />
+  <link rel="canonical" href="https://github.com/OpenRaiser/PaperFit" />
+  <meta property="og:type" content="article" />
+  <meta property="og:title" content="PaperFit: Vision-in-the-Loop Typesetting Optimization for Scientific Documents" />
+  <meta property="og:description"
+    content="A vision-in-the-loop agent and benchmark for repairing visual layout defects in scientific LaTeX documents." />
+  <meta property="og:image" content="figures/paperfit-v3.png" />
+  <meta property="og:url" content="https://github.com/OpenRaiser/PaperFit" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="PaperFit" />
+  <meta name="twitter:description" content="Vision-in-the-loop typesetting optimization for scientific documents." />
+  <meta name="twitter:image" content="figures/paperfit-v3.png" />
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "ScholarlyArticle",
+    "name": "PaperFit: Vision-in-the-Loop Typesetting Optimization for Scientific Documents",
+    "headline": "PaperFit: Vision-in-the-Loop Typesetting Optimization for Scientific Documents",
+    "description": "PaperFit formalizes Visual Typesetting Optimization and introduces a vision-in-the-loop agent plus PaperFit-Bench, a 200-paper benchmark across 10 venue templates and 13 defect types.",
+    "author": [
+      {"@type": "Person", "name": "Bihui Yu"},
+      {"@type": "Person", "name": "Xinglong Xu"},
+      {"@type": "Person", "name": "Junjie Jiang"},
+      {"@type": "Person", "name": "Jiabei Cheng"},
+      {"@type": "Person", "name": "Caijun Jia"},
+      {"@type": "Person", "name": "Siyuan Li"},
+      {"@type": "Person", "name": "Conghui He"},
+      {"@type": "Person", "name": "Jingxuan Wei"},
+      {"@type": "Person", "name": "Cheng Tan"}
+    ],
+    "datePublished": "2026",
+    "isAccessibleForFree": true,
+    "sameAs": [
+      "https://github.com/OpenRaiser/PaperFit",
+      "https://huggingface.co/datasets/OpenRaiser/PaperFit"
+    ]
+  }
+  </script>
+  <style>
+    :root {
+      --page: #f6f8f5;
+      --surface: #ffffff;
+      --ink: #1a1a2e;
+      --ink-soft: #4a4a5a;
+      --muted: #7a7a8a;
+      --primary: #1d6b4f;
+      --primary-soft: #edf5f0;
+      --accent: #e85d04;
+      --accent-soft: #fff4ed;
+      --success: #059669;
+      --border: #e5e7eb;
+      --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
+      --shadow-md: 0 8px 30px rgba(0, 0, 0, 0.08);
+      --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.1);
+      --radius: 12px;
+      --max: 1100px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      line-height: 1.7;
+      font-size: 16px;
+    }
+
+    a {
+      color: var(--primary);
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    img {
+      max-width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    .container {
+      width: min(var(--max), calc(100% - 48px));
+      margin: 0 auto;
+    }
+
+    .container-wide {
+      width: min(1300px, calc(100% - 48px));
+      margin: 0 auto;
+    }
+
+    /* Nav */
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 56px;
+      width: min(var(--max), calc(100% - 48px));
+      margin: 0 auto;
+    }
+
+    .nav-brand {
+      display: flex;
+      align-items: center;
+      text-decoration: none;
+    }
+
+    .nav-brand img {
+      height: 36px;
+      width: auto;
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 4px;
+    }
+
+    .nav-links a {
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 0.88rem;
+      font-weight: 500;
+      color: var(--ink-soft);
+      text-decoration: none;
+    }
+
+    .nav-links a:hover {
+      background: var(--primary-soft);
+      color: var(--primary);
+    }
+
+    /* Hero */
+    .hero {
+      padding: 60px 0 40px;
+      text-align: center;
+    }
+
+    .hero h1 {
+      font-size: clamp(1.8rem, 3.5vw, 2.8rem);
+      line-height: 1.2;
+      margin: 0 auto;
+      max-width: 900px;
+      font-weight: 800;
+    }
+
+    .hero .subtitle {
+      margin: 16px auto 0;
+      font-size: 1.15rem;
+      color: var(--ink-soft);
+      max-width: 700px;
+    }
+
+    .hero .authors {
+      margin: 20px 0 0;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .hero .affiliations {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-top: 24px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 20px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.92rem;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--ink);
+      text-decoration: none;
+      box-shadow: var(--shadow-sm);
+      transition: all 0.15s;
+    }
+
+    .btn:hover {
+      box-shadow: var(--shadow-md);
+      transform: translateY(-1px);
+      text-decoration: none;
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      color: #fff;
+      border-color: var(--primary);
+    }
+
+    .btn-primary:hover {
+      background: #155a40;
+    }
+
+    /* Teaser */
+    .teaser {
+      margin: 0 auto;
+      padding: 0 0 48px;
+      max-width: 1000px;
+    }
+
+    .teaser img {
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-lg);
+      cursor: zoom-in;
+    }
+
+    .teaser figcaption {
+      text-align: center;
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    /* Metrics strip */
+    .metrics-strip {
+      display: flex;
+      justify-content: center;
+      gap: 32px;
+      flex-wrap: wrap;
+      padding: 20px 0;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+    }
+
+    .metric-item {
+      text-align: center;
+    }
+
+    .metric-item strong {
+      display: block;
+      font-size: 1.5rem;
+      color: var(--primary);
+      font-weight: 800;
+      line-height: 1.2;
+    }
+
+    .metric-item span {
+      font-size: 0.8rem;
+      color: var(--muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    /* Sections */
+    .section {
+      padding: 72px 0;
+    }
+
+    .section+.section {
+      border-top: 1px solid var(--border);
+    }
+
+    .section-title {
+      font-size: clamp(1.4rem, 2.5vw, 2rem);
+      font-weight: 700;
+      margin: 0 0 12px;
+      line-height: 1.25;
+    }
+
+    .section-lead {
+      color: var(--ink-soft);
+      font-size: 1.05rem;
+      max-width: 720px;
+      margin: 0 0 36px;
+    }
+
+    /* Abstract */
+    .abstract {
+      max-width: 780px;
+      margin: 0 auto;
+      padding: 48px 0;
+      text-align: center;
+    }
+
+    .abstract p {
+      font-size: 1.1rem;
+      line-height: 1.8;
+      color: var(--ink-soft);
+    }
+
+    /* Pipeline */
+    .pipeline-figure {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      box-shadow: var(--shadow-md);
+    }
+
+    .pipeline-figure img {
+      border-radius: 8px;
+      cursor: zoom-in;
+    }
+
+    .pipeline-figure figcaption {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 0.88rem;
+      text-align: center;
+    }
+
+    .steps-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin-top: 32px;
+    }
+
+    .step-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      text-align: center;
+    }
+
+    .step-card .step-num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: var(--primary);
+      color: #fff;
+      font-weight: 700;
+      font-size: 0.9rem;
+      margin-bottom: 12px;
+    }
+
+    .step-card h3 {
+      font-size: 1.05rem;
+      margin: 0 0 8px;
+      font-weight: 700;
+    }
+
+    .step-card p {
+      color: var(--ink-soft);
+      font-size: 0.9rem;
+      margin: 0;
+      line-height: 1.5;
+    }
+
+    /* Results */
+    .highlights {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin-bottom: 32px;
+    }
+
+    .highlight-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      text-align: center;
+    }
+
+    .highlight-card strong {
+      display: block;
+      font-size: 2rem;
+      font-weight: 800;
+      color: var(--primary);
+      line-height: 1;
+    }
+
+    .highlight-card span {
+      display: block;
+      margin-top: 8px;
+      color: var(--ink-soft);
+      font-size: 0.9rem;
+    }
+
+    .callout {
+      padding: 16px 20px;
+      border-radius: var(--radius);
+      border-left: 4px solid var(--accent);
+      background: var(--accent-soft);
+      color: var(--ink);
+      font-size: 0.95rem;
+      margin-bottom: 24px;
+    }
+
+    .table-wrap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      box-shadow: var(--shadow-sm);
+      overflow-x: auto;
+    }
+
+    .table-wrap h3 {
+      font-size: 1rem;
+      font-weight: 700;
+      margin: 0 0 14px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.88rem;
+    }
+
+    th,
+    td {
+      padding: 10px 12px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+
+    th {
+      font-weight: 700;
+      color: var(--ink);
+      background: var(--page);
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    td {
+      color: var(--ink-soft);
+    }
+
+    tr.highlight td {
+      background: var(--primary-soft);
+      color: var(--ink);
+      font-weight: 600;
+    }
+
+    .center {
+      text-align: center;
+    }
+
+    /* Benchmark */
+    .bench-layout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 32px;
+      align-items: start;
+    }
+
+    .bench-figure img {
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-sm);
+      cursor: zoom-in;
+    }
+
+    .bench-facts {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+
+    .bench-facts li {
+      padding: 12px 0;
+      border-bottom: 1px solid var(--border);
+      color: var(--ink-soft);
+      font-size: 0.95rem;
+    }
+
+    .bench-facts li:last-child {
+      border-bottom: none;
+    }
+
+    .bench-facts li strong {
+      color: var(--ink);
+    }
+
+    details {
+      margin-top: 20px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    details summary {
+      padding: 14px 20px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.92rem;
+      color: var(--primary);
+    }
+
+    details summary:hover {
+      background: var(--primary-soft);
+    }
+
+    details .detail-content {
+      padding: 0 20px 20px;
+    }
+
+    /* Cases */
+    .case-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+
+    .case-item {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .case-item img {
+      border-radius: 8px;
+      cursor: zoom-in;
+      width: 100%;
+    }
+
+    .case-item figcaption {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+
+    /* Limitations */
+    .limit-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+
+    .limit-grid figure {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+      margin: 0;
+    }
+
+    .limit-grid img {
+      border-radius: 8px;
+      cursor: zoom-in;
+    }
+
+    .limit-grid figcaption {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+
+    /* Citation */
+    .citation-block pre {
+      background: #1e293b;
+      color: #e2e8f0;
+      border-radius: var(--radius);
+      padding: 24px;
+      font-size: 0.86rem;
+      line-height: 1.6;
+      overflow-x: auto;
+      white-space: pre-wrap;
+    }
+
+    /* Footer */
+    .footer {
+      padding: 32px 0;
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+    }
+
+    .footer-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .footer-logos {
+      display: flex;
+      gap: 20px;
+      align-items: center;
+    }
+
+    .footer-logos img {
+      height: 36px;
+      width: auto;
+      opacity: 0.7;
+    }
+
+    .footer-text {
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+
+    /* Modal */
+    .modal {
+      border: 0;
+      padding: 0;
+      background: var(--surface);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow-lg);
+      width: min(1200px, calc(100vw - 32px));
+      max-height: calc(100vh - 32px);
+    }
+
+    .modal::backdrop {
+      background: rgba(0, 0, 0, 0.6);
+    }
+
+    .modal-inner {
+      padding: 16px;
+    }
+
+    .modal-close {
+      position: sticky;
+      top: 8px;
+      float: right;
+      z-index: 2;
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      font-weight: 700;
+      cursor: pointer;
+      font-size: 1rem;
+    }
+
+    .modal img {
+      width: 100%;
+      border-radius: 8px;
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+
+      .steps-row,
+      .highlights,
+      .bench-layout,
+      .limit-grid,
+      .case-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .nav-links {
+        display: none;
+      }
+
+      .metrics-strip {
+        gap: 20px;
+      }
+
+      .section {
+        padding: 48px 0;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <!-- Navigation -->
+  <header class="nav">
+    <nav class="nav-inner">
+      <a class="nav-brand" href="#">
+        <img src="assets/PaperFit_README.png" alt="PaperFit" />
+      </a>
+      <div class="nav-links">
+        <a href="#method">Method</a>
+        <a href="#results">Results</a>
+        <a href="#benchmark">Benchmark</a>
+        <a href="#cases">Cases</a>
+        <a href="#citation">Citation</a>
+      </div>
+    </nav>
+  </header>
+
+  <main>
+    <!-- Hero -->
+    <section class="hero" id="hero">
+      <div class="container">
+        <h1>PaperFit: Vision-in-the-Loop Typesetting Optimization for Scientific Documents</h1>
+        <p class="subtitle">A closed-loop agent that turns compilable LaTeX into publication-ready PDFs by sensing,
+          repairing, and verifying visual layout defects.</p>
+        <p class="authors">Bihui Yu &middot; Xinglong Xu &middot; Junjie Jiang &middot; Jiabei Cheng &middot; Caijun Jia
+          &middot; Siyuan Li &middot; Conghui He &middot; Jingxuan Wei &middot; Cheng Tan</p>
+        <p class="affiliations">UCAS &middot; Shanghai AI Laboratory &middot; SJTU</p>
+        <div class="actions">
+          <a class="btn btn-primary" href="https://arxiv.org/abs/2605.10341">Paper</a>
+          <a class="btn" href="https://github.com/OpenRaiser/PaperFit">GitHub</a>
+          <a class="btn" href="https://huggingface.co/datasets/OpenRaiser/PaperFit">Dataset</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- Teaser figure -->
+    <figure class="teaser container">
+      <img src="figures/paperfit-v3.png"
+        alt="Comparison of rule-based, text-only LLM, and PaperFit visual closed-loop approaches" data-zoomable />
+      <figcaption>Rule/log tools are visually blind. Text-only LLMs edit without seeing consequences. PaperFit closes
+        the rendered-page feedback loop.</figcaption>
+    </figure>
+
+    <!-- Metrics strip -->
+    <div class="metrics-strip">
+      <div class="metric-item"><strong>200</strong><span>Benchmark Papers</span></div>
+      <div class="metric-item"><strong>10</strong><span>Venue Templates</span></div>
+      <div class="metric-item"><strong>13</strong><span>Defect Strategies</span></div>
+      <div class="metric-item"><strong>80.5%</strong><span>Page-Budget Hit</span></div>
+    </div>
+    <!-- Abstract -->
+    <div class="abstract">
+      <p>Compiling a LaTeX document is not the same as producing a publication-ready PDF. Visual defects — orphan lines,
+        misplaced floats, oversized tables, sparse trailing pages — require spatial judgment that compile logs cannot
+        provide. PaperFit formalizes <strong>Visual Typesetting Optimization (VTO)</strong>: a closed-loop agent that
+        senses defects from rendered page images, applies layout-native repairs, and accepts results only when compile,
+        render, content-preservation, and page-budget gates all pass. We release <strong>PaperFit-Bench</strong>: 200
+        real papers across 10 venue templates, perturbed with 13 defect strategies at three difficulty levels.</p>
+    </div>
+
+    <!-- Method -->
+    <section class="section" id="method">
+      <div class="container">
+        <h2 class="section-title">How PaperFit Works</h2>
+        <p class="section-lead">Each iteration fuses four evidence layers — source code, compile logs, PDF metadata, and
+          rendered page images — into a structured diagnosis, then applies constrained repairs verified by quality
+          gates.</p>
+        <figure class="pipeline-figure">
+          <img src="figures/paperfit-pipeline.png"
+            alt="PaperFit pipeline: evidence collection, diagnosis, constrained repair, and visual verification"
+            data-zoomable />
+          <figcaption>Multi-source evidence feeds diagnosis, repair planning, and checklist-gated visual verification.
+          </figcaption>
+        </figure>
+        <div class="steps-row">
+          <div class="step-card">
+            <div class="step-num">1</div>
+            <h3>Sense</h3>
+            <p>Fuse source, log, PDF, and page-image evidence into structured defect records with category, location,
+              and severity.</p>
+          </div>
+          <div class="step-card">
+            <div class="step-num">2</div>
+            <h3>Act</h3>
+            <p>Apply layout-native repairs: float re-anchoring, equation splitting, table restructuring, template-safe
+              figure widths.</p>
+          </div>
+          <div class="step-card">
+            <div class="step-num">3</div>
+            <h3>Verify</h3>
+            <p>Recompile and re-render; the gatekeeper returns DONE, CONTINUE, or BLOCKED based on hard constraints and
+              residual defects.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Results -->
+    <section class="section" id="results">
+      <div class="container">
+        <h2 class="section-title">Results</h2>
+        <p class="section-lead">PaperFit achieves perfect compile/render success and the highest page-budget compliance.
+          The structured gate mechanism is the key difference over naive visual iteration.</p>
+        <div class="highlights">
+          <div class="highlight-card">
+            <strong>100%</strong>
+            <span>Compile &amp; Render Success</span>
+          </div>
+          <div class="highlight-card">
+            <strong>89.5%</strong>
+            <span>Visual Win Rate</span>
+          </div>
+          <div class="highlight-card">
+            <strong>80.5%</strong>
+            <span>Page-Budget Hit Rate</span>
+          </div>
+        </div>
+        <div class="callout">VisualMR reaches 97.5% compile/render but only 54.9% page-budget hit. PaperFit adds defect
+          taxonomy, constrained repair policy, and acceptance gates that make the visual loop reliable.</div>
+        <div class="table-wrap">
+          <h3>Main Comparison</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th class="center">Compile</th>
+                <th class="center">Render</th>
+                <th class="center">VLM Score</th>
+                <th class="center">Win Rate</th>
+                <th class="center">Program</th>
+                <th class="center">Page Hit</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Perturbed (baseline)</td>
+                <td class="center">0.580</td>
+                <td class="center">0.820</td>
+                <td class="center">1.828</td>
+                <td class="center">—</td>
+                <td class="center">3.634</td>
+                <td class="center">0.375</td>
+              </tr>
+              <tr>
+                <td>RuleLog</td>
+                <td class="center">0.520</td>
+                <td class="center">0.760</td>
+                <td class="center">2.184</td>
+                <td class="center">0.380</td>
+                <td class="center">3.340</td>
+                <td class="center">0.444</td>
+              </tr>
+              <tr>
+                <td>TextST</td>
+                <td class="center">0.585</td>
+                <td class="center">0.585</td>
+                <td class="center">1.852</td>
+                <td class="center">0.280</td>
+                <td class="center">2.574</td>
+                <td class="center">0.453</td>
+              </tr>
+              <tr>
+                <td>TextMR</td>
+                <td class="center">0.610</td>
+                <td class="center">0.610</td>
+                <td class="center">2.160</td>
+                <td class="center">0.425</td>
+                <td class="center">2.743</td>
+                <td class="center">0.623</td>
+              </tr>
+              <tr>
+                <td>VisualST</td>
+                <td class="center">0.625</td>
+                <td class="center">0.625</td>
+                <td class="center">1.874</td>
+                <td class="center">0.295</td>
+                <td class="center">2.768</td>
+                <td class="center">0.456</td>
+              </tr>
+              <tr>
+                <td>VisualMR</td>
+                <td class="center">0.975</td>
+                <td class="center">0.975</td>
+                <td class="center">2.801</td>
+                <td class="center">0.650</td>
+                <td class="center">4.579</td>
+                <td class="center">0.549</td>
+              </tr>
+              <tr class="highlight">
+                <td><strong>PaperFit</strong></td>
+                <td class="center">1.000</td>
+                <td class="center">1.000</td>
+                <td class="center">3.391</td>
+                <td class="center">0.895</td>
+                <td class="center">4.579</td>
+                <td class="center">0.805</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <details>
+          <summary>Model Backend Comparison (20 representative cases)</summary>
+          <div class="detail-content">
+            <table>
+              <thead>
+                <tr>
+                  <th>LLM Backend</th>
+                  <th class="center">Compile</th>
+                  <th class="center">Render</th>
+                  <th class="center">VLM</th>
+                  <th class="center">Win</th>
+                  <th class="center">Page Hit</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>GPT-5.4</td>
+                  <td class="center">100%</td>
+                  <td class="center">100%</td>
+                  <td class="center">3.656</td>
+                  <td class="center">95%</td>
+                  <td class="center">95%</td>
+                </tr>
+                <tr>
+                  <td>Claude Opus 4.6</td>
+                  <td class="center">100%</td>
+                  <td class="center">100%</td>
+                  <td class="center">3.548</td>
+                  <td class="center">90%</td>
+                  <td class="center">100%</td>
+                </tr>
+                <tr>
+                  <td>DeepSeek-V4 Pro</td>
+                  <td class="center">95%</td>
+                  <td class="center">100%</td>
+                  <td class="center">3.521</td>
+                  <td class="center">95%</td>
+                  <td class="center">100%</td>
+                </tr>
+                <tr>
+                  <td>MiMo-v2.5-pro</td>
+                  <td class="center">100%</td>
+                  <td class="center">100%</td>
+                  <td class="center">3.652</td>
+                  <td class="center">100%</td>
+                  <td class="center">95%</td>
+                </tr>
+              </tbody>
+            </table>
+            <p style="margin-top:12px; color: var(--muted); font-size:0.88rem;">Backend variation is smaller than the
+              workflow gain over VisualMR, confirming PaperFit is not a single-model artifact.</p>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <!-- Benchmark -->
+    <section class="section" id="benchmark">
+      <div class="container">
+        <h2 class="section-title">PaperFit-Bench</h2>
+        <p class="section-lead">A full-paper layout repair benchmark built from real arXiv projects, each paired with a
+          perturbed source and disturbance manifest.</p>
+        <div class="bench-layout">
+          <figure class="bench-figure">
+            <img src="figures/perturbation-strategy-double-pie.png"
+              alt="Distribution of defect categories and strategies in PaperFit-Bench" data-zoomable />
+          </figure>
+          <div>
+            <ul class="bench-facts">
+              <li><strong>200</strong> real academic papers from arXiv</li>
+              <li><strong>10</strong> venue templates: AAAI, ACM MM, CVPR/ICCV, ECCV, ICLR, ICML, IEEE Trans, IJCAI,
+                IJCV, NeurIPS</li>
+              <li><strong>5</strong> defect families: space utilization, float placement, table width, overflow,
+                cross-template migration</li>
+              <li><strong>13</strong> concrete injection strategies with programmatic validation</li>
+              <li><strong>3</strong> difficulty tiers: Easy (60), Medium (80), Hard (60)</li>
+              <li>Visual evaluation with human/VLM correlation validated</li>
+            </ul>
+          </div>
+        </div>
+        <details>
+          <summary>Full Benchmark Comparison with Prior Work</summary>
+          <div class="detail-content">
+            <table>
+              <thead>
+                <tr>
+                  <th>Benchmark</th>
+                  <th>Task</th>
+                  <th class="center">Visual Eval</th>
+                  <th class="center">Multi-modal</th>
+                  <th class="center">Iterative</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Im2Latex-100K</td>
+                  <td>Formula reconstruction</td>
+                  <td class="center">No</td>
+                  <td class="center">No</td>
+                  <td class="center">No</td>
+                </tr>
+                <tr>
+                  <td>TeXpert</td>
+                  <td>LaTeX code generation</td>
+                  <td class="center">No</td>
+                  <td class="center">No</td>
+                  <td class="center">No</td>
+                </tr>
+                <tr>
+                  <td>RoDLA</td>
+                  <td>Layout robustness</td>
+                  <td class="center">Partial</td>
+                  <td class="center">Yes</td>
+                  <td class="center">No</td>
+                </tr>
+                <tr>
+                  <td>LATTE</td>
+                  <td>Element-level refinement</td>
+                  <td class="center">No</td>
+                  <td class="center">Yes</td>
+                  <td class="center">Yes</td>
+                </tr>
+                <tr class="highlight">
+                  <td><strong>PaperFit-Bench</strong></td>
+                  <td>Visual typesetting repair</td>
+                  <td class="center">Yes</td>
+                  <td class="center">Yes</td>
+                  <td class="center">Yes</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+      </div>
+    </section>
+    <!-- Case Studies -->
+    <section class="section" id="cases">
+      <div class="container">
+        <h2 class="section-title">Visual Examples</h2>
+        <p class="section-lead">These cases show why compilable output is not enough — VisualMR often renders
+          successfully but leaves the layout defect unresolved. PaperFit repairs the defect and validates the whole
+          document.</p>
+        <div class="case-grid">
+          <figure class="case-item">
+            <img src="figures/case-study1.png" alt="Case 1: table and figure realignment near textual references"
+              data-zoomable />
+            <figcaption>Tables and figures restored near their textual references while satisfying the target page
+              budget.</figcaption>
+          </figure>
+          <figure class="case-item">
+            <img src="figures/case-study2.png" alt="Case 2: page budget repair by compacting blank reference pages"
+              data-zoomable />
+            <figcaption>Blank reference pages compacted to meet the journal page limit without deleting content.
+            </figcaption>
+          </figure>
+          <figure class="case-item">
+            <img src="figures/case-study3.png" alt="Case 3: footer and reference-tail defect repair" data-zoomable />
+            <figcaption>Footer and reference-tail defects repaired without introducing new typesetting artifacts.
+            </figcaption>
+          </figure>
+          <figure class="case-item">
+            <img src="figures/case-study4.png" alt="Case 4: template migration with figure width adaptation"
+              data-zoomable />
+            <figcaption>Template migration adapts figure widths, validates float placement, and passes all quality
+              gates.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <!-- Limitations -->
+    <section class="section" id="limits">
+      <div class="container">
+        <h2 class="section-title">Where PaperFit Still Fails</h2>
+        <p class="section-lead">Hard constraints alone do not guarantee success. Highly complex multi-defect cases still
+          challenge page-budget control.</p>
+        <div class="limit-grid">
+          <figure>
+            <img src="figures/error-case1.png" alt="Page-budget violation: local repairs creating sparse trailing pages"
+              data-zoomable />
+            <figcaption>Global page-budget failures: local repairs can still produce sparse trailing pages or one extra
+              float-heavy page.</figcaption>
+          </figure>
+          <figure>
+            <img src="figures/error-case2.png" alt="Residual visual defects despite passing compile/render gates"
+              data-zoomable />
+            <figcaption>Residual visual defects: compile, render, and page count pass but the intended visual repair
+              remains incomplete.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <!-- Citation -->
+    <section class="section" id="citation">
+      <div class="container">
+        <h2 class="section-title">Citation</h2>
+        <div class="citation-block">
+          <pre><code>@article{yu2026paperfit,
+  title={PaperFit: Vision-in-the-Loop Typesetting Optimization for Scientific Documents},
+  author={Yu, Bihui and Xu, Xinglong and Jiang, Junjie and Cheng, Jiabei and Jia, Caijun and Li, Siyuan and He, Conghui and Wei, Jingxuan and Tan, Cheng},
+  journal={arXiv preprint arXiv:2605.10341},
+  year={2026}
+}</code></pre>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container footer-inner">
+      <div class="footer-logos">
+        <img src="assets/shlab.png" alt="Shanghai AI Laboratory" />
+        <img src="assets/opendatalab-0930.png" alt="OpenDataLab" />
+      </div>
+      <span class="footer-text"><a href="#hero">Back to top</a></span>
+    </div>
+  </footer>
+
+  <!-- Image zoom modal -->
+  <dialog class="modal" id="figure-modal" aria-label="Expanded figure">
+    <div class="modal-inner">
+      <button class="modal-close" type="button" aria-label="Close">&times;</button>
+      <img id="modal-image" alt="" />
+    </div>
+  </dialog>
+
+  <script>
+    const modal = document.getElementById("figure-modal");
+    const modalImg = document.getElementById("modal-image");
+    document.querySelectorAll("[data-zoomable]").forEach(img => {
+      img.addEventListener("click", () => {
+        modalImg.src = img.src;
+        modalImg.alt = img.alt;
+        modal.showModal();
+      });
+    });
+    document.querySelector(".modal-close").addEventListener("click", () => modal.close());
+    modal.addEventListener("click", e => { if (e.target === modal) modal.close(); });
+  </script>
+</body>
+
+</html>

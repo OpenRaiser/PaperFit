@@ -1,0 +1,182 @@
+{
+  "version": 1,
+  "directory": "/Volumes/T7/PaperFit/TR_PaperFit/webpage/figures",
+  "assets": [
+    {
+      "source": "Figure/PaperFit.pdf",
+      "output": "webpage/figures/paperfit.png",
+      "kind": "raster-from-pdf",
+      "page": null,
+      "width": 6360,
+      "height": 2340,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 2.7179
+    },
+    {
+      "source": "Figure/PaperFit_pipeline.pdf",
+      "output": "webpage/figures/paperfit-pipeline.png",
+      "kind": "raster-from-pdf",
+      "page": null,
+      "width": 4896,
+      "height": 2400,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 2.04
+    },
+    {
+      "source": "Figure/PaperFit_pipline.png",
+      "output": "webpage/figures/paperfit-pipline.png",
+      "kind": "raster",
+      "page": null,
+      "width": 1959,
+      "height": 1121,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 1.7475
+    },
+    {
+      "source": "Figure/PaperFit_v2.pdf",
+      "output": "webpage/figures/paperfit-v2.png",
+      "kind": "raster-from-pdf",
+      "page": null,
+      "width": 5993,
+      "height": 2022,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 2.9639
+    },
+    {
+      "source": "Figure/PaperFit_v3.pdf",
+      "output": "webpage/figures/paperfit-v3.png",
+      "kind": "raster-from-pdf",
+      "page": null,
+      "width": 6061,
+      "height": 2032,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 2.9828
+    },
+    {
+      "source": "Figure/Perturbation_strategy_double_pie.png",
+      "output": "webpage/figures/perturbation-strategy-double-pie.png",
+      "kind": "raster",
+      "page": null,
+      "width": 2389,
+      "height": 1314,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 1.8181
+    },
+    {
+      "source": "Figure/case_study1.pdf",
+      "output": "webpage/figures/case-study1.png",
+      "kind": "raster-from-pdf",
+      "page": null,
+      "width": 2400,
+      "height": 1350,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 1.7778
+    },
+    {
+      "source": "Figure/case_study2.pdf",
+      "output": "webpage/figures/case-study2.png",
+      "kind": "raster-from-pdf",
+      "page": null,
+      "width": 2400,
+      "height": 1350,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 1.7778
+    },
+    {
+      "source": "Figure/case_study3.pdf",
+      "output": "webpage/figures/case-study3.png",
+      "kind": "raster-from-pdf",
+      "page": null,
+      "width": 2400,
+      "height": 1350,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 1.7778
+    },
+    {
+      "source": "Figure/case_study4.pdf",
+      "output": "webpage/figures/case-study4.png",
+      "kind": "raster-from-pdf",
+      "page": null,
+      "width": 2400,
+      "height": 1350,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 1.7778
+    },
+    {
+      "source": "Figure/error_case1.pdf",
+      "output": "webpage/figures/error-case1.png",
+      "kind": "raster-from-pdf",
+      "page": null,
+      "width": 2400,
+      "height": 2976,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 0.8065
+    },
+    {
+      "source": "Figure/error_case2.pdf",
+      "output": "webpage/figures/error-case2.png",
+      "kind": "raster-from-pdf",
+      "page": null,
+      "width": 2400,
+      "height": 2976,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 0.8065
+    },
+    {
+      "source": "Figure/model_comparison_venue_heatmap.pdf",
+      "output": "webpage/figures/model-comparison-venue-heatmap.png",
+      "kind": "raster-from-pdf",
+      "page": null,
+      "width": 1530,
+      "height": 469,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 3.2623
+    },
+    {
+      "source": "Figure/model_comparison_vlm_dimensionv2.pdf",
+      "output": "webpage/figures/model-comparison-vlm-dimensionv2.png",
+      "kind": "raster-from-pdf",
+      "page": null,
+      "width": 1960,
+      "height": 593,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 3.3052
+    },
+    {
+      "source": "Figure/pipeline.pdf",
+      "output": "webpage/figures/pipeline.png",
+      "kind": "raster-from-pdf",
+      "page": null,
+      "width": 6880,
+      "height": 3840,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 1.7917
+    },
+    {
+      "source": "Figure/spearman_correlation_academic.pdf",
+      "output": "webpage/figures/spearman-correlation-academic.png",
+      "kind": "raster-from-pdf",
+      "page": null,
+      "width": 1310,
+      "height": 943,
+      "alt": "",
+      "notes": [],
+      "aspect_ratio": 1.3892
+    }
+  ]
+}
