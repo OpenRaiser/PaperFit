@@ -14,6 +14,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from orchestrator_runtime import OrchestratorRuntime  # noqa: E402
+from repair_plan_generator import generate_repair_plan  # noqa: E402
 from repair_plan_executor import _effective_changes  # noqa: E402
 from runtime_repair_plan import (  # noqa: E402
     attach_repair_plan_fingerprint,
@@ -101,6 +102,49 @@ class RuntimeRepairPlanTest(unittest.TestCase):
             self.assertFalse(stale["fresh"])
             self.assertEqual(stale["status"], "stale")
             self.assertEqual(stale["changed_files"][0]["path"], "main.tex")
+
+    def test_repair_plan_generator_attaches_candidate_risk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            visual_path = root / "visual_signal_report.json"
+            crossrefs_path = root / "crossrefs_report.json"
+            output_path = root / "repair_plan.json"
+            visual_path.write_text(json.dumps({"summary": {"pages_analyzed": 2}}), encoding="utf-8")
+            crossrefs_path.write_text(
+                json.dumps(
+                    {
+                        "distances": [
+                            {
+                                "label": "fig:near",
+                                "float_type": "figure",
+                                "severity": "major",
+                                "line_distance": 45,
+                                "section_distance": 0,
+                            }
+                        ],
+                        "floats": [
+                            {
+                                "label": "fig:near",
+                                "float_type": "figure",
+                                "section": "Method",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            plan = generate_repair_plan(
+                visual_signal_report=str(visual_path),
+                output_path=str(output_path),
+                crossrefs_report=str(crossrefs_path),
+            )
+
+            self.assertEqual(plan["summary"]["total_candidates"], 1)
+            self.assertEqual(plan["candidates"][0]["risk"]["risk_level"], "medium")
+            self.assertEqual(plan["candidates"][0]["risk"]["operation"], "float_placement")
+            persisted = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertIn("risk", persisted["candidates"][0])
 
     def test_execute_repair_plan_blocks_stale_plan_before_executor(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -61,6 +61,25 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 os.utime(defect_report, (base_mtime + 3, base_mtime + 3))
                 os.utime(gatekeeper_report, (base_mtime + 4, base_mtime + 4))
                 if core_calls["count"] == 1:
+                    repair_plan = root / "data" / "repair_plan.json"
+                    repair_plan.write_text(
+                        json.dumps(
+                            {
+                                "schema_version": "1.0",
+                                "summary": {"total_candidates": 1},
+                                "candidates": [
+                                    {
+                                        "candidate_type": "source_anchor",
+                                        "defect_family": "B1",
+                                        "proposed_action": "move_float_closer_to_first_reference",
+                                        "section_distance": 0,
+                                        "target": {"label": "fig:near", "float_type": "figure"},
+                                    }
+                                ],
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
                     self.manager.update(
                         {
                             "compile_success": True,
@@ -81,6 +100,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                                 "page_images_dir": "data/pages",
                                 "visual_signal_report": "data/visual_signal_report.json",
                                 "defect_report": "data/defect_report.json",
+                                "repair_plan": "data/repair_plan.json",
                                 "gatekeeper_decision": "data/gatekeeper_decision.json",
                             },
                         }
@@ -194,6 +214,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
             self.assertEqual(core_calls["count"], 2)
             self.assertTrue(result["runtime_actions"]["pre_repair_snapshot"]["success"])
             self.assertEqual(result["runtime_actions"]["repair_plan_executor"]["applied_count"], 1)
+            self.assertEqual(result["runtime_actions"]["repair_plan_executor"]["approval_scope_gate"]["status"], "pass")
             self.assertEqual(result["runtime_actions"]["source_mutation_integrity"]["changed_files"], 1)
             self.assertEqual(result["approval"]["status"], "approved_and_executed")
             self.assertFalse(result["approval"]["requires_approval"])
@@ -228,6 +249,152 @@ class RuntimeSourceChangingTest(unittest.TestCase):
             self.assertEqual(rollback_state["artifacts"]["rollback_report"], "data/rollback_report.json")
             self.assertIn("\\documentclass{article}", main_tex.read_text(encoding="utf-8"))
             self.assertTrue((root / "data" / "rollback_report.json").is_file())
+
+    def test_full_vto_runtime_blocks_high_risk_candidate_before_executor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            (root / "data").mkdir()
+            main_tex = root / "main.tex"
+            main_tex.write_text(
+                "\\documentclass{article}\n"
+                "\\begin{document}\n"
+                "High-risk gate fixture.\n"
+                "\\end{document}\n",
+                encoding="utf-8",
+            )
+            original_sha = hashlib.sha256(main_tex.read_bytes()).hexdigest()
+            pdf = root / "main.pdf"
+            pdf.write_bytes(b"%PDF fixture\n")
+
+            def fake_core(
+                self: OrchestratorRuntime,
+                **_: object,
+            ) -> dict[str, object]:
+                page_dir = root / "data" / "pages"
+                page_dir.mkdir(parents=True, exist_ok=True)
+                page = page_dir / "page_001.png"
+                page.write_bytes(b"png")
+                visual_report = root / "data" / "visual_signal_report.json"
+                defect_report = root / "data" / "defect_report.json"
+                gatekeeper_report = root / "data" / "gatekeeper_decision.json"
+                repair_plan = root / "data" / "repair_plan.json"
+                visual_report.write_text("{}", encoding="utf-8")
+                defect_report.write_text("{}", encoding="utf-8")
+                gatekeeper_report.write_text("{}", encoding="utf-8")
+                repair_plan.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": "1.0",
+                            "summary": {"total_candidates": 1},
+                            "candidates": [
+                                {
+                                    "candidate_type": "source_anchor",
+                                    "defect_family": "B1",
+                                    "proposed_action": "move_float_closer_to_first_reference",
+                                    "section_distance": 2,
+                                    "target": {"label": "fig:far", "float_type": "figure"},
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                base_mtime = 1_800_001_000
+                for offset, path in enumerate([pdf, page, visual_report, defect_report, gatekeeper_report]):
+                    os.utime(path, (base_mtime + offset, base_mtime + offset))
+                self.manager.update(
+                    {
+                        "compile_success": True,
+                        "page_images_rendered": True,
+                        "last_gatekeeper_decision": "CONTINUE",
+                        "defect_summary": {
+                            "initial_total": 1,
+                            "resolved": 0,
+                            "remaining": 1,
+                        },
+                        "repair_plan_summary": {
+                            "schema_version": "1.0",
+                            "total_candidates": 1,
+                            "top_candidates": [],
+                            "updated_at": None,
+                        },
+                        "artifacts": {
+                            "page_images_dir": "data/pages",
+                            "visual_signal_report": "data/visual_signal_report.json",
+                            "defect_report": "data/defect_report.json",
+                            "repair_plan": "data/repair_plan.json",
+                            "gatekeeper_decision": "data/gatekeeper_decision.json",
+                        },
+                    }
+                )
+                return self.manager.load()
+
+            spec = TaskSpec.from_dict(
+                {
+                    "task_type": "full_vto",
+                    "project_root": str(root),
+                    "main_tex": "main.tex",
+                    "allow_source_mutation": True,
+                    "pre_repair_snapshot_required": True,
+                    "rollback_policy": "required",
+                }
+            )
+
+            with (
+                mock.patch.object(
+                    orchestrator_runtime,
+                    "compile_latex",
+                    return_value={
+                        "success": True,
+                        "pdf_path": str(pdf),
+                        "timeout": False,
+                        "log_file": "main.log",
+                    },
+                ),
+                mock.patch.object(
+                    orchestrator_runtime,
+                    "render_pdf_pages",
+                    return_value={"success": True, "page_dir": "data/pages"},
+                ),
+                mock.patch.object(
+                    orchestrator_runtime,
+                    "inspect_endmatter_float_intrusion",
+                    return_value={"available": True, "hard_failures": []},
+                ),
+                mock.patch.object(OrchestratorRuntime, "_run_round_core", fake_core),
+                mock.patch.object(
+                    OrchestratorRuntime,
+                    "execute_repair_plan",
+                    side_effect=AssertionError("high-risk candidate must be blocked before executor"),
+                ),
+            ):
+                result = OrchestratorRuntime(state_path=str(root / "data" / "state.json")).run_task(
+                    task_spec=spec,
+                    output_path="data/run_result_full_vto.json",
+                )
+
+            self.assertEqual(hashlib.sha256(main_tex.read_bytes()).hexdigest(), original_sha)
+            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["gatekeeper_decision"], "BLOCKED")
+            self.assertEqual(result["failure"]["failure_type"], "approval_scope_blocked")
+            action = result["runtime_actions"]["repair_plan_executor"]
+            self.assertTrue(action["skipped"])
+            self.assertEqual(action["reason"], "approval_scope_blocked")
+            self.assertEqual(action["approval_scope_gate"]["status"], "blocked")
+            self.assertEqual(
+                action["approval_scope_gate"]["blocked_candidates"][0]["risk"]["operation"],
+                "float_movement_across_section_boundary",
+            )
+            self.assertNotIn("source_mutation_integrity", result["runtime_actions"])
+            self.assertNotIn("post_repair_observe", result["runtime_actions"])
+            self.assertEqual(result["approval"]["status"], "approval_required")
+            self.assertEqual(result["repair_loop_policy"]["stop_condition"], "approval_scope_blocked")
+            self.assertEqual(result["repair_loop_policy"]["next_round_reason"], "approval_scope_blocked")
+            self.assertFalse(
+                result["repair_loop_policy"]["second_round_apply_readiness"]["checks"][
+                    "candidate_approval_scope_gate_pass"
+                ]
+            )
 
     def test_full_vto_dry_run_does_not_execute_repair_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

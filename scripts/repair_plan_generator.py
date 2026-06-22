@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from runtime_repair_risk import annotate_repair_candidates
+
 
 def _load_json(path: Optional[str]) -> Dict[str, Any]:
     if not path:
@@ -982,6 +984,7 @@ def generate_repair_plan(
         + visual_space_candidates
         + log_candidates
     )
+    candidates = annotate_repair_candidates(candidates)
     candidates.sort(
         key=lambda item: (
             -int(item.get("priority_score") or 0),

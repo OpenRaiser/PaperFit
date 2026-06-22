@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, Optional
 
 from runtime_artifacts import collect_artifact_manifest
 from runtime_actions import compile_latex, inspect_endmatter_float_intrusion, render_pdf_pages
-from runtime_approval import build_approval_object
+from runtime_approval import build_approval_object, build_candidate_approval_scope_gate
 from runtime_events import RuntimeEventWriter
 from runtime_repair_plan import (
     attach_repair_plan_fingerprint,
@@ -736,116 +736,173 @@ class OrchestratorRuntime:
                             payload={"reason": "dry_run_source_mutation"},
                         )
                     else:
-                        repair_state = self.execute_repair_plan(
-                            main_tex=task_spec.main_tex,
-                            output_path="data/repair_execution_report.json",
-                            max_candidates=1,
-                        )
-                        repair_summary = repair_state.get("repair_execution_summary") or {}
-                        self._record_runtime_action(
-                            "repair_plan_executor",
-                            {
-                                "success": True,
-                                "input_artifacts": {
-                                    "repair_plan": (state.get("artifacts") or {}).get("repair_plan"),
-                                    "main_tex": task_spec.main_tex,
-                                    "rollback_target": snapshot.get("rollback_target"),
-                                },
-                                "output_path": "data/repair_execution_report.json",
-                                "output_artifacts": {
-                                    "repair_execution_report": "data/repair_execution_report.json",
-                                },
-                                "applied_count": int(repair_summary.get("applied_count") or 0),
-                                "status": repair_summary.get("status"),
-                            },
-                            phase="repair",
-                            state="REPAIRING",
-                            emit_event=emit_runtime_event,
+                        provisional_approval = build_approval_object(
+                            task=task_spec.to_dict(),
+                            state=state,
                             runtime_actions=runtime_actions,
                         )
-                        runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "repair_applied")
-                        emit_runtime_event(
-                            "phase_completed",
-                            phase="repair",
-                            state=runtime_state,
-                            payload=repair_summary,
+                        candidate_scope_gate = build_candidate_approval_scope_gate(
+                            task=task_spec.to_dict(),
+                            approval=provisional_approval,
+                            repair_plan=self._load_repair_plan_for_scope_gate(state),
+                            candidate_limit=1,
                         )
-                        mutation_report = build_source_mutation_report(
-                            project_root=project_root,
-                            rollback_target=str(snapshot.get("rollback_target")),
-                            output_path="data/source_mutation_report.json",
-                        )
-                        self.manager.update(
-                            {
-                                "artifacts": {"source_mutation_report": "data/source_mutation_report.json"},
-                                "content_integrity": {
-                                    "validation_status": "mutation_reported",
-                                    "rollback_target": snapshot.get("rollback_target"),
+                        if candidate_scope_gate.get("status") != "pass":
+                            self._record_runtime_action(
+                                "repair_plan_executor",
+                                {
+                                    "success": False,
+                                    "skipped": True,
+                                    "reason": "approval_scope_blocked",
+                                    "requires_approval": True,
+                                    "input_artifacts": {
+                                        "repair_plan": (state.get("artifacts") or {}).get("repair_plan"),
+                                        "main_tex": task_spec.main_tex,
+                                        "rollback_target": snapshot.get("rollback_target"),
+                                    },
+                                    "output_artifacts": {},
+                                    "approval_scope_gate": candidate_scope_gate,
+                                    "planned_candidates": int(repair_plan_summary.get("total_candidates") or 0),
                                 },
-                            }
-                        )
-                        self._record_runtime_action(
-                            "source_mutation_integrity",
-                            {
-                                "success": True,
-                                "input_artifacts": {
-                                    "rollback_target": snapshot.get("rollback_target"),
-                                    "main_tex": task_spec.main_tex,
+                                phase="repair",
+                                state="REPAIRING",
+                                emit_event=emit_runtime_event,
+                                runtime_actions=runtime_actions,
+                            )
+                            runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "repair_skipped")
+                            emit_runtime_event(
+                                "phase_completed",
+                                phase="repair",
+                                state=runtime_state,
+                                payload={"reason": "approval_scope_blocked", "approval_scope_gate": candidate_scope_gate},
+                            )
+                            self.manager.update_failure_tracking(
+                                decision="BLOCKED",
+                                failure_type="approval_scope_blocked",
+                            )
+                            self.manager.update(
+                                {
+                                    "status": "BLOCKED",
+                                    "last_gatekeeper_decision": "BLOCKED",
+                                    "next_actions": [
+                                        "Request fresh approval for the selected high-risk repair candidate or regenerate a lower-risk repair plan",
+                                    ],
+                                }
+                            )
+                            state = self.manager.load()
+                            repair_summary = {}
+                        else:
+                            repair_state = self.execute_repair_plan(
+                                main_tex=task_spec.main_tex,
+                                output_path="data/repair_execution_report.json",
+                                max_candidates=1,
+                            )
+                            repair_summary = repair_state.get("repair_execution_summary") or {}
+                            self._record_runtime_action(
+                                "repair_plan_executor",
+                                {
+                                    "success": True,
+                                    "input_artifacts": {
+                                        "repair_plan": (state.get("artifacts") or {}).get("repair_plan"),
+                                        "main_tex": task_spec.main_tex,
+                                        "rollback_target": snapshot.get("rollback_target"),
+                                    },
+                                    "output_path": "data/repair_execution_report.json",
+                                    "output_artifacts": {
+                                        "repair_execution_report": "data/repair_execution_report.json",
+                                    },
+                                    "approval_scope_gate": candidate_scope_gate,
+                                    "applied_count": int(repair_summary.get("applied_count") or 0),
+                                    "status": repair_summary.get("status"),
                                 },
-                                "output_path": "data/source_mutation_report.json",
-                                "output_artifacts": {
-                                    "source_mutation_report": "data/source_mutation_report.json",
+                                phase="repair",
+                                state="REPAIRING",
+                                emit_event=emit_runtime_event,
+                                runtime_actions=runtime_actions,
+                            )
+                            runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "repair_applied")
+                            emit_runtime_event(
+                                "phase_completed",
+                                phase="repair",
+                                state=runtime_state,
+                                payload=repair_summary,
+                            )
+                            mutation_report = build_source_mutation_report(
+                                project_root=project_root,
+                                rollback_target=str(snapshot.get("rollback_target")),
+                                output_path="data/source_mutation_report.json",
+                            )
+                            self.manager.update(
+                                {
+                                    "artifacts": {"source_mutation_report": "data/source_mutation_report.json"},
+                                    "content_integrity": {
+                                        "validation_status": "mutation_reported",
+                                        "rollback_target": snapshot.get("rollback_target"),
+                                    },
+                                }
+                            )
+                            self._record_runtime_action(
+                                "source_mutation_integrity",
+                                {
+                                    "success": True,
+                                    "input_artifacts": {
+                                        "rollback_target": snapshot.get("rollback_target"),
+                                        "main_tex": task_spec.main_tex,
+                                    },
+                                    "output_path": "data/source_mutation_report.json",
+                                    "output_artifacts": {
+                                        "source_mutation_report": "data/source_mutation_report.json",
+                                    },
+                                    "changed_files": int((mutation_report.get("summary") or {}).get("changed_files") or 0),
+                                    "missing_files": int((mutation_report.get("summary") or {}).get("missing_files") or 0),
                                 },
-                                "changed_files": int((mutation_report.get("summary") or {}).get("changed_files") or 0),
-                                "missing_files": int((mutation_report.get("summary") or {}).get("missing_files") or 0),
-                            },
-                            phase="verify",
-                            state="VERIFYING",
-                            emit_event=emit_runtime_event,
-                            runtime_actions=runtime_actions,
-                        )
-                        runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "start_post_observe")
-                        emit_runtime_event(
-                            "phase_started",
-                            phase="observe",
-                            state=runtime_state,
-                            message="Observing post-repair compile and render artifacts",
-                        )
-                        post_observe = self._run_visual_only_observe_actions(
-                            task_spec=task_spec,
-                            emit_event=emit_runtime_event,
-                        )
-                        runtime_actions["post_repair_observe"] = post_observe
-                        state = self._run_round_core(
-                            main_tex=task_spec.main_tex,
-                            log_file=task_spec.log_file,
-                            page_dir=task_spec.page_dir,
-                            template=task_spec.template,
-                            target_pages=task_spec.target_pages,
-                            column_void_report=task_spec.column_void_report,
-                            emit_event=emit_runtime_event,
-                            runtime_actions=runtime_actions,
-                        )
-                        runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "artifacts_observed")
-                        emit_runtime_event(
-                            "phase_completed",
-                            phase="observe",
-                            state=runtime_state,
-                            payload={"artifacts": state.get("artifacts") or {}},
-                        )
-                        runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(
-                            runtime_state,
-                            "post_repair_diagnosis_complete",
-                        )
-                        emit_runtime_event(
-                            "phase_completed",
-                            phase="diagnose",
-                            state=runtime_state,
-                            payload={
-                                "defect_summary": state.get("defect_summary") or {},
-                                "repair_plan_summary": state.get("repair_plan_summary") or {},
-                            },
-                        )
+                                phase="verify",
+                                state="VERIFYING",
+                                emit_event=emit_runtime_event,
+                                runtime_actions=runtime_actions,
+                            )
+                            runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "start_post_observe")
+                            emit_runtime_event(
+                                "phase_started",
+                                phase="observe",
+                                state=runtime_state,
+                                message="Observing post-repair compile and render artifacts",
+                            )
+                            post_observe = self._run_visual_only_observe_actions(
+                                task_spec=task_spec,
+                                emit_event=emit_runtime_event,
+                            )
+                            runtime_actions["post_repair_observe"] = post_observe
+                            state = self._run_round_core(
+                                main_tex=task_spec.main_tex,
+                                log_file=task_spec.log_file,
+                                page_dir=task_spec.page_dir,
+                                template=task_spec.template,
+                                target_pages=task_spec.target_pages,
+                                column_void_report=task_spec.column_void_report,
+                                emit_event=emit_runtime_event,
+                                runtime_actions=runtime_actions,
+                            )
+                            runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "artifacts_observed")
+                            emit_runtime_event(
+                                "phase_completed",
+                                phase="observe",
+                                state=runtime_state,
+                                payload={"artifacts": state.get("artifacts") or {}},
+                            )
+                            runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(
+                                runtime_state,
+                                "post_repair_diagnosis_complete",
+                            )
+                            emit_runtime_event(
+                                "phase_completed",
+                                phase="diagnose",
+                                state=runtime_state,
+                                payload={
+                                    "defect_summary": state.get("defect_summary") or {},
+                                    "repair_plan_summary": state.get("repair_plan_summary") or {},
+                                },
+                            )
                 else:
                     runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "no_repair_candidates")
                     self._record_runtime_action(
@@ -1172,6 +1229,21 @@ class OrchestratorRuntime:
                 state=state,
                 payload={"action": event_action_name, "result": action_result},
             )
+
+    def _load_repair_plan_for_scope_gate(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        repair_plan = (state.get("artifacts") or {}).get("repair_plan")
+        if not repair_plan:
+            return {}
+        path = Path(str(repair_plan))
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        if not path.is_file():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def _mark_runtime_compile_blocked(
         self,

@@ -5,6 +5,11 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+try:
+    from runtime_repair_risk import classify_repair_candidate_risk
+except ModuleNotFoundError:  # package import during unit tests
+    from .runtime_repair_risk import classify_repair_candidate_risk
+
 
 SOURCE_CHANGING_TASK_TYPES = {
     "full_vto",
@@ -146,6 +151,11 @@ def build_approval_object(
         requires_approval = False
         approval_granted = True
         reason = str(action.get("status"))
+    elif action_skipped and action_reason == "approval_scope_blocked":
+        status = "approval_required"
+        requires_approval = True
+        approval_granted = False
+        reason = "approval_scope_blocked"
     elif action_skipped:
         status = "not_required"
         requires_approval = False
@@ -255,4 +265,78 @@ def build_approval_scope_carry_forward_check(
         "mutation_surface": mutation_surface,
         "high_risk_operations": high_risk_operations,
         "checks": checks,
+    }
+
+
+def build_candidate_approval_scope_gate(
+    *,
+    task: Dict[str, Any],
+    approval: Dict[str, Any],
+    repair_plan: Dict[str, Any],
+    candidate_limit: int = 1,
+) -> Dict[str, Any]:
+    """Evaluate whether selected repair candidates fit the approval scope."""
+
+    task_type = _task_type(task)
+    if task_type not in SOURCE_CHANGING_TASK_TYPES:
+        return {
+            "schema_version": "1.0",
+            "status": "not_applicable",
+            "reason": "task_does_not_change_source",
+            "selected_candidate_count": 0,
+            "candidate_risks": [],
+            "blocked_candidates": [],
+        }
+
+    policy = approval.get("policy") if isinstance(approval.get("policy"), dict) else {}
+    allowed_surface = set(str(item) for item in (policy.get("mutation_surface") or []))
+    high_risk_operations = set(str(item) for item in (policy.get("high_risk_operations") or []))
+    candidates = [
+        item
+        for item in (repair_plan.get("candidates") or [])[: max(0, int(candidate_limit or 0))]
+        if isinstance(item, dict)
+    ]
+    candidate_risks = []
+    blocked_candidates = []
+    for index, candidate in enumerate(candidates, start=1):
+        risk = candidate.get("risk") if isinstance(candidate.get("risk"), dict) else classify_repair_candidate_risk(candidate)
+        surfaces = set(str(item) for item in (risk.get("mutation_surface") or []))
+        operation = str(risk.get("operation") or "")
+        surface_within_scope = bool(surfaces) and surfaces.issubset(allowed_surface)
+        high_risk_operation = operation in high_risk_operations or str(risk.get("risk_level") or "") == "high"
+        allowed = surface_within_scope and not high_risk_operation
+        entry = {
+            "index": index,
+            "defect_family": candidate.get("defect_family"),
+            "candidate_type": candidate.get("candidate_type"),
+            "proposed_action": candidate.get("proposed_action"),
+            "target": candidate.get("target"),
+            "risk": risk,
+            "checks": {
+                "mutation_surface_within_scope": surface_within_scope,
+                "high_risk_operation_requires_fresh_approval": high_risk_operation,
+            },
+            "allowed_under_current_scope": allowed,
+        }
+        candidate_risks.append(entry)
+        if not allowed:
+            blocked_candidates.append(entry)
+
+    status = "pass" if candidates and not blocked_candidates else "blocked" if candidates else "not_evaluated"
+    reason = (
+        "selected_candidates_within_approval_scope"
+        if status == "pass"
+        else "selected_candidate_exceeds_approval_scope"
+        if blocked_candidates
+        else "no_selected_candidates"
+    )
+    return {
+        "schema_version": "1.0",
+        "status": status,
+        "reason": reason,
+        "approval_scope": policy.get("approval_scope"),
+        "candidate_limit": candidate_limit,
+        "selected_candidate_count": len(candidates),
+        "candidate_risks": candidate_risks,
+        "blocked_candidates": blocked_candidates,
     }

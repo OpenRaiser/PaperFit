@@ -88,6 +88,9 @@ def build_repair_loop_policy(
     repair_action = (runtime_actions.get("repair_plan_executor") or {}) if isinstance(runtime_actions, dict) else {}
     freshness = (artifact_manifest.get("freshness") or {}) if isinstance(artifact_manifest, dict) else {}
     approval_policy = approval.get("policy") or {}
+    approval_scope_gate = repair_action.get("approval_scope_gate") if isinstance(repair_action, dict) else None
+    if not isinstance(approval_scope_gate, dict):
+        approval_scope_gate = None
 
     max_rounds = max(1, _as_int(task.get("max_rounds"), 1))
     current_round = max(1, _as_int(state.get("current_round"), 1))
@@ -96,7 +99,9 @@ def build_repair_loop_policy(
     dry_run = bool(task.get("dry_run_source_mutation")) or repair_action.get("reason") == "dry_run_source_mutation"
 
     stop_condition = "continue"
-    if approval.get("status") == "approval_required":
+    if approval_scope_gate and approval_scope_gate.get("status") != "pass":
+        stop_condition = "approval_scope_blocked"
+    elif approval.get("status") == "approval_required":
         stop_condition = "approval_required"
     elif str(status or "").lower() == "done" or str(gatekeeper_decision or "").upper() == "DONE":
         stop_condition = "done"
@@ -110,6 +115,8 @@ def build_repair_loop_policy(
     next_round_reason = "multi_round_apply_not_enabled_in_current_runtime"
     if dry_run:
         next_round_reason = "dry_run_source_mutation"
+    elif stop_condition == "approval_scope_blocked":
+        next_round_reason = "approval_scope_blocked"
     elif approval.get("status") == "approval_required":
         next_round_reason = "approval_required"
     elif stop_condition == "done":
@@ -132,6 +139,7 @@ def build_repair_loop_policy(
         "artifact_freshness_pass": freshness.get("status") == "pass",
         "mutation_integrity_available": bool(content_integrity.get("validation_status")),
         "source_mutation_executed": applied_count > 0,
+        "candidate_approval_scope_gate_pass": approval_scope_gate is None or approval_scope_gate.get("status") == "pass",
         "within_round_limit": current_round < max_rounds,
         "runtime_execution_mode_can_auto_apply": False,
     }
@@ -159,6 +167,7 @@ def build_repair_loop_policy(
         "next_round_allowed": False,
         "next_round_reason": next_round_reason,
         "approval_scope_carry_forward": approval_scope_carry_forward,
+        "candidate_approval_scope_gate": approval_scope_gate,
         "round_artifact_lineage": round_lineage,
         "second_round_apply_readiness": {
             "schema_version": "1.0",
