@@ -122,15 +122,15 @@ def fix_float_reference_distance(
     reference_source: Optional[str] = None,
     force_intervention: bool = False,
     allow_cross_same_type: bool = False,
+    allow_floatbarrier: bool = False,
 ) -> Tuple[str, Optional[FixResult]]:
     r"""
     修复浮动体远离首次引用问题
 
     策略优先级:
-    1. 调整位置参数为 [ht]
-    2. 在引用点后添加 \FloatBarrier
-    3. 移动浮动体源码位置
-    4. 拆分大型浮动体
+    1. 将源码中的目标浮动体移动到首次引用附近
+    2. 对目标浮动体做局部位置参数调整
+    3. 仅在 hard-guard 证据明确允许时插入 \FloatBarrier
 
     Args:
         tex_content: .tex 文件内容
@@ -241,7 +241,7 @@ def fix_float_reference_distance(
     if target_match:
         pos_param = target_match.group(1) if target_match.group(1) else ""
 
-        if pos_param in ['[t]', '[b]', '[h]', '[p]', '[!t]', '[!b]', '[!h]', '[!p]']:
+        if pos_param in ['[b]', '[p]', '[!b]', '[!p]']:
             new_param = "[ht]"
             modified_content = tex_content[:target_match.start(1)] + new_param + tex_content[target_match.end(1):]
             return modified_content, FixResult(
@@ -252,21 +252,10 @@ def fix_float_reference_distance(
                 after=f"\\begin{{{float_type}}}{new_param}",
                 success=True,
             )
-        elif not pos_param:
-            new_param = "[ht]"
-            insert_pos = target_match.end()
-            modified_content = tex_content[:insert_pos] + new_param + tex_content[insert_pos:]
-            return modified_content, FixResult(
-                defect_id="B1",
-                object_name=float_label,
-                action=f"添加浮动体位置参数 {new_param}",
-                before=f"\\begin{{{float_type}}}",
-                after=f"\\begin{{{float_type}}}{new_param}",
-                success=True,
-            )
 
-    # 策略 3: 在引用点后添加 \FloatBarrier
-    if ref_anchor:
+    # 策略 3: 在引用点后添加 \FloatBarrier。默认禁用，必须由 hard-guard
+    # 证据显式允许，避免把普通 B1 修复升级为全局浮动体屏障。
+    if allow_floatbarrier and ref_anchor:
         anchor_end = int(ref_anchor["end"])
         bibliography_start = _find_bibliography_start(tex_content)
         if bibliography_start is not None and anchor_end >= bibliography_start:
@@ -489,6 +478,36 @@ def _defect_labels(defect: Dict[str, Any]) -> List[str]:
     if object_name and object_name not in labels:
         labels.insert(0, object_name)
     return labels
+
+
+def _defect_allows_floatbarrier(defect: Dict[str, Any]) -> bool:
+    """
+    FloatBarrier is intentionally opt-in.
+
+    It is a strong global-ish placement control and should only be used when a
+    defect carries hard visual evidence that normal float placement has crossed
+    an endmatter or similar guard boundary.
+    """
+    explicit_keys = {
+        "allow_floatbarrier",
+        "requires_floatbarrier",
+        "hard_guard_float_intrusion",
+        "endmatter_float_intrusion",
+        "body_float_intrudes_endmatter",
+    }
+    if any(bool(defect.get(key)) for key in explicit_keys):
+        return True
+
+    for key in ("visual_hard_guard", "hard_guard", "hard_guard_evidence"):
+        evidence = defect.get(key)
+        if isinstance(evidence, dict):
+            failure_type = str(evidence.get("failure_type") or evidence.get("type") or "")
+            if failure_type in {"endmatter_float_intrusion", "body_float_intrudes_endmatter"}:
+                return True
+            if bool(evidence.get("endmatter_float_intrusion")):
+                return True
+
+    return False
 
 
 def _contains_any_labeled_float(tex_content: str, labels: List[str]) -> bool:
@@ -1102,7 +1121,6 @@ def _normalize_float_block_for_semantic_fix(
 ) -> str:
     block = tex_content[block_start:block_end]
     updated_block = _ensure_label_after_caption_in_block(block, float_label=float_label)
-    updated_block = _normalize_position_spec_for_semantic_fix(updated_block, env_name=env_name)
     updated_block = _normalize_figure_width_for_semantic_fix(updated_block, env_name=env_name)
     if updated_block == block:
         return tex_content
@@ -1965,16 +1983,6 @@ def fix_float_defects(
     changes = []
     unresolved = []
 
-    # 检查是否需要添加 placeins 宏包
-    needs_placeins = bool(defects)
-    if needs_placeins and '\\usepackage{placeins}' not in tex_content:
-        new_content, fix_result = add_floatbarrier_to_preamble(tex_content)
-        if fix_result and new_content != tex_content:
-            tex_content = new_content
-            tex_contents[tex_path] = tex_content
-            changes.append(fix_result)
-            modified_files.add(str(tex_path))
-
     ordered_defects = sorted(
         defects,
         key=lambda defect: (
@@ -2007,17 +2015,15 @@ def fix_float_defects(
             defect["reference_source"] = "latex_ref_normalized"
             defect["reference_text"] = f"\\ref{{{object_name}}}"
 
-    tex_content, baseline_position_changes = _apply_global_restrictive_position_normalization(tex_content)
-    if baseline_position_changes:
-        tex_contents[tex_path] = tex_content
-        changes.extend(baseline_position_changes)
-        modified_files.add(str(tex_path))
-
-    tex_content, endmatter_barrier_change = _enforce_endmatter_float_barrier(tex_content)
-    if endmatter_barrier_change:
-        tex_contents[tex_path] = tex_content
-        changes.append(endmatter_barrier_change)
-        modified_files.add(str(tex_path))
+    if any(_defect_allows_floatbarrier(defect) for defect in ordered_defects):
+        tex_content, endmatter_barrier_change = _enforce_endmatter_float_barrier(tex_content)
+        if endmatter_barrier_change:
+            tex_content, preamble_change = add_floatbarrier_to_preamble(tex_content)
+            tex_contents[tex_path] = tex_content
+            if preamble_change:
+                changes.append(preamble_change)
+            changes.append(endmatter_barrier_change)
+            modified_files.add(str(tex_path))
 
     for defect in ordered_defects:
         defect_id = defect.get("defect_id", "")
@@ -2131,6 +2137,7 @@ def fix_float_defects(
                 reference_source=reference_source,
                 force_intervention=bool(defect.get("semantic_band")),
                 allow_cross_same_type=allow_cross_same_type,
+                allow_floatbarrier=_defect_allows_floatbarrier(defect),
             )
 
         elif defect_id == "B2":
