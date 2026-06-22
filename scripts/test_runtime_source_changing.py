@@ -206,6 +206,13 @@ class RuntimeSourceChangingTest(unittest.TestCase):
             self.assertEqual(policy["stop_condition"], "done")
             self.assertFalse(policy["next_round_allowed"])
             self.assertEqual(policy["next_round_reason"], "gatekeeper_done")
+            self.assertEqual(policy["approval_scope_carry_forward"]["status"], "pass")
+            self.assertEqual(policy["second_round_apply_readiness"]["status"], "blocked")
+            self.assertFalse(policy["second_round_apply_readiness"]["checks"]["runtime_execution_mode_can_auto_apply"])
+            self.assertIn("round_artifact_lineage", policy)
+            self.assertEqual(result["round_artifact_lineage"][0]["round"], 1)
+            self.assertIn("repair_plan_executor", result["round_artifact_lineage"][0]["actions"])
+            self.assertIn("source_mutation_integrity", result["round_artifact_lineage"][0]["actions"])
             self.assertIn("post_repair_observe", result["runtime_actions"])
             state = json.loads((root / "data" / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state["content_integrity"]["validation_status"], "mutation_reported")
@@ -332,6 +339,11 @@ class RuntimeSourceChangingTest(unittest.TestCase):
             self.assertEqual(policy["stop_condition"], "approval_required")
             self.assertFalse(policy["next_round_allowed"])
             self.assertEqual(policy["next_round_reason"], "dry_run_source_mutation")
+            self.assertEqual(policy["approval_scope_carry_forward"]["status"], "pass")
+            self.assertEqual(policy["second_round_apply_readiness"]["status"], "blocked")
+            self.assertFalse(policy["second_round_apply_readiness"]["checks"]["source_mutation_executed"])
+            self.assertEqual(result["round_artifact_lineage"][0]["round"], 1)
+            self.assertIn("repair_plan_executor", result["round_artifact_lineage"][0]["actions"])
             self.assertNotIn("post_repair_observe", result["runtime_actions"])
             event_log = root / result["event_log"]
             events = [
@@ -437,6 +449,9 @@ class RuntimeSourceChangingTest(unittest.TestCase):
             self.assertEqual(policy["plan_candidates"], 2)
             self.assertFalse(policy["next_round_allowed"])
             self.assertEqual(policy["next_round_reason"], "dry_run_source_mutation")
+            self.assertEqual(policy["approval_scope_carry_forward"]["status"], "pass")
+            self.assertEqual(policy["second_round_apply_readiness"]["status"], "blocked")
+            self.assertIn("repair_plan_executor", policy["round_artifact_lineage"][0]["actions"])
 
 
 if __name__ == "__main__":

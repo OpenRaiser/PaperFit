@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from scripts.runtime_approval import build_approval_object
+from scripts.runtime_approval import build_approval_object, build_approval_scope_carry_forward_check
 from scripts.runtime_state_machine import (
     IllegalTransitionError,
     SOURCE_CHANGING_STATE_MACHINE,
@@ -155,6 +155,33 @@ class RuntimeContractTest(unittest.TestCase):
         self.assertIn("table_environment", approval["policy"]["mutation_surface"])
         self.assertIn("table_reconstruction", approval["policy"]["high_risk_operations"])
         self.assertTrue(approval["policy"]["fresh_approval_required_for_high_risk_operations"])
+
+    def test_approval_scope_carry_forward_reports_contract_match(self) -> None:
+        approval = build_approval_object(
+            task={
+                "task_type": "full_vto",
+                "dry_run_source_mutation": True,
+                "rollback_policy": "required",
+                "pre_repair_snapshot_required": True,
+            },
+            state={"repair_plan_summary": {"total_candidates": 1}},
+            runtime_actions={
+                "repair_plan_executor": {
+                    "skipped": True,
+                    "reason": "dry_run_source_mutation",
+                }
+            },
+        )
+
+        check = build_approval_scope_carry_forward_check(
+            task={"task_type": "full_vto"},
+            approval=approval,
+        )
+
+        self.assertEqual(check["status"], "pass")
+        self.assertEqual(check["approval_scope"], "bounded_layout_repair")
+        self.assertTrue(check["checks"]["approval_scope_matches"])
+        self.assertTrue(check["checks"]["fresh_approval_required_for_high_risk_operations"])
 
 
 if __name__ == "__main__":

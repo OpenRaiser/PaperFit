@@ -77,6 +77,13 @@ def build_runtime_status(
     repair_loop_policy = run_result.get("repair_loop_policy")
     if not isinstance(repair_loop_policy, dict):
         repair_loop_policy = None
+    round_artifact_lineage = run_result.get("round_artifact_lineage")
+    if not isinstance(round_artifact_lineage, list):
+        round_artifact_lineage = []
+    if not round_artifact_lineage and isinstance(repair_loop_policy, dict):
+        policy_lineage = repair_loop_policy.get("round_artifact_lineage")
+        if isinstance(policy_lineage, list):
+            round_artifact_lineage = policy_lineage
     approval = run_result.get("approval") if isinstance(run_result.get("approval"), dict) else None
     if approval is None:
         approval = build_approval_object(
@@ -140,6 +147,7 @@ def build_runtime_status(
         },
         "approval": approval,
         "repair_loop_policy": repair_loop_policy,
+        "round_artifact_lineage": round_artifact_lineage,
         "content_integrity": {
             "validation_status": content_integrity.get("validation_status"),
             "action_taken": content_integrity.get("action_taken"),

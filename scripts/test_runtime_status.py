@@ -209,6 +209,19 @@ class RuntimeStatusTest(unittest.TestCase):
                     "next_round_allowed": False,
                     "next_round_reason": "dry_run_source_mutation",
                 },
+                "round_artifact_lineage": [
+                    {
+                        "schema_version": "1.0",
+                        "round": 1,
+                        "actions": {
+                            "repair_plan_executor": {
+                                "phase": "repair",
+                                "input_artifacts": {"repair_plan": "data/repair_plan.json"},
+                                "output_artifacts": {},
+                            }
+                        },
+                    }
+                ],
                 "artifact_manifest": {"freshness": {"status": "pass", "blocking_checks": []}},
             }
             (root / "data" / "run_result_agent.json").write_text(
@@ -223,6 +236,8 @@ class RuntimeStatusTest(unittest.TestCase):
             self.assertEqual(policy["round_limit"], 1)
             self.assertFalse(policy["next_round_allowed"])
             self.assertEqual(policy["next_round_reason"], "dry_run_source_mutation")
+            self.assertEqual(status["round_artifact_lineage"][0]["round"], 1)
+            self.assertIn("repair_plan_executor", status["round_artifact_lineage"][0]["actions"])
 
     def test_top_level_status_view_cli_uses_runtime_status_contract(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

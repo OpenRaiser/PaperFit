@@ -287,6 +287,7 @@ class RunResult:
     artifact_manifest: Optional[Dict[str, Any]] = None
     approval: Optional[Dict[str, Any]] = None
     repair_loop_policy: Optional[Dict[str, Any]] = None
+    round_artifact_lineage: List[Dict[str, Any]] = field(default_factory=list)
     failure: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -303,6 +304,7 @@ class RunResult:
             "artifact_manifest": self.artifact_manifest,
             "approval": self.approval,
             "repair_loop_policy": self.repair_loop_policy,
+            "round_artifact_lineage": self.round_artifact_lineage,
             "defect_summary": self.defect_summary,
             "failure": self.failure,
         }

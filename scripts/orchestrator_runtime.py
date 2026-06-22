@@ -27,7 +27,7 @@ from runtime_repair_plan import (
     blocked_stale_repair_plan_report,
     validate_repair_plan_freshness,
 )
-from runtime_repair_loop import build_repair_loop_policy
+from runtime_repair_loop import build_repair_loop_policy, build_round_artifact_lineage
 from runtime_mutation_integrity import build_source_mutation_report
 from runtime_snapshots import create_pre_repair_snapshot, restore_snapshot
 from runtime_status import build_runtime_status
@@ -926,6 +926,10 @@ class OrchestratorRuntime:
                 state=state,
                 runtime_actions=runtime_actions,
             )
+            round_artifact_lineage = build_round_artifact_lineage(
+                state=state,
+                runtime_actions=runtime_actions,
+            )
             repair_loop_policy = build_repair_loop_policy(
                 task=task_spec.to_dict(),
                 state=state,
@@ -934,6 +938,7 @@ class OrchestratorRuntime:
                 approval=approval,
                 status=status,
                 gatekeeper_decision=decision,
+                round_artifact_lineage=round_artifact_lineage,
             )
 
             result = RunResult(
@@ -949,6 +954,7 @@ class OrchestratorRuntime:
                 artifact_manifest=artifact_manifest,
                 approval=approval,
                 repair_loop_policy=repair_loop_policy,
+                round_artifact_lineage=round_artifact_lineage,
                 failure=failure,
             )
             result_payload = result.to_dict()

@@ -197,6 +197,7 @@ function printRuntimeStatusSummary(status) {
   const repair = status.repair || {};
   const approval = status.approval || {};
   const repairLoop = status.repair_loop_policy || {};
+  const roundArtifactLineage = Array.isArray(status.round_artifact_lineage) ? status.round_artifact_lineage : [];
   const freshness = status.artifact_freshness || {};
   const defects = status.defect_summary || {};
 
@@ -261,6 +262,19 @@ function printRuntimeStatusSummary(status) {
     if (repairLoop.stop_condition) console.log(`    Stop: ${repairLoop.stop_condition}`);
     if (repairLoop.next_round_allowed != null) console.log(`    Next Round Allowed: ${repairLoop.next_round_allowed}`);
     if (repairLoop.next_round_reason) console.log(`    Reason: ${repairLoop.next_round_reason}`);
+    if (repairLoop.approval_scope_carry_forward?.status) {
+      console.log(`    Approval Carry-forward: ${repairLoop.approval_scope_carry_forward.status}`);
+    }
+  }
+
+  if (roundArtifactLineage.length > 0) {
+    const actionCount = roundArtifactLineage.reduce((total, item) => {
+      const actions = item?.actions || {};
+      return total + Object.keys(actions).length;
+    }, 0);
+    console.log('\n  Artifact Lineage');
+    console.log(`    Rounds: ${roundArtifactLineage.length}`);
+    console.log(`    Actions: ${actionCount}`);
   }
 
   if (status.terminal_success_guard) {

@@ -201,3 +201,58 @@ def build_approval_object(
             "source_mutation_report": artifacts.get("source_mutation_report"),
         },
     }
+
+
+def build_approval_scope_carry_forward_check(
+    *,
+    task: Dict[str, Any],
+    approval: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Check whether a later repair round can reuse the same approval scope.
+
+    This is a reporting contract only. It does not grant permission to mutate
+    source; hosts still need an explicit apply approval for source-changing work.
+    """
+
+    task_type = _task_type(task)
+    if task_type not in SOURCE_CHANGING_TASK_TYPES:
+        return {
+            "schema_version": "1.0",
+            "status": "not_applicable",
+            "task_type": task_type,
+            "reason": "task_does_not_change_source",
+        }
+
+    expected = _risk_profile(task_type)
+    policy = approval.get("policy") if isinstance(approval.get("policy"), dict) else {}
+    mutation_surface = policy.get("mutation_surface") if isinstance(policy.get("mutation_surface"), list) else []
+    high_risk_operations = (
+        policy.get("high_risk_operations") if isinstance(policy.get("high_risk_operations"), list) else []
+    )
+    expected_surface = set(expected["mutation_surface"])
+    expected_high_risk = set(expected["high_risk_operations"])
+    actual_surface = set(str(item) for item in mutation_surface)
+    actual_high_risk = set(str(item) for item in high_risk_operations)
+
+    checks = {
+        "approval_scope_matches": policy.get("approval_scope") == expected["approval_scope"],
+        "mutation_surface_within_scope": bool(actual_surface) and actual_surface.issubset(expected_surface),
+        "high_risk_operations_declared": expected_high_risk.issubset(actual_high_risk),
+        "fresh_approval_required_for_high_risk_operations": bool(
+            policy.get("fresh_approval_required_for_high_risk_operations")
+        ),
+    }
+    status = "pass" if all(checks.values()) else "blocked"
+    reason = "approval_scope_can_carry_forward" if status == "pass" else "approval_scope_contract_mismatch"
+
+    return {
+        "schema_version": "1.0",
+        "status": status,
+        "task_type": task_type,
+        "reason": reason,
+        "expected_approval_scope": expected["approval_scope"],
+        "approval_scope": policy.get("approval_scope"),
+        "mutation_surface": mutation_surface,
+        "high_risk_operations": high_risk_operations,
+        "checks": checks,
+    }
