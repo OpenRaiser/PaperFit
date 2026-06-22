@@ -70,6 +70,24 @@ yarn-error.log
 .claude/memory/
 .claude/projects/
 
+# ============ 本地 Codex/PaperFit 工作区内容 ============
+# Personal host instructions and local GUI drafts should not be published.
+AGENTS.md
+apps/
+
+# Local planning/progress documents generated during harness iteration.
+docs/PAPERFIT_AGENT_V1_MAINLINE_*.md
+docs/PAPERFIT_GUI_ITERATION_PLAN.md
+docs/PAPERFIT_HARNESS_REDESIGN_PLAN_*.md
+docs/PAPERFIT_MULTI_ROUND_APPROVED_REPAIR_POLICY_*.md
+docs/PAPERFIT_READER_MUTATOR_BOUNDARY_*.md
+docs/PAPERFIT_V1_PROGRESS_VISUAL_*.md
+docs/PHASE0_BASELINE_*.md
+docs/RUNTIME_BENCHMARK_EXECUTION_STATUS_*.md
+docs/RUNTIME_BENCHMARK_EXPANSION_PLAN_*.md
+docs/commands-reference/run-agent.md
+docs/commands-reference/status-view.md
+
 # ============ 敏感信息 ============
 *.pem
 *.key
