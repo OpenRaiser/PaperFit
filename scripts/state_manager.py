@@ -538,10 +538,14 @@ class StateManager:
 
         artifacts = self._artifacts()
         artifacts["repair_plan"] = rel_report
+        immutability = data.get("immutability") or {}
+        source_fingerprint = immutability.get("source_fingerprint") or {}
         self.state["repair_plan_summary"] = {
             "schema_version": str(data.get("schema_version") or "1.0"),
             "total_candidates": int(((data.get("summary") or {}).get("total_candidates")) or 0),
             "top_candidates": top_candidates,
+            "immutability_policy": immutability.get("policy"),
+            "source_fingerprint_sha256": source_fingerprint.get("aggregate_sha256"),
             "updated_at": datetime.now().isoformat(),
         }
         self.save()

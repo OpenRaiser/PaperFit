@@ -26,6 +26,7 @@ TASK_FIELDS = (
     "portrait_scanned",
 )
 ARTIFACT_FIELDS = (
+    "task_spec",
     "rule_report",
     "crossrefs_report",
     "source_hygiene_report",
@@ -38,6 +39,8 @@ ARTIFACT_FIELDS = (
     "defect_report",
     "repair_plan",
     "repair_execution_report",
+    "rollback_report",
+    "source_mutation_report",
 )
 DEFECT_SUMMARY_FIELDS = ("initial_total", "resolved", "remaining")
 CONTENT_INTEGRITY_FIELDS = (
@@ -54,6 +57,25 @@ FAILURE_TRACKING_FIELDS = (
     "last_failure_type",
     "last_failure_round",
     "last_failure_at",
+)
+RUNTIME_EVENT_SUMMARY_FIELDS = (
+    "schema_version",
+    "run_id",
+    "event_log",
+    "event_count",
+    "last_event_type",
+    "last_phase",
+    "last_runtime_state",
+    "last_message",
+    "last_event_at",
+    "last_action",
+    "actions",
+)
+TERMINAL_SUCCESS_GUARD_FIELDS = (
+    "status",
+    "failure_type",
+    "reason",
+    "artifact_freshness",
 )
 ROOT_FIELDS = (
     "project",
@@ -82,6 +104,8 @@ ROOT_FIELDS = (
     "content_integrity",
     "semantic_budget_summary",
     "failure_tracking",
+    "runtime_event_summary",
+    "terminal_success_guard",
 )
 
 
@@ -113,6 +137,7 @@ def build_default_state(
             "portrait_scanned": None,
         },
         "artifacts": {
+            "task_spec": None,
             "rule_report": None,
             "crossrefs_report": None,
             "page_images_dir": "data/pages",
@@ -124,6 +149,8 @@ def build_default_state(
             "defect_report": None,
             "repair_plan": None,
             "repair_execution_report": None,
+            "rollback_report": None,
+            "source_mutation_report": None,
         },
         "cv_signals_summary": {
             "schema_version": "1.0",
@@ -187,6 +214,20 @@ def build_default_state(
             "last_failure_round": None,
             "last_failure_at": None,
         },
+        "runtime_event_summary": {
+            "schema_version": "1.0",
+            "run_id": None,
+            "event_log": None,
+            "event_count": 0,
+            "last_event_type": None,
+            "last_phase": None,
+            "last_runtime_state": None,
+            "last_message": None,
+            "last_event_at": None,
+            "last_action": None,
+            "actions": {},
+        },
+        "terminal_success_guard": None,
         "archived_at": None,
     }
 
@@ -296,6 +337,30 @@ def validate_state(state: Dict[str, Any]) -> Dict[str, Any]:
             errors.append(
                 "failure_tracking contains unknown keys: " + ", ".join(unknown_failure_fields)
             )
+    if not isinstance(current.get("runtime_event_summary"), dict):
+        errors.append("runtime_event_summary must be an object")
+    else:
+        unknown_runtime_event_fields = sorted(
+            set(current["runtime_event_summary"].keys()) - set(RUNTIME_EVENT_SUMMARY_FIELDS)
+        )
+        if unknown_runtime_event_fields:
+            errors.append(
+                "runtime_event_summary contains unknown keys: "
+                + ", ".join(unknown_runtime_event_fields)
+            )
+    terminal_success_guard = current.get("terminal_success_guard")
+    if terminal_success_guard is not None:
+        if not isinstance(terminal_success_guard, dict):
+            errors.append("terminal_success_guard must be an object or null")
+        else:
+            unknown_guard_fields = sorted(
+                set(terminal_success_guard.keys()) - set(TERMINAL_SUCCESS_GUARD_FIELDS)
+            )
+            if unknown_guard_fields:
+                errors.append(
+                    "terminal_success_guard contains unknown keys: "
+                    + ", ".join(unknown_guard_fields)
+                )
     if not isinstance(current.get("history"), list):
         errors.append("history must be a list")
     if not isinstance(current.get("agents_this_round"), list):

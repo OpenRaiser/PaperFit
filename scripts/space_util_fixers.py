@@ -582,38 +582,27 @@ def fix_page_budget_excess(
 
     # 策略 2: 检查是否有冗余的 \vspace 或空行
     # 移除过大的 \vspace
-    vspace_pattern = r'\\vspace\{[0-9.]+(em|pt|cm)\}'
+    vspace_pattern = r'\\vspace\{([0-9.]+)(em|pt|cm)\}'
     large_vspace = re.search(vspace_pattern, tex_content)
     if large_vspace:
         vspace_val = large_vspace.group(0)
         # 缩小 \vspace
-        num_match = re.search(r'[0-9.]+', vspace_val)
+        num_match = large_vspace.group(1)
+        unit = large_vspace.group(2)
         if num_match:
-            old_val = float(num_match.group(0))
+            old_val = float(num_match)
             new_val = old_val * 0.8
-            new_vspace = vspace_val.replace(str(old_val), str(new_val))
-            tex_content = tex_content.replace(vspace_val, new_vspace, 1)
-            changes.append(FixResult(
-                defect_id="A3",
-                object_name="垂直间距",
-                action=f"压缩 \\vspace 从 {old_val} 到 {new_val}",
-                before=vspace_val,
-                after=new_vspace,
-                success=True,
-            ))
-
-    # 策略 3: 建议压缩参考文献样式
-    if '\\bibliographystyle{' in tex_content:
-        style_match = re.search(r'\\bibliographystyle\{([^}]+)\}', tex_content)
-        if style_match and style_match.group(1) not in ['abbrv', 'unsrt', 'plain']:
-            changes.append(FixResult(
-                defect_id="A3",
-                object_name="参考文献样式",
-                action="建议改用 abbrv 样式压缩参考文献",
-                before=f"\\bibliographystyle{{{style_match.group(1)}}}",
-                after="\\bibliographystyle{abbrv}",
-                success=False,  # 需要人工确认
-            ))
+            new_vspace = f"\\vspace{{{new_val:g}{unit}}}"
+            if new_vspace != vspace_val:
+                tex_content = tex_content.replace(vspace_val, new_vspace, 1)
+                changes.append(FixResult(
+                    defect_id="A3",
+                    object_name="垂直间距",
+                    action=f"压缩 \\vspace 从 {old_val:g}{unit} 到 {new_val:g}{unit}",
+                    before=vspace_val,
+                    after=new_vspace,
+                    success=True,
+                ))
 
     return tex_content, changes
 

@@ -149,11 +149,151 @@ function addWorkflowOptions(command, { includeSaveAs = false } = {}) {
     .option('--target-pages <n>', '目标页数')
     .option('--page-budget <scope>', '页数口径: main_body | with_refs | with_appendix')
     .option('--strict', '严格模式')
-    .option('--max-rounds <n>', '最大轮次');
+    .option('--max-rounds <n>', '最大轮次')
+    .option('--apply', '允许 typed fix-layout 执行源码修改；默认只 dry-run');
   if (includeSaveAs) {
     command.option('--save-as <dir>', '另存为目录');
   }
   return command;
+}
+
+function runtimeStatusArgs(options = {}) {
+  const args = ['--state', options.state || 'data/state.json', 'status-view'];
+  if (options.runResult) {
+    args.push('--run-result', options.runResult);
+  }
+  return args;
+}
+
+function loadRuntimeStatusView(options = {}) {
+  const script = path.join(packageRoot(), 'scripts', 'orchestrator_runtime.py');
+  if (!fs.existsSync(script)) {
+    console.error('未找到脚本:', script);
+    process.exit(1);
+  }
+  const r = spawnSync(pythonRunner(), [script, ...runtimeStatusArgs(options)], {
+    cwd: process.cwd(),
+    env: process.env,
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (r.status !== 0) {
+    if (r.stderr) process.stderr.write(r.stderr);
+    if (r.stdout) process.stdout.write(r.stdout);
+    process.exit(r.status === null ? 1 : r.status ?? 1);
+  }
+  try {
+    return JSON.parse(r.stdout || '{}');
+  } catch (error) {
+    console.error('PaperFit: failed to parse runtime status JSON');
+    if (r.stdout) process.stderr.write(r.stdout);
+    process.exit(1);
+  }
+}
+
+function printRuntimeStatusSummary(status) {
+  const runtime = status.runtime || {};
+  const artifacts = status.artifacts || {};
+  const repair = status.repair || {};
+  const approval = status.approval || {};
+  const repairLoop = status.repair_loop_policy || {};
+  const freshness = status.artifact_freshness || {};
+  const defects = status.defect_summary || {};
+
+  console.log('📊 PaperFit Status\n');
+  if (status.main_tex) console.log(`  Main TeX: ${status.main_tex}`);
+  if (status.task_type) console.log(`  Task: ${status.task_type}`);
+  console.log(`  Status: ${status.status || 'UNKNOWN'}`);
+  if (status.gatekeeper_decision) console.log(`  Gatekeeper: ${status.gatekeeper_decision}`);
+  if (status.run_result_path) console.log(`  RunResult: ${status.run_result_path}`);
+  if (freshness.status) console.log(`  Artifact Freshness: ${freshness.status}`);
+
+  if (
+    defects.initial_total != null ||
+    defects.resolved != null ||
+    defects.remaining != null
+  ) {
+    console.log('\n  缺陷摘要');
+    console.log(`    Initial: ${defects.initial_total ?? 0}`);
+    console.log(`    Resolved: ${defects.resolved ?? 0}`);
+    console.log(`    Remaining: ${defects.remaining ?? 0}`);
+  }
+
+  if (runtime.run_id || runtime.event_count || runtime.event_log) {
+    console.log('\n  Runtime');
+    if (runtime.run_id) console.log(`    Run ID: ${runtime.run_id}`);
+    if (runtime.event_log) console.log(`    Event Log: ${runtime.event_log}`);
+    if (runtime.event_count != null) console.log(`    Events: ${runtime.event_count}`);
+    if (runtime.last_runtime_state) console.log(`    Last State: ${runtime.last_runtime_state}`);
+  }
+
+  if (
+    repair.plan_candidates ||
+    repair.execution_status ||
+    repair.skipped ||
+    repair.requires_approval != null
+  ) {
+    console.log('\n  修复计划');
+    if (repair.plan_candidates != null) console.log(`    Candidates: ${repair.plan_candidates}`);
+    if (repair.execution_status) console.log(`    Execution: ${repair.execution_status}`);
+    if (repair.applied_count != null) console.log(`    Applied: ${repair.applied_count}`);
+    if (repair.skipped) console.log(`    Skipped: ${repair.skip_reason || true}`);
+    if (repair.risk_level) console.log(`    Risk: ${repair.risk_level}`);
+    if (repair.requires_approval != null) console.log(`    Requires Approval: ${repair.requires_approval}`);
+  }
+
+  if (approval.status && approval.status !== 'not_applicable') {
+    console.log('\n  Approval');
+    console.log(`    Status: ${approval.status}`);
+    if (approval.reason) console.log(`    Reason: ${approval.reason}`);
+    if (approval.risk_level) console.log(`    Risk: ${approval.risk_level}`);
+    if (approval.approval_granted != null) console.log(`    Granted: ${approval.approval_granted}`);
+    if (Array.isArray(approval.approval_mechanisms) && approval.approval_mechanisms.length > 0) {
+      console.log(`    Mechanisms: ${approval.approval_mechanisms.join(', ')}`);
+    }
+  }
+
+  if (repairLoop.schema_version) {
+    console.log('\n  Repair Loop Policy');
+    if (repairLoop.execution_mode) console.log(`    Mode: ${repairLoop.execution_mode}`);
+    if (repairLoop.round_limit != null) console.log(`    Round Limit: ${repairLoop.round_limit}`);
+    if (repairLoop.candidate_batch_limit != null) console.log(`    Candidate Batch Limit: ${repairLoop.candidate_batch_limit}`);
+    if (repairLoop.stop_condition) console.log(`    Stop: ${repairLoop.stop_condition}`);
+    if (repairLoop.next_round_allowed != null) console.log(`    Next Round Allowed: ${repairLoop.next_round_allowed}`);
+    if (repairLoop.next_round_reason) console.log(`    Reason: ${repairLoop.next_round_reason}`);
+  }
+
+  if (status.terminal_success_guard) {
+    console.log('\n  Terminal Guard');
+    console.log(`    Status: ${status.terminal_success_guard.status || 'blocked'}`);
+    if (status.terminal_success_guard.failure_type) {
+      console.log(`    Failure: ${status.terminal_success_guard.failure_type}`);
+    }
+  }
+
+  const reportEntries = [
+    ['Task Spec', artifacts.task_spec],
+    ['Pages', artifacts.page_images_dir],
+    ['Visual Signals', artifacts.visual_signal_report],
+    ['Defect Report', artifacts.defect_report],
+    ['Repair Plan', artifacts.repair_plan],
+    ['Repair Execution', artifacts.repair_execution_report],
+    ['Rollback Report', artifacts.rollback_report],
+    ['Source Mutation', artifacts.source_mutation_report],
+  ].filter(([, value]) => Boolean(value));
+  if (reportEntries.length > 0) {
+    console.log('\n  Reports');
+    reportEntries.forEach(([label, value]) => {
+      console.log(`    ${label}: ${value}`);
+    });
+  }
+
+  if (Array.isArray(status.next_actions) && status.next_actions.length > 0) {
+    console.log('\n  Next Actions');
+    status.next_actions.forEach((action, index) => {
+      console.log(`    ${index + 1}. ${action}`);
+    });
+  }
 }
 
 program
@@ -210,6 +350,15 @@ program
     process.exit(r.status === null ? 1 : r.status ?? 1);
   });
 
+program
+  .command('status-view')
+  .description('Print compact Agent V1 runtime status JSON')
+  .option('--state <path>', 'State file path', 'data/state.json')
+  .option('--run-result <path>', 'RunResult JSON path to summarize')
+  .action((options) => {
+    console.log(JSON.stringify(loadRuntimeStatusView(options), null, 2));
+  });
+
 addWorkflowOptions(
   program
     .command('slash')
@@ -221,6 +370,19 @@ addWorkflowOptions(
 )
   .action(() => {
     forwardBundledPythonScript('slash', path.join('scripts', 'paperfit_command.py'));
+  });
+
+addWorkflowOptions(
+  program
+    .command('run-agent')
+    .description('执行 PaperFit Agent V1 自然语言主流程')
+    .argument('<request...>')
+    .allowUnknownOption(true)
+    .allowExcessArguments(true),
+  { includeSaveAs: true },
+)
+  .action(() => {
+    forwardBundledPythonScript('run-agent', path.join('scripts', 'paperfit_command.py'));
   });
 
 addWorkflowOptions(
@@ -466,101 +628,12 @@ program
 program
   .command('status')
   .description('Show current PaperFit status')
-  .action(() => {
-    const stateFile = path.join(process.cwd(), 'data', 'state.json');
+  .option('--state <path>', 'State file path', 'data/state.json')
+  .option('--run-result <path>', 'RunResult JSON path to summarize')
+  .action((options) => {
+    const stateFile = path.resolve(process.cwd(), options.state || 'data/state.json');
     if (fs.existsSync(stateFile)) {
-      const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
-      const compileSuccess = state.compile_success;
-      const compileDisplay = compileSuccess === true ? '✅' : compileSuccess === false ? '❌' : '—';
-      console.log('📊 PaperFit Status\n');
-      if (state.main_tex) console.log(`  Main TeX: ${state.main_tex}`);
-      console.log(`  Version: ${state.version || '1.0.0'}`);
-      console.log(`  Round: ${state.current_round || 0}`);
-      if (state.max_rounds != null) console.log(`  Max Rounds: ${state.max_rounds}`);
-      console.log(`  Status: ${state.status || 'UNKNOWN'}`);
-      console.log(`  Compile Success: ${compileDisplay}`);
-      console.log(`  Page Images: ${state.page_images_rendered === true ? '✅' : state.page_images_rendered === false ? '❌' : '—'}`);
-
-      const task = state.task || {};
-      if (task.template || task.target_pages != null || task.page_budget_scope) {
-        console.log('\n  任务画像');
-        if (task.template) console.log(`    模板: ${task.template}`);
-        if (task.column_type) console.log(`    栏型: ${task.column_type}`);
-        if (task.target_pages != null) console.log(`    目标页数: ${task.target_pages}`);
-        if (task.page_budget_scope) console.log(`    页数口径: ${task.page_budget_scope}`);
-      }
-
-      if (state.visual_defects && state.visual_defects.length > 0) {
-        console.log(`\n  Defects: ${state.visual_defects.length} pending`);
-      }
-      if (state.defect_summary) {
-        console.log('\n  缺陷摘要');
-        console.log(`    Initial: ${state.defect_summary.initial_total ?? 0}`);
-        console.log(`    Resolved: ${state.defect_summary.resolved ?? 0}`);
-        console.log(`    Remaining: ${state.defect_summary.remaining ?? 0}`);
-      }
-      if (state.last_gatekeeper_decision) {
-        console.log(`\n  Gatekeeper: ${state.last_gatekeeper_decision}`);
-      }
-      const visualSummary = state.visual_signals_summary || {};
-      if (
-        (Array.isArray(visualSummary.priority_pages) && visualSummary.priority_pages.length > 0) ||
-        (Array.isArray(visualSummary.priority_objects) && visualSummary.priority_objects.length > 0)
-      ) {
-        console.log('\n  视觉重点');
-        if (Array.isArray(visualSummary.priority_pages) && visualSummary.priority_pages.length > 0) {
-          console.log(`    Priority Pages: ${visualSummary.priority_pages.slice(0, 10).join(', ')}`);
-        }
-        if (Array.isArray(visualSummary.priority_objects) && visualSummary.priority_objects.length > 0) {
-          visualSummary.priority_objects.slice(0, 3).forEach((item, index) => {
-            const kind = String(item.object_kind || 'object').replace('_like', '');
-            const reason = item.reason ? ` (${item.reason})` : '';
-            console.log(`    ${index + 1}. p.${item.page} ${kind}${reason}`);
-          });
-        }
-      }
-      const repairPlan = state.repair_plan_summary || {};
-      if (Number.isInteger(repairPlan.total_candidates) && repairPlan.total_candidates > 0) {
-        console.log('\n  修复计划');
-        console.log(`    Total Candidates: ${repairPlan.total_candidates}`);
-        if (Array.isArray(repairPlan.top_candidates) && repairPlan.top_candidates.length > 0) {
-          repairPlan.top_candidates.slice(0, 3).forEach((item, index) => {
-            const scope = item.page != null ? `p.${item.page}` : (item.label || 'global');
-            const action = item.proposed_action || 'review';
-            console.log(`    ${index + 1}. ${scope} ${action}`);
-          });
-        }
-      }
-      const repairExecution = state.repair_execution_summary || {};
-      if (repairExecution.status || Number.isInteger(repairExecution.applied_count)) {
-        if (repairExecution.status || (repairExecution.applied_count || 0) > 0) {
-          console.log('\n  执行结果');
-          console.log(`    Status: ${repairExecution.status || 'unknown'}`);
-          console.log(`    Applied: ${repairExecution.applied_count || 0}`);
-        }
-      }
-      if (Array.isArray(state.next_actions) && state.next_actions.length > 0) {
-        console.log('\n  Next Actions');
-        state.next_actions.forEach((action, index) => {
-          console.log(`    ${index + 1}. ${action}`);
-        });
-      }
-      const artifacts = state.artifacts || {};
-      const reportEntries = [
-        ['Rule Report', artifacts.rule_report],
-        ['Crossrefs', artifacts.crossrefs_report],
-        ['Visual Signals', artifacts.visual_signal_report],
-        ['Repair Plan', artifacts.repair_plan],
-        ['Repair Execution', artifacts.repair_execution_report],
-        ['Semantic Report', artifacts.semantic_patch_report],
-        ['Gatekeeper Report', artifacts.gatekeeper_decision],
-      ].filter(([, value]) => Boolean(value));
-      if (reportEntries.length > 0) {
-        console.log('\n  Reports');
-        reportEntries.forEach(([label, value]) => {
-          console.log(`    ${label}: ${value}`);
-        });
-      }
+      printRuntimeStatusSummary(loadRuntimeStatusView(options));
     } else {
       console.log('📊 PaperFit Status: Not initialized');
       console.log('Run "paperfit init" to initialize.');

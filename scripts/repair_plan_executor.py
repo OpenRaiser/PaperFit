@@ -70,6 +70,22 @@ def _load_json(path: str) -> Dict[str, Any]:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
+def _effective_changes(report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    changes = report.get("changes") or []
+    effective: List[Dict[str, Any]] = []
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        if change.get("success") is False:
+            continue
+        before = str(change.get("before") or "")
+        after = str(change.get("after") or "")
+        if before == after:
+            continue
+        effective.append(change)
+    return effective
+
+
 def _build_float_defects(plan: Dict[str, Any], max_candidates: int) -> List[Dict[str, Any]]:
     defects: List[Dict[str, Any]] = []
     seen_labels: set[tuple[str, str]] = set()
@@ -629,7 +645,7 @@ def execute_repair_plan(
             column_type=column_type,
         )
         report["fix_report"] = fix_report
-        report["applied_count"] = len(fix_report.get("changes") or [])
+        report["applied_count"] = len(_effective_changes(fix_report))
         report["status"] = fix_report.get("status") or "partial"
 
     if overflow_defects:
@@ -638,10 +654,11 @@ def execute_repair_plan(
             defects=overflow_defects,
         )
         report["overflow_report"] = overflow_report
-        report["applied_count"] += len(overflow_report.get("changes") or [])
+        overflow_changes = _effective_changes(overflow_report)
+        report["applied_count"] += len(overflow_changes)
         if report["status"] == "noop":
             report["status"] = overflow_report.get("status") or "partial"
-        elif overflow_report.get("changes"):
+        elif overflow_changes:
             report["status"] = "partial" if report["status"] != "success" or overflow_report.get("unresolved") else "success"
 
     if space_defects:
@@ -652,10 +669,11 @@ def execute_repair_plan(
             column_type=column_type,
         )
         report["space_report"] = space_report
-        report["applied_count"] += len(space_report.get("changes") or [])
+        space_changes = _effective_changes(space_report)
+        report["applied_count"] += len(space_changes)
         if report["status"] == "noop":
             report["status"] = space_report.get("status") or "partial"
-        elif space_report.get("changes"):
+        elif space_changes:
             report["status"] = "partial" if report["status"] != "success" or space_report.get("unresolved") else "success"
 
     global_actions = _build_global_actions(plan, max_candidates=max_candidates)

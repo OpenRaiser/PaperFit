@@ -21,8 +21,18 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from orchestrator_runtime import OrchestratorRuntime
-from paperfit_portrait import load_templates
+try:
+    from orchestrator_runtime import OrchestratorRuntime
+    from paperfit_portrait import load_templates
+    from runtime_artifacts import collect_artifact_manifest
+    from runtime_status import build_runtime_status
+    from runtime_types import TaskSpec
+except ModuleNotFoundError:  # package import during focused tests
+    from .orchestrator_runtime import OrchestratorRuntime
+    from .paperfit_portrait import load_templates
+    from .runtime_artifacts import collect_artifact_manifest
+    from .runtime_status import build_runtime_status
+    from .runtime_types import TaskSpec
 
 
 def package_root() -> Path:
@@ -102,6 +112,27 @@ def _mkdir(path: Path) -> None:
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     _mkdir(path)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _env_truthy(value: Optional[str]) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_falsy(value: Optional[str]) -> bool:
+    return str(value or "").strip().lower() in {"0", "false", "no", "off", "legacy"}
+
+
+def _typed_fix_layout_enabled() -> bool:
+    explicit = os.environ.get("PAPERFIT_TYPED_FIX_LAYOUT")
+    if explicit is not None:
+        return not _env_falsy(explicit)
+    return not _env_truthy(os.environ.get("PAPERFIT_LEGACY_FIX_LAYOUT"))
+
+
+def _typed_fix_layout_dry_run(*, apply_source_mutation: bool = False) -> bool:
+    if apply_source_mutation:
+        return False
+    return not _env_truthy(os.environ.get("PAPERFIT_TYPED_FIX_LAYOUT_APPLY"))
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
@@ -786,13 +817,53 @@ def _summarize_state(state: Dict[str, Any]) -> Dict[str, Any]:
         "next_actions": state.get("next_actions"),
         "artifacts": state.get("artifacts"),
         "task": {
-            "task_type": task.get("task_type"),
+            "task_type": task.get("type") or task.get("task_type"),
             "template": task.get("template"),
             "target_pages": task.get("target_pages"),
             "column_type": task.get("column_type"),
             "page_budget_scope": task.get("page_budget_scope"),
         },
     }
+
+
+def _summarize_runtime_status(project_root: Path, *, run_result_path: Optional[str] = None) -> Dict[str, Any]:
+    status = build_runtime_status(
+        project_root=project_root,
+        run_result_path=run_result_path,
+    )
+    summary = {
+        "status": status.get("status"),
+        "main_tex": status.get("main_tex"),
+        "last_gatekeeper_decision": status.get("gatekeeper_decision"),
+        "defect_summary": status.get("defect_summary"),
+        "next_actions": status.get("next_actions"),
+        "artifacts": status.get("artifacts"),
+        "task": {
+            "task_type": status.get("task_type"),
+            "template": None,
+            "target_pages": None,
+            "column_type": None,
+            "page_budget_scope": None,
+        },
+        "run_result_path": status.get("run_result_path"),
+        "runtime": status.get("runtime"),
+        "repair": status.get("repair"),
+        "approval": status.get("approval"),
+        "repair_loop_policy": status.get("repair_loop_policy"),
+        "artifact_freshness": status.get("artifact_freshness"),
+        "terminal_success_guard": status.get("terminal_success_guard"),
+        "content_integrity": status.get("content_integrity"),
+    }
+    state_task = (_read_state(project_root).get("task") or {})
+    summary["task"].update(
+        {
+            "template": state_task.get("template"),
+            "target_pages": state_task.get("target_pages"),
+            "column_type": state_task.get("column_type"),
+            "page_budget_scope": state_task.get("page_budget_scope"),
+        }
+    )
+    return summary
 
 
 def _compile_timeout_summary(main_tex: Path, timeout_sec: int) -> Dict[str, Any]:
@@ -827,6 +898,153 @@ def _positive_env_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+def _derive_priority_items(status: Dict[str, Any]) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    freshness = status.get("artifact_freshness") or {}
+    repair = status.get("repair") or {}
+    approval = status.get("approval") or {}
+    artifacts = status.get("artifacts") or {}
+    runtime = status.get("runtime") or {}
+    defect_summary = status.get("defect_summary") or {}
+
+    if freshness.get("status") and freshness.get("status") != "pass":
+        items.append(
+            {
+                "rank": len(items) + 1,
+                "priority": "refresh_visual_evidence",
+                "reason": "artifact_freshness_not_pass",
+                "source": "artifact_freshness",
+                "evidence": freshness,
+                "mutation": "read_only",
+            }
+        )
+
+    if approval.get("status") == "approval_required" or repair.get("requires_approval"):
+        items.append(
+            {
+                "rank": len(items) + 1,
+                "priority": "review_repair_plan_approval",
+                "reason": approval.get("reason") or repair.get("skip_reason") or "source_mutation_requires_approval",
+                "source": "approval",
+                "evidence": {
+                    "risk_level": approval.get("risk_level") or repair.get("risk_level"),
+                    "plan_candidates": repair.get("plan_candidates"),
+                    "approval_mechanisms": approval.get("approval_mechanisms") or [],
+                },
+                "mutation": "read_only",
+            }
+        )
+
+    actions = runtime.get("actions") or {}
+    visual_action = actions.get("visual_signal_aggregator") or {}
+    visual_outputs = visual_action.get("output_artifacts") or {}
+    if visual_outputs.get("priority_pages_count") or visual_outputs.get("priority_objects_count"):
+        items.append(
+            {
+                "rank": len(items) + 1,
+                "priority": "inspect_visual_priority_signals",
+                "reason": "visual_signal_aggregator_reported_priority_pages_or_objects",
+                "source": "runtime.actions.visual_signal_aggregator",
+                "evidence": {
+                    "priority_pages_count": visual_outputs.get("priority_pages_count"),
+                    "priority_objects_count": visual_outputs.get("priority_objects_count"),
+                    "visual_signal_report": artifacts.get("visual_signal_report"),
+                },
+                "mutation": "read_only",
+            }
+        )
+
+    next_actions = status.get("next_actions") or []
+    if next_actions:
+        items.append(
+            {
+                "rank": len(items) + 1,
+                "priority": "follow_runtime_next_actions",
+                "reason": "runtime_state_contains_next_actions",
+                "source": "runtime_status.next_actions",
+                "evidence": {"next_actions": next_actions[:5]},
+                "mutation": "read_only",
+            }
+        )
+
+    remaining = int(defect_summary.get("remaining") or 0)
+    if remaining > 0 and not items:
+        items.append(
+            {
+                "rank": len(items) + 1,
+                "priority": "inspect_remaining_visual_defects",
+                "reason": "visual_defects_remaining",
+                "source": "defect_summary",
+                "evidence": {
+                    "remaining": remaining,
+                    "defect_report": artifacts.get("defect_report"),
+                },
+                "mutation": "read_only",
+            }
+        )
+
+    if not items:
+        items.append(
+            {
+                "rank": 1,
+                "priority": "no_runtime_priority_available",
+                "reason": "runtime_status_has_no_blocking_priority_signal",
+                "source": "runtime_status",
+                "evidence": {
+                    "status": status.get("status"),
+                    "gatekeeper_decision": status.get("gatekeeper_decision"),
+                    "run_result_path": status.get("run_result_path"),
+                },
+                "mutation": "read_only",
+            }
+        )
+
+    for index, item in enumerate(items, start=1):
+        item["rank"] = index
+    return items
+
+
+def _run_status_query(project_root: Path) -> Dict[str, Any]:
+    status = _summarize_runtime_status(project_root)
+    report = {
+        "mode": "status_query",
+        "runtime_contract": "status_view",
+        "project_root": str(project_root),
+        "status_view": status,
+        "state_summary": status,
+    }
+    report_path = project_root / "data" / "status_query_report.json"
+    _write_json(report_path, report)
+    report["report_path"] = str(report_path)
+    return report
+
+
+def _run_priority_query(project_root: Path) -> Dict[str, Any]:
+    status = _summarize_runtime_status(project_root)
+    priority_items = _derive_priority_items(status)
+    report = {
+        "mode": "priority_query",
+        "runtime_contract": "status_view",
+        "project_root": str(project_root),
+        "status_view": status,
+        "priority_items": priority_items,
+        "reader_mutator_boundary": {
+            "operation": "read_only",
+            "state_mutation": False,
+            "source_mutation": False,
+            "persistent_priority_override": "not_performed",
+        },
+        "next_actions": [
+            "Use paperfit status-view for structured evidence",
+            "Use an explicit priority override workflow before writing data/state.json.next_actions",
+        ],
+    }
+    report_path = project_root / "data" / "priority_query_report.json"
+    _write_json(report_path, report)
+    report["report_path"] = str(report_path)
+    return report
+
+
 def _run_visual_only(
     project_root: Path,
     *,
@@ -834,32 +1052,49 @@ def _run_visual_only(
     template: Optional[str],
     target_pages: Optional[int],
 ) -> Dict[str, Any]:
-    pre_compile_sanitization = _sanitize_precompile_sources(project_root, main_tex=main_tex)
-    compile_result = _compile(project_root, main_tex=main_tex)
+    pre_compile_sanitization = {
+        "changed": False,
+        "main_tex": str(main_tex),
+        "skipped_reason": "visual_only_disallows_source_mutation",
+    }
     page_dir = "data/pages"
-    render_result = {"success": False, "page_dir": page_dir}
-    visual_hard_guards = {"available": False, "hard_failures": []}
-    if compile_result["success"] and compile_result["pdf_path"]:
-        render_result = _render(project_root, pdf_path=Path(compile_result["pdf_path"]), output_dir=page_dir)
-        visual_hard_guards = _inspect_endmatter_float_intrusion(Path(compile_result["pdf_path"]))
-    if compile_result.get("timeout") and not compile_result.get("success"):
-        state_summary = _compile_timeout_summary(main_tex, int(compile_result.get("timeout_sec") or 0))
-    else:
-        state = _run_round(
-            project_root,
-            main_tex=main_tex,
-            template=template,
-            target_pages=target_pages,
-            page_dir=page_dir,
-        )
-        state_summary = _summarize_state(state)
+    task_spec = TaskSpec(
+        task_type="visual_only",
+        project_root=str(project_root),
+        main_tex=str(main_tex.relative_to(project_root)),
+        template=template,
+        target_pages=target_pages,
+        page_dir=page_dir,
+        log_file=f"{main_tex.stem}.log",
+        column_void_report="data/column_void_report.json"
+        if (project_root / "data" / "column_void_report.json").is_file()
+        else None,
+        allow_source_mutation=False,
+        user_request="check-visual",
+        required_phases=["observe", "diagnose", "verify"],
+    )
+    # `data/task.json` is the canonical runtime task. Older benchmark notes may
+    # mention `data/task_visual_only.json`, but new runs no longer create it.
+    _write_json(project_root / "data" / "task.json", task_spec.to_dict())
+    runtime = OrchestratorRuntime(state_path=str(project_root / "data" / "state.json"))
+    run_result = runtime.run_task(task_spec=task_spec, output_path="data/run_result_check_visual.json")
+    runtime_actions = run_result.get("runtime_actions") or {}
+    compile_result = runtime_actions.get("compile") or {}
+    render_result = runtime_actions.get("render") or {"success": False, "page_dir": page_dir}
+    visual_hard_guards = runtime_actions.get("visual_hard_guards") or {"available": False, "hard_failures": []}
+    state_summary = _summarize_runtime_status(
+        project_root,
+        run_result_path="data/run_result_check_visual.json",
+    )
     report = {
         "mode": "check_visual",
+        "runtime_contract": "visual_only",
         "project_root": str(project_root),
         "pre_compile_sanitization": pre_compile_sanitization,
         "compile": compile_result,
         "render": render_result,
         "visual_hard_guards": visual_hard_guards,
+        "run_result": run_result,
         "state_summary": state_summary,
     }
     report_path = project_root / "data" / "check_visual_report.json"
@@ -917,7 +1152,7 @@ def _run_fix_layout(
                 target_pages=target_pages,
                 page_dir=page_dir,
             )
-            state_summary = _summarize_state(state)
+            state_summary = _summarize_runtime_status(project_root)
         iteration: Dict[str, Any] = {
             "round": index,
             "pre_compile_sanitization": pre_compile_sanitization,
@@ -1066,7 +1301,7 @@ def _run_fix_layout(
                 target_pages=target_pages,
                 page_dir=page_dir,
             )
-            state_summary = _summarize_state(state)
+            state_summary = _summarize_runtime_status(project_root)
             if not compile_result.get("success"):
                 if "compile_failed" not in blocked_reasons:
                     blocked_reasons.append("compile_failed")
@@ -1090,8 +1325,7 @@ def _run_fix_layout(
         if verification_decision == "DONE" and verification_remaining == 0:
             stop_reason = "done"
 
-    final_state = _read_state(project_root)
-    final_state_summary = _summarize_state(final_state)
+    final_state_summary = _summarize_runtime_status(project_root)
     if stop_reason == "blocked" and "compile_timeout" in blocked_reasons and iterations:
         final_state_summary = iterations[-1].get("state_summary") or final_state_summary
     report = {
@@ -1114,22 +1348,102 @@ def _run_fix_layout(
     return report
 
 
+def _run_typed_source_changing(
+    project_root: Path,
+    *,
+    task_type: str,
+    main_tex: Path,
+    template: Optional[str],
+    target_pages: Optional[int],
+    max_rounds: Optional[int],
+    user_request: str,
+    apply_source_mutation: bool = False,
+    run_result_output_path: str = "data/run_result_fix_layout_typed.json",
+    report_output_path: str = "data/fix_layout_typed_report.json",
+    report_mode: str = "typed_fix_layout",
+) -> Dict[str, Any]:
+    dry_run = _typed_fix_layout_dry_run(apply_source_mutation=apply_source_mutation)
+    task_spec = TaskSpec(
+        task_type=task_type,
+        project_root=str(project_root),
+        main_tex=str(main_tex.relative_to(project_root)),
+        template=template,
+        target_pages=target_pages,
+        page_dir="data/pages",
+        log_file=f"{main_tex.stem}.log",
+        column_void_report="data/column_void_report.json"
+        if (project_root / "data" / "column_void_report.json").is_file()
+        else None,
+        allow_source_mutation=True,
+        pre_repair_snapshot_required=True,
+        dry_run_source_mutation=dry_run,
+        rollback_policy="required",
+        max_rounds=max_rounds or 1,
+        user_request=user_request,
+        required_phases=["observe", "diagnose", "repair", "verify"],
+    )
+    _write_json(project_root / "data" / "task.json", task_spec.to_dict())
+    runtime = OrchestratorRuntime(state_path=str(project_root / "data" / "state.json"))
+    run_result = runtime.run_task(task_spec=task_spec, output_path=run_result_output_path)
+    report = {
+        "mode": report_mode,
+        "runtime_contract": task_type,
+        "dry_run_source_mutation": dry_run,
+        "project_root": str(project_root),
+        "run_result_path": run_result_output_path,
+        "approval": run_result.get("approval"),
+        "run_result": run_result,
+        "state_summary": _summarize_runtime_status(
+            project_root,
+            run_result_path=run_result_output_path,
+        ),
+    }
+    report_path = project_root / report_output_path
+    _write_json(report_path, report)
+    report["report_path"] = str(report_path)
+    return report
+
+
 def _layout_completion_status(fix_report: Dict[str, Any]) -> Dict[str, Any]:
     final_summary = fix_report.get("final_state_summary") or {}
     defect_summary = final_summary.get("defect_summary") or {}
     decision = str(final_summary.get("last_gatekeeper_decision") or "")
     remaining = int(defect_summary.get("remaining") or 0)
     done = decision == "DONE" and remaining == 0
+    terminal_success_guard = None
+    if done:
+        project_root = Path(str(fix_report.get("project_root") or ".")).resolve()
+        main_tex = str(final_summary.get("main_tex") or "")
+        if main_tex:
+            artifact_manifest = collect_artifact_manifest(
+                project_root=project_root,
+                main_tex=main_tex,
+                artifacts=final_summary.get("artifacts") or {},
+            )
+            freshness = artifact_manifest.get("freshness") or {}
+            if freshness.get("status") != "pass":
+                done = False
+                terminal_success_guard = {
+                    "status": "blocked",
+                    "failure_type": "terminal_success_without_fresh_visual_evidence",
+                    "reason": "gatekeeper_done_but_artifact_freshness_failed",
+                    "artifact_freshness": {
+                        "status": freshness.get("status") or "unknown",
+                        "blocking_checks": freshness.get("blocking_checks") or [],
+                    },
+                }
     stop_reason = str(fix_report.get("stop_reason") or "")
     blocked_reasons = fix_report.get("blocked_reasons") or []
     reasons: List[str] = []
+    if terminal_success_guard is not None:
+        reasons.append(str(terminal_success_guard["failure_type"]))
     if decision and decision != "DONE":
         reasons.append(f"gatekeeper_decision_{decision.lower()}")
     if remaining > 0:
         reasons.append("visual_defects_remaining")
     if stop_reason == "blocked":
         reasons.extend(str(reason) for reason in blocked_reasons)
-    status = "done" if done else ("blocked" if stop_reason == "blocked" else "incomplete")
+    status = "done" if done else ("blocked" if stop_reason == "blocked" or terminal_success_guard else "incomplete")
     return {
         "status": status,
         "gatekeeper_decision": decision or None,
@@ -1138,6 +1452,7 @@ def _layout_completion_status(fix_report: Dict[str, Any]) -> Dict[str, Any]:
         "round_count": int(fix_report.get("round_count") or 0),
         "blocked_reasons": blocked_reasons,
         "failure_reasons": reasons,
+        "terminal_success_guard": terminal_success_guard,
     }
 
 
@@ -1150,9 +1465,28 @@ def _handle_paperfit_request(
     target_pages: Optional[int],
     max_rounds: Optional[int],
     save_as: Optional[Path],
+    apply_source_mutation: bool = False,
+    run_result_output_path: str = "data/run_result_fix_layout_typed.json",
+    report_output_path: str = "data/fix_layout_typed_report.json",
+    report_mode: str = "typed_fix_layout",
 ) -> Dict[str, Any]:
     inferred = OrchestratorRuntime.infer_task_from_request(request)
     task_type = inferred.get("task_type")
+    if task_type == "status_query":
+        return _run_status_query(project_root)
+    if task_type == "priority_query":
+        return _run_priority_query(project_root)
+    if task_type == "undo_last_change":
+        return {
+            "mode": "undo_last_change",
+            "status": "manual_action_required",
+            "project_root": str(project_root),
+            "reason": "undo_is_a_source_mutating_file_operation",
+            "next_actions": [
+                "Use /paperfit-undo or restore from data/backups explicitly",
+                "Run paperfit status after rollback to inspect current runtime evidence",
+            ],
+        }
     portrait_max_rounds = max_rounds if max_rounds is not None else 0
     _build_portrait(
         project_root,
@@ -1220,6 +1554,20 @@ def _handle_paperfit_request(
         )
 
     if task_type in {"full_vto", "adjust_length", "repair_table"}:
+        if _typed_fix_layout_enabled():
+            return _run_typed_source_changing(
+                project_root,
+                task_type=str(task_type),
+                main_tex=main_tex,
+                template=template,
+                target_pages=target_pages or inferred.get("target_pages"),
+                max_rounds=max_rounds,
+                user_request=request,
+                apply_source_mutation=apply_source_mutation,
+                run_result_output_path=run_result_output_path,
+                report_output_path=report_output_path,
+                report_mode=report_mode,
+            )
         fix_report = _run_fix_layout(
             project_root,
             main_tex=main_tex,
@@ -1254,9 +1602,20 @@ def main() -> None:
     common.add_argument("--strict", action="store_true")
     common.add_argument("--max-rounds", type=int, default=None)
     common.add_argument("--save-as", default=None)
+    common.add_argument(
+        "--apply",
+        action="store_true",
+        help="Allow typed fix-layout to execute source-changing repair candidates",
+    )
 
     slash_parser = subparsers.add_parser("slash", parents=[common], help="Execute a slash-command style request")
     slash_parser.add_argument("request")
+    agent_parser = subparsers.add_parser(
+        "run-agent",
+        parents=[common],
+        help="Run a natural-language PaperFit Agent V1 request",
+    )
+    agent_parser.add_argument("request")
 
     fix_parser = subparsers.add_parser("fix-layout", parents=[common], help="Run executable /fix-layout workflow")
     check_parser = subparsers.add_parser("check-visual", parents=[common], help="Run executable /check-visual workflow")
@@ -1271,7 +1630,7 @@ def main() -> None:
     # Template migration treats template page counts as informational unless the
     # caller explicitly asks for a hard target. Other layout workflows keep the
     # historical template default behavior.
-    if args.command in {"slash", "migrate-template"}:
+    if args.command in {"slash", "run-agent", "migrate-template"}:
         target_pages = args.target_pages
     else:
         target_pages = args.target_pages or _default_target_pages(template, args.page_budget)
@@ -1280,7 +1639,18 @@ def main() -> None:
         effective_max_rounds = 3
     portrait_max_rounds = effective_max_rounds if effective_max_rounds is not None else 0
 
-    if args.command == "slash":
+    if args.command in {"slash", "run-agent"}:
+        run_result_output_path = (
+            "data/run_result_agent.json"
+            if args.command == "run-agent"
+            else "data/run_result_fix_layout_typed.json"
+        )
+        report_output_path = (
+            "data/agent_report.json"
+            if args.command == "run-agent"
+            else "data/fix_layout_typed_report.json"
+        )
+        report_mode = "paperfit_agent" if args.command == "run-agent" else "typed_fix_layout"
         report = _handle_paperfit_request(
             project_root,
             request=args.request,
@@ -1289,6 +1659,10 @@ def main() -> None:
             target_pages=target_pages,
             max_rounds=effective_max_rounds,
             save_as=Path(args.save_as).resolve() if args.save_as else None,
+            apply_source_mutation=args.apply,
+            run_result_output_path=run_result_output_path,
+            report_output_path=report_output_path,
+            report_mode=report_mode,
         )
     elif args.command == "fix-layout":
         _build_portrait(
@@ -1300,16 +1674,28 @@ def main() -> None:
             strict=args.strict,
             max_rounds=portrait_max_rounds,
         )
-        report = _run_fix_layout(
-            project_root,
-            main_tex=main_tex,
-            template=template,
-            target_pages=target_pages,
-            max_rounds=effective_max_rounds,
-        )
-        completion = _layout_completion_status(report)
-        report["status"] = completion["status"]
-        report["layout_completion"] = completion
+        if _typed_fix_layout_enabled():
+            report = _run_typed_source_changing(
+                project_root,
+                task_type="full_vto",
+                main_tex=main_tex,
+                template=template,
+                target_pages=target_pages,
+                max_rounds=effective_max_rounds,
+                user_request="fix-layout",
+                apply_source_mutation=args.apply,
+            )
+        else:
+            report = _run_fix_layout(
+                project_root,
+                main_tex=main_tex,
+                template=template,
+                target_pages=target_pages,
+                max_rounds=effective_max_rounds,
+            )
+            completion = _layout_completion_status(report)
+            report["status"] = completion["status"]
+            report["layout_completion"] = completion
     elif args.command == "check-visual":
         _build_portrait(
             project_root,
