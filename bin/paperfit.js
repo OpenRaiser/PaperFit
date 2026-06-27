@@ -262,8 +262,43 @@ function printRuntimeStatusSummary(status) {
     if (repairLoop.stop_condition) console.log(`    Stop: ${repairLoop.stop_condition}`);
     if (repairLoop.next_round_allowed != null) console.log(`    Next Round Allowed: ${repairLoop.next_round_allowed}`);
     if (repairLoop.next_round_reason) console.log(`    Reason: ${repairLoop.next_round_reason}`);
-    if (repairLoop.approval_scope_carry_forward?.status) {
-      console.log(`    Approval Carry-forward: ${repairLoop.approval_scope_carry_forward.status}`);
+    const carryForward = repairLoop.approval_scope_carry_forward || {};
+    if (carryForward.status) {
+      console.log(`    Approval Carry-forward: ${carryForward.status}`);
+    }
+    if (carryForward.reason) {
+      console.log(`    Approval Carry-forward Reason: ${carryForward.reason}`);
+    }
+    const carryForwardChecks = carryForward.checks || {};
+    const failedCarryForwardChecks = Object.entries(carryForwardChecks)
+      .filter(([, value]) => value === false)
+      .map(([key]) => key);
+    if (failedCarryForwardChecks.length > 0) {
+      console.log(`    Approval Carry-forward Failed Checks: ${failedCarryForwardChecks.join(', ')}`);
+    }
+    const candidateGate = repairLoop.candidate_approval_scope_gate || {};
+    if (candidateGate.status) {
+      console.log(`    Candidate Gate: ${candidateGate.status}`);
+    }
+    if (candidateGate.reason) {
+      console.log(`    Candidate Gate Reason: ${candidateGate.reason}`);
+    }
+    if (Array.isArray(candidateGate.blocked_candidates) && candidateGate.blocked_candidates.length > 0) {
+      console.log(`    Blocked Candidates: ${candidateGate.blocked_candidates.length}`);
+    }
+    const readiness = repairLoop.second_round_apply_readiness || {};
+    if (readiness.status) {
+      console.log(`    Second Round Readiness: ${readiness.status}`);
+    }
+    if (readiness.reason) {
+      console.log(`    Second Round Reason: ${readiness.reason}`);
+    }
+    const readinessChecks = readiness.checks || {};
+    const failedReadinessChecks = Object.entries(readinessChecks)
+      .filter(([, value]) => value === false)
+      .map(([key]) => key);
+    if (failedReadinessChecks.length > 0) {
+      console.log(`    Second Round Failed Checks: ${failedReadinessChecks.join(', ')}`);
     }
   }
 

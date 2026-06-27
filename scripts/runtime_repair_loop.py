@@ -99,32 +99,37 @@ def build_repair_loop_policy(
     dry_run = bool(task.get("dry_run_source_mutation")) or repair_action.get("reason") == "dry_run_source_mutation"
 
     stop_condition = "continue"
+    gatekeeper_done = str(status or "").lower() == "done" or str(gatekeeper_decision or "").upper() == "DONE"
+    freshness_status = freshness.get("status")
+
     if approval_scope_gate and approval_scope_gate.get("status") != "pass":
         stop_condition = "approval_scope_blocked"
+    elif gatekeeper_done and freshness_status != "pass":
+        stop_condition = "artifact_freshness_not_pass"
     elif approval.get("status") == "approval_required":
         stop_condition = "approval_required"
-    elif str(status or "").lower() == "done" or str(gatekeeper_decision or "").upper() == "DONE":
+    elif gatekeeper_done:
         stop_condition = "done"
     elif str(status or "").lower() == "blocked":
         stop_condition = "blocked"
-    elif freshness.get("status") and freshness.get("status") != "pass":
+    elif freshness_status and freshness_status != "pass":
         stop_condition = "artifact_freshness_not_pass"
     elif current_round >= max_rounds:
         stop_condition = "round_limit_reached"
 
     next_round_reason = "multi_round_apply_not_enabled_in_current_runtime"
-    if dry_run:
-        next_round_reason = "dry_run_source_mutation"
-    elif stop_condition == "approval_scope_blocked":
+    if stop_condition == "approval_scope_blocked":
         next_round_reason = "approval_scope_blocked"
+    elif stop_condition == "artifact_freshness_not_pass":
+        next_round_reason = "artifact_freshness_not_pass"
+    elif dry_run:
+        next_round_reason = "dry_run_source_mutation"
     elif approval.get("status") == "approval_required":
         next_round_reason = "approval_required"
     elif stop_condition == "done":
         next_round_reason = "gatekeeper_done"
     elif stop_condition == "blocked":
         next_round_reason = "runtime_blocked"
-    elif stop_condition == "artifact_freshness_not_pass":
-        next_round_reason = "artifact_freshness_not_pass"
     elif stop_condition == "round_limit_reached":
         next_round_reason = "round_limit_reached"
 
