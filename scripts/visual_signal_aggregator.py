@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import statistics
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -18,6 +19,16 @@ try:
     import yaml
 except ImportError:
     yaml = None
+
+try:
+    import fitz  # type: ignore[import-untyped]
+except ImportError:
+    fitz = None
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 from cv_detector import BatchCVDetector
 
@@ -70,6 +81,285 @@ def _skill_for_defect(defect_id: str, taxonomy: Dict[str, Any]) -> Optional[str]
         if family in (defects or []):
             return skill
     return None
+
+
+def _bbox_to_ints(bbox: Any) -> Optional[List[int]]:
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return None
+    try:
+        return [int(round(float(v))) for v in bbox]
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_rendered_page_sizes(pages_path: Path) -> Dict[int, tuple[int, int]]:
+    sizes: Dict[int, tuple[int, int]] = {}
+    if Image is None:
+        return sizes
+    for page_file in pages_path.glob("page_*.png"):
+        try:
+            page_num = int(page_file.stem.rsplit("_", 1)[-1])
+        except ValueError:
+            continue
+        try:
+            with Image.open(page_file) as img:
+                sizes[page_num] = img.size
+        except Exception:
+            continue
+    return sizes
+
+
+def _scale_pdf_bbox(
+    bbox: Any,
+    *,
+    pdf_width: float,
+    pdf_height: float,
+    rendered_size: Optional[tuple[int, int]],
+) -> Optional[List[int]]:
+    ints = _bbox_to_ints(bbox)
+    if not ints:
+        return None
+    if not rendered_size or pdf_width <= 0 or pdf_height <= 0:
+        return ints
+    sx = float(rendered_size[0]) / pdf_width
+    sy = float(rendered_size[1]) / pdf_height
+    return [
+        int(round(float(bbox[0]) * sx)),
+        int(round(float(bbox[1]) * sy)),
+        int(round(float(bbox[2]) * sx)),
+        int(round(float(bbox[3]) * sy)),
+    ]
+
+
+def _is_contained(inner: tuple[float, float, float, float], outer: tuple[float, float, float, float], tolerance: float = 1.0) -> bool:
+    return (
+        inner[0] >= outer[0] - tolerance
+        and inner[1] >= outer[1] - tolerance
+        and inner[2] <= outer[2] + tolerance
+        and inner[3] <= outer[3] + tolerance
+    )
+
+
+def _area(rect: tuple[float, float, float, float]) -> float:
+    return max(0.0, rect[2] - rect[0]) * max(0.0, rect[3] - rect[1])
+
+
+def _infer_pdf_column_width(page: Any) -> float:
+    page_width = float(page.rect.width)
+    widths: List[float] = []
+    for block in page.get_text("dict").get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        bbox = block.get("bbox")
+        if not bbox:
+            continue
+        width = float(bbox[2]) - float(bbox[0])
+        if page_width * 0.20 <= width <= page_width * 0.50:
+            widths.append(width)
+    if widths:
+        return float(statistics.median(widths))
+    return page_width * 0.39
+
+
+def _extract_pymupdf_native_signals(
+    pdf_path: Optional[str],
+    *,
+    pages_path: Path,
+    taxonomy: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not pdf_path:
+        return {"available": False, "reason": "pdf_path_not_provided", "findings": [], "object_clusters": []}
+    if fitz is None:
+        return {"available": False, "reason": "pymupdf_not_available", "findings": [], "object_clusters": []}
+
+    path = Path(pdf_path)
+    if not path.is_file():
+        return {"available": False, "reason": "pdf_path_missing", "findings": [], "object_clusters": []}
+
+    rendered_sizes = _load_rendered_page_sizes(pages_path)
+    findings: List[Dict[str, Any]] = []
+    object_clusters: List[Dict[str, Any]] = []
+    page_summaries: List[Dict[str, Any]] = []
+
+    try:
+        doc = fitz.open(path)
+    except Exception as exc:
+        return {"available": False, "reason": f"pymupdf_open_failed:{exc}", "findings": [], "object_clusters": []}
+
+    try:
+        for page_index, page in enumerate(doc, start=1):
+            page_width = float(page.rect.width)
+            page_height = float(page.rect.height)
+            page_area = max(1.0, page_width * page_height)
+            rendered_size = rendered_sizes.get(page_index)
+            column_width = _infer_pdf_column_width(page)
+            native_objects: List[tuple[str, tuple[float, float, float, float], str]] = []
+
+            for block in page.get_text("dict").get("blocks", []):
+                bbox = block.get("bbox")
+                if not bbox:
+                    continue
+                x0, y0, x1, y1 = (float(v) for v in bbox)
+                right_overflow = max(0.0, x1 - page_width)
+                left_overflow = max(0.0, -x0)
+                if right_overflow >= 0.75 or left_overflow >= 0.75:
+                    side = "right" if right_overflow >= left_overflow else "left"
+                    overflow_pt = max(right_overflow, left_overflow)
+                    text = " ".join(
+                        str(span.get("text") or "")
+                        for line in block.get("lines", [])
+                        for span in line.get("spans", [])
+                    ).strip()
+                    findings.append(
+                        {
+                            "source": "pymupdf_native",
+                            "page": page_index,
+                            "defect_id": f"D1-native-{side}-overflow",
+                            "taxonomy_defect_id": "D1",
+                            "category": "D",
+                            "severity": "major" if overflow_pt >= 2.0 else "minor",
+                            "confidence": 0.92,
+                            "description": f"PDF native {side} overflow: {overflow_pt:.2f}pt",
+                            "bbox": _scale_pdf_bbox(
+                                (x0, y0, x1, y1),
+                                pdf_width=page_width,
+                                pdf_height=page_height,
+                                rendered_size=rendered_size,
+                            ),
+                            "metrics": {
+                                "overflow_side": side,
+                                "overflow_pt": round(overflow_pt, 3),
+                                "pdf_bbox": [round(x0, 3), round(y0, 3), round(x1, 3), round(y1, 3)],
+                                "text_excerpt": text[:120],
+                            },
+                            "suggested_skill": _skill_for_defect("D1", taxonomy),
+                        }
+                    )
+
+            for drawing in page.get_drawings():
+                rect = drawing.get("rect")
+                if not rect:
+                    continue
+                bbox = (float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1))
+                width = bbox[2] - bbox[0]
+                height = bbox[3] - bbox[1]
+                if _area(bbox) >= page_area * 0.008 and width >= page_width * 0.10 and height >= page_height * 0.035:
+                    native_objects.append(("figure_like", bbox, "drawing"))
+
+            for image in page.get_images(full=True):
+                xref = image[0]
+                for rect in page.get_image_rects(xref):
+                    bbox = (float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1))
+                    width = bbox[2] - bbox[0]
+                    height = bbox[3] - bbox[1]
+                    if _area(bbox) >= page_area * 0.002 and width >= page_width * 0.03 and height >= page_height * 0.025:
+                        native_objects.append(("figure_like", bbox, "image"))
+
+            native_objects.sort(key=lambda item: _area(item[1]), reverse=True)
+            selected_objects: List[tuple[str, tuple[float, float, float, float], str]] = []
+            for item in native_objects:
+                bbox = item[1]
+                if any(_is_contained(bbox, existing[1]) for existing in selected_objects):
+                    continue
+                selected_objects.append(item)
+
+            for kind, bbox, native_kind in selected_objects:
+                width = bbox[2] - bbox[0]
+                crosses_page_center = bbox[0] < page_width / 2 < bbox[2]
+                width_context = "page" if crosses_page_center or width >= column_width * 1.35 else "column"
+                expected_width = page_width if width_context == "page" else column_width
+                width_ratio = width / max(expected_width, 1.0)
+                page_ratio = width / max(page_width, 1.0)
+                scaled_bbox = _scale_pdf_bbox(
+                    bbox,
+                    pdf_width=page_width,
+                    pdf_height=page_height,
+                    rendered_size=rendered_size,
+                )
+                object_clusters.append(
+                    {
+                        "page": page_index,
+                        "kind": kind,
+                        "bbox": scaled_bbox,
+                        "source": "pymupdf_native",
+                        "native_kind": native_kind,
+                        "width_context": width_context,
+                        "object_width_ratio": round(width_ratio, 4),
+                        "object_width_page_ratio": round(page_ratio, 4),
+                        "pdf_bbox": [round(v, 3) for v in bbox],
+                    }
+                )
+
+                right_overflow = max(0.0, bbox[2] - page_width)
+                if right_overflow >= 0.75:
+                    findings.append(
+                        {
+                            "source": "pymupdf_native",
+                            "page": page_index,
+                            "defect_id": "B2-native-float-overflow-width",
+                            "taxonomy_defect_id": "B2",
+                            "category": "B",
+                            "severity": "major",
+                            "confidence": 0.9,
+                            "description": f"native {kind} exceeds page right edge by {right_overflow:.2f}pt",
+                            "bbox": scaled_bbox,
+                            "metrics": {
+                                "subtype": "overflow_width",
+                                "object_kind": kind,
+                                "overflow_pt": round(right_overflow, 3),
+                                "object_width_ratio": round(width_ratio, 4),
+                                "object_width_page_ratio": round(page_ratio, 4),
+                                "width_context": width_context,
+                                "pdf_bbox": [round(v, 3) for v in bbox],
+                            },
+                            "suggested_skill": _skill_for_defect("B2", taxonomy),
+                        }
+                    )
+                elif width_context == "column" and width_ratio < 0.85:
+                    severity = "major" if width_ratio < 0.60 else "minor"
+                    findings.append(
+                        {
+                            "source": "pymupdf_native",
+                            "page": page_index,
+                            "defect_id": "B2-native-underfilled-width",
+                            "taxonomy_defect_id": "B2",
+                            "category": "B",
+                            "severity": severity,
+                            "confidence": 0.88,
+                            "description": f"native {kind} uses {width_ratio:.3f} of inferred column width",
+                            "bbox": scaled_bbox,
+                            "metrics": {
+                                "subtype": "underfilled_width",
+                                "object_kind": kind,
+                                "object_width_ratio": round(width_ratio, 4),
+                                "object_width_page_ratio": round(page_ratio, 4),
+                                "width_context": width_context,
+                                "expected_width_pt": round(expected_width, 3),
+                                "pdf_bbox": [round(v, 3) for v in bbox],
+                            },
+                            "suggested_skill": _skill_for_defect("B2", taxonomy),
+                        }
+                    )
+
+            page_summaries.append(
+                {
+                    "page": page_index,
+                    "column_width_pt": round(column_width, 3),
+                    "native_object_count": len(selected_objects),
+                    "finding_count": len([f for f in findings if int(f.get("page") or 0) == page_index]),
+                }
+            )
+    finally:
+        doc.close()
+
+    return {
+        "available": True,
+        "pdf_path": str(path),
+        "page_count": len(page_summaries),
+        "findings": findings,
+        "object_clusters": object_clusters,
+        "page_summaries": page_summaries,
+    }
 
 
 def _severity_rank(severity: str) -> int:
@@ -127,10 +417,43 @@ def _pair_object_clusters(object_clusters: List[Dict[str, Any]], caption_pair_ma
         ]
         captions.sort(key=lambda c: c["bbox"][1])
         objects.sort(key=lambda c: c["bbox"][1])
+        object_widths = [
+            int(c["bbox"][2]) - int(c["bbox"][0])
+            for c in objects
+            if c.get("bbox") and int(c["bbox"][2]) > int(c["bbox"][0])
+        ]
+        column_width_candidates = [
+            width for width in object_widths
+            if width <= max(1, page_width) * 0.58
+        ]
+        inferred_column_width = (
+            float(statistics.median(column_width_candidates))
+            if column_width_candidates
+            else float(statistics.median(object_widths)) if object_widths else float(page_width)
+        )
+        object_x1_values = [int(c["bbox"][0]) for c in objects if c.get("bbox")]
+        object_x2_values = [int(c["bbox"][2]) for c in objects if c.get("bbox")]
+        inferred_content_width = (
+            float(max(object_x2_values) - min(object_x1_values))
+            if object_x1_values and object_x2_values and max(object_x2_values) > min(object_x1_values)
+            else float(page_width)
+        )
 
         used_caption_ids: set[int] = set()
         for obj in objects:
             ox1, oy1, ox2, oy2 = obj["bbox"]
+            object_width = max(0, int(ox2) - int(ox1))
+            crosses_page_center = int(ox1) < page_width / 2 < int(ox2)
+            likely_page_width = (
+                object_width >= inferred_column_width * 1.35
+                or (crosses_page_center and object_width >= max(1.0, float(page_width)) * 0.55)
+            )
+            if likely_page_width:
+                width_context = "page"
+                expected_width = max(inferred_content_width, inferred_column_width, 1.0)
+            else:
+                width_context = "column"
+                expected_width = max(inferred_column_width, 1.0)
             best = None
             best_gap = None
             for idx, cap in enumerate(captions):
@@ -148,7 +471,10 @@ def _pair_object_clusters(object_clusters: List[Dict[str, Any]], caption_pair_ma
                     "object_bbox": obj.get("bbox"),
                     "caption_bbox": best[1].get("bbox") if best and best_gap is not None and best_gap <= caption_pair_max_gap_px else None,
                     "caption_gap_px": int(best_gap) if best_gap is not None else None,
-                    "object_width_ratio": float(round((ox2 - ox1) / float(max(page_width, 1)), 4)),
+                    "object_width_ratio": float(round(object_width / expected_width, 4)),
+                    "object_width_page_ratio": float(round(object_width / float(max(page_width, 1)), 4)),
+                    "width_context": width_context,
+                    "expected_width_px": float(round(expected_width, 2)),
                 }
             )
             if best and best_gap is not None and best_gap <= caption_pair_max_gap_px:
@@ -226,6 +552,9 @@ def _build_priority_objects(
             "severity": page_status.get(int(pairing.get("page") or 0), "clean"),
             "reason": ", ".join(reasons),
             "object_width_ratio": round(width_ratio, 4),
+            "object_width_page_ratio": pairing.get("object_width_page_ratio"),
+            "width_context": pairing.get("width_context"),
+            "expected_width_px": pairing.get("expected_width_px"),
             "caption_gap_px": int(caption_gap) if caption_gap is not None else None,
             "has_caption_pair": has_caption,
         }
@@ -266,6 +595,7 @@ def aggregate_visual_signals(
     pages_dir: str,
     output_path: str,
     taxonomy_path: str,
+    pdf_path: Optional[str] = None,
     column_void_report: Optional[str] = None,
     log_report: Optional[str] = None,
     crossrefs_report: Optional[str] = None,
@@ -275,6 +605,11 @@ def aggregate_visual_signals(
     layout_rules = _load_layout_rules(Path(__file__).resolve().parent.parent / "config" / "layout_rules.yaml")
     visual_rules = layout_rules.get("visual_signals") or {}
     cv_report = BatchCVDetector(str(pages_path)).run_batch()
+    pymupdf_native = _extract_pymupdf_native_signals(
+        pdf_path,
+        pages_path=pages_path,
+        taxonomy=taxonomy,
+    )
     column_void = _load_json(column_void_report)
     log_data = _load_json(log_report)
     crossrefs = _load_json(crossrefs_report)
@@ -334,6 +669,25 @@ def aggregate_visual_signals(
                         "confidence": det.get("confidence"),
                     }
                 )
+
+    for cluster in pymupdf_native.get("object_clusters") or []:
+        object_clusters.append(cluster)
+
+    for entry in pymupdf_native.get("findings") or []:
+        family = str(entry.get("taxonomy_defect_id") or _defect_family(str(entry.get("defect_id") or "")))
+        skill = entry.get("suggested_skill") or _skill_for_defect(family, taxonomy)
+        if skill:
+            entry["suggested_skill"] = skill
+        if _should_promote_signal(entry.get("confidence"), visual_rules):
+            findings.append(entry)
+            if entry.get("page") is not None:
+                pages_flagged.setdefault(int(entry.get("page") or 0), []).append(family)
+            if skill:
+                by_skill[skill] = by_skill.get(skill, 0) + 1
+        else:
+            hints.append(entry)
+            if entry.get("page") is not None:
+                hinted_pages.setdefault(int(entry.get("page") or 0), []).append(family)
 
     for page in column_void.get("pages") or []:
         page_index = page.get("page_index")
@@ -562,6 +916,13 @@ def aggregate_visual_signals(
                 "page_results_count": len(cv_report.get("page_results") or []),
                 "total_detections": cv_report.get("total_detections", 0),
             },
+            "pymupdf_native": {
+                "available": bool(pymupdf_native.get("available")),
+                "reason": pymupdf_native.get("reason"),
+                "pdf_path": pymupdf_native.get("pdf_path"),
+                "finding_count": len(pymupdf_native.get("findings") or []),
+                "object_cluster_count": len(pymupdf_native.get("object_clusters") or []),
+            },
             "column_void_report": column_void_report if column_void else None,
             "log_report": log_report if log_data else None,
             "crossrefs_report": crossrefs_report if crossrefs else None,
@@ -594,6 +955,7 @@ def main() -> None:
     parser.add_argument("pages_dir", help="Directory with page_*.png files")
     parser.add_argument("--output", default="data/visual_signal_report.json")
     parser.add_argument("--taxonomy", default=str(Path(__file__).resolve().parent.parent / "config" / "vto_taxonomy.yaml"))
+    parser.add_argument("--pdf", default=None, help="Optional compiled PDF path for PyMuPDF native geometry checks")
     parser.add_argument("--column-void-report", default=None)
     parser.add_argument("--log-report", default=None)
     parser.add_argument("--crossrefs-report", default=None)
@@ -603,6 +965,7 @@ def main() -> None:
         pages_dir=args.pages_dir,
         output_path=args.output,
         taxonomy_path=args.taxonomy,
+        pdf_path=args.pdf,
         column_void_report=args.column_void_report,
         log_report=args.log_report,
         crossrefs_report=args.crossrefs_report,

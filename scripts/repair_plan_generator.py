@@ -134,6 +134,48 @@ def _pairing_severity(width_ratio: Optional[float], caption_gap_px: Optional[int
     return "minor"
 
 
+def _visual_b2_finding_priority_items(visual_report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for finding in visual_report.get("findings") or []:
+        if str(finding.get("taxonomy_defect_id") or "") != "B2":
+            continue
+        metrics = finding.get("metrics") or {}
+        subtype = str(metrics.get("subtype") or "")
+        if subtype not in {"overflow_width", "underfilled_width"}:
+            continue
+        bbox = finding.get("bbox") or []
+        width_ratio_raw = metrics.get("object_width_ratio")
+        width_ratio = float(width_ratio_raw) if isinstance(width_ratio_raw, (int, float)) else None
+        overflow_pt = float(metrics.get("overflow_pt") or 0.0)
+        if subtype == "overflow_width":
+            priority_score = 180 + int(min(30, max(0.0, overflow_pt)))
+            reason = f"overflow_width:{overflow_pt:.3f}pt"
+        else:
+            ratio_for_score = width_ratio if width_ratio is not None else 1.0
+            priority_score = 100 + int(round(max(0.0, 0.85 - ratio_for_score) * 50))
+            reason = f"underfilled_width:{ratio_for_score:.3f}"
+        items.append(
+            {
+                "page": int(finding.get("page") or 0),
+                "object_kind": str(metrics.get("object_kind") or "figure_like"),
+                "bbox": bbox,
+                "priority_score": priority_score,
+                "severity": str(finding.get("severity") or "major"),
+                "reason": reason,
+                "object_width_ratio": width_ratio,
+                "object_width_page_ratio": metrics.get("object_width_page_ratio"),
+                "width_context": metrics.get("width_context"),
+                "visual_width_subtype": subtype,
+                "overflow_pt": overflow_pt if subtype == "overflow_width" else None,
+                "pdf_bbox": metrics.get("pdf_bbox"),
+                "source": str(finding.get("source") or "visual_signal_report"),
+                "finding_defect_id": finding.get("defect_id"),
+                "confidence": finding.get("confidence"),
+            }
+        )
+    return items
+
+
 def _priority_objects_with_pairing_fallback(visual_report: Dict[str, Any]) -> List[Dict[str, Any]]:
     enriched: List[Dict[str, Any]] = []
     seen_keys: set[tuple[Any, ...]] = set()
@@ -143,6 +185,16 @@ def _priority_objects_with_pairing_fallback(visual_report: Dict[str, Any]) -> Li
         key = _object_key(enriched_item)
         seen_keys.add(key)
         enriched.append(enriched_item)
+
+    for item in _visual_b2_finding_priority_items(visual_report):
+        key = _object_key(item)
+        existing = next((candidate for candidate in enriched if _object_key(candidate) == key), None)
+        if existing is not None:
+            if int(item.get("priority_score") or 0) > int(existing.get("priority_score") or 0):
+                existing.update(item)
+            continue
+        seen_keys.add(key)
+        enriched.append(item)
 
     for pairing in visual_report.get("object_pairings") or []:
         key = _object_key(pairing)
@@ -341,8 +393,11 @@ def _build_object_candidates(visual_report: Dict[str, Any], crossrefs_report: Di
         semantic_float = float_lookup.get(label)
         semantic_home = _build_semantic_home(semantic_distance, semantic_float)
         width_ratio = _extract_ratio_from_reason(reason, "low_width_ratio")
+        visual_width_subtype = str(item.get("visual_width_subtype") or "")
+        if visual_width_subtype == "underfilled_width":
+            width_ratio = _extract_ratio_from_reason(reason, "underfilled_width") or width_ratio
         source_width_is_sufficient = _is_width_already_sufficient(item.get("width_spec"))
-        if "low_width_ratio" in reason:
+        if "low_width_ratio" in reason or visual_width_subtype in {"overflow_width", "underfilled_width"}:
             defect_family = "B2"
         elif "caption_gap" in reason:
             defect_family = "C4"
@@ -374,6 +429,13 @@ def _build_object_candidates(visual_report: Dict[str, Any], crossrefs_report: Di
                 "source_width_spec": item.get("width_spec"),
                 "source_table_env": item.get("table_env"),
                 "source_tabcolsep": item.get("tabcolsep"),
+                "visual_width_subtype": visual_width_subtype or None,
+                "visual_object_width_ratio": width_ratio,
+                "visual_object_width_page_ratio": item.get("object_width_page_ratio"),
+                "visual_width_context": item.get("width_context"),
+                "visual_overflow_pt": item.get("overflow_pt"),
+                "visual_pdf_bbox": item.get("pdf_bbox"),
+                "visual_confidence": item.get("confidence"),
                 "semantic_home": semantic_home,
                 "ref_line": semantic_distance.get("ref_line") if semantic_distance else None,
                 "float_line": semantic_distance.get("float_line") if semantic_distance else None,
@@ -383,8 +445,12 @@ def _build_object_candidates(visual_report: Dict[str, Any], crossrefs_report: Di
                 "reference_text": semantic_distance.get("reference_text") if semantic_distance else None,
                 "float_section": semantic_float.get("section") if semantic_float else None,
                 "evidence_sources": (
-                    ["visual_signal_report", "crossrefs_report"]
+                    [str(item.get("source") or "visual_signal_report"), "visual_signal_report", "crossrefs_report"]
+                    if visual_width_subtype and semantic_home
+                    else ["visual_signal_report", "crossrefs_report"]
                     if semantic_home
+                    else [str(item.get("source") or "visual_signal_report"), "visual_signal_report"]
+                    if visual_width_subtype
                     else ["visual_signal_report"]
                 ),
             }

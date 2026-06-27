@@ -1093,6 +1093,7 @@ class OrchestratorRuntime:
         visual_hard_guards: Dict[str, Any] = {"available": False, "hard_failures": []}
         pdf_path = compile_result.get("pdf_path")
         if compile_result.get("success") and pdf_path:
+            self.manager.update({"artifacts": {"pdf_path": str(pdf_path)}})
             render_result = render_pdf_pages(
                 project_root,
                 pdf_path=Path(str(pdf_path)),
@@ -1867,6 +1868,9 @@ class OrchestratorRuntime:
             cmd.extend(["--log-report", rule_report_output])
         if crossrefs_output:
             cmd.extend(["--crossrefs-report", crossrefs_output])
+        pdf_path = ((state.get("artifacts") or {}).get("pdf_path"))
+        if pdf_path:
+            cmd.extend(["--pdf", str(pdf_path)])
         try:
             subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True)
         except subprocess.CalledProcessError:

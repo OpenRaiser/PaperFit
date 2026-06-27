@@ -168,6 +168,19 @@ def _build_float_defects(plan: Dict[str, Any], max_candidates: int) -> List[Dict
         if defect_family == "B1":
             defect["ref_page"] = candidate.get("page") or 0
             defect.update(merged_b1_metadata.get(str(label)) or {})
+        if defect_family == "B2":
+            for key in (
+                "source_width_spec",
+                "visual_width_subtype",
+                "visual_object_width_ratio",
+                "visual_object_width_page_ratio",
+                "visual_width_context",
+                "visual_overflow_pt",
+                "visual_pdf_bbox",
+                "visual_confidence",
+            ):
+                if candidate.get(key) is not None:
+                    defect[key] = candidate.get(key)
         defects.append(defect)
 
     for candidate in plan.get("candidates") or []:
@@ -191,9 +204,42 @@ def _build_float_defects(plan: Dict[str, Any], max_candidates: int) -> List[Dict
             if candidate.get(key) is not None:
                 current[key] = candidate.get(key)
 
-    # Keep one strong semantic-distance B1 candidate and up to two clearly narrow
-    # B2 figures so late-page objects are not permanently starved by early-page
-    # top-5 truncation.
+    # Keep strong semantic-distance B1 candidates and visually confirmed B2
+    # width candidates so targetable float fixes are not starved by generic
+    # page-level signals.
+    visual_width_candidates = [
+        candidate
+        for candidate in (plan.get("candidates") or [])
+        if str(candidate.get("defect_family") or "") == "B2"
+        and str(((candidate.get("target") or {}).get("label")) or "")
+        and str(((candidate.get("target") or {}).get("label")) or "").startswith("fig:")
+        and (
+            str(candidate.get("visual_width_subtype") or "") in {"overflow_width", "underfilled_width"}
+            or (_parse_width_ratio(candidate.get("source_width_spec")) or 1.0) <= 0.5
+        )
+    ]
+    visual_width_candidates.sort(
+        key=lambda item: (
+            0 if str(item.get("visual_width_subtype") or "") == "overflow_width" else 1,
+            0 if str(item.get("visual_width_subtype") or "") == "underfilled_width" else 1,
+            -float(item.get("visual_overflow_pt") or 0.0),
+            float(item.get("visual_object_width_ratio") or (_parse_width_ratio(item.get("source_width_spec")) or 1.0)),
+            int(item.get("page") or 0),
+            -int(item.get("priority_score") or 0),
+            str(((item.get("target") or {}).get("label")) or ""),
+        )
+    )
+    deduped_visual_width_candidates: List[Dict[str, Any]] = []
+    seen_width_labels: set[str] = set()
+    for candidate in visual_width_candidates:
+        label = str(((candidate.get("target") or {}).get("label")) or "")
+        if not label or label in seen_width_labels:
+            continue
+        seen_width_labels.add(label)
+        deduped_visual_width_candidates.append(candidate)
+    for candidate in deduped_visual_width_candidates[:2]:
+        _append_candidate(candidate)
+
     far_anchor_candidates = [
         candidate
         for candidate in (plan.get("candidates") or [])
@@ -213,32 +259,6 @@ def _build_float_defects(plan: Dict[str, Any], max_candidates: int) -> List[Dict
         )
     )
     for candidate in far_anchor_candidates[:2]:
-        _append_candidate(candidate)
-
-    narrow_figure_candidates = [
-        candidate
-        for candidate in (plan.get("candidates") or [])
-        if str(candidate.get("defect_family") or "") == "B2"
-        and str(((candidate.get("target") or {}).get("label")) or "").startswith("fig:")
-        and (_parse_width_ratio(candidate.get("source_width_spec")) or 1.0) <= 0.5
-    ]
-    narrow_figure_candidates.sort(
-        key=lambda item: (
-            _parse_width_ratio(item.get("source_width_spec")) or 1.0,
-            int(item.get("page") or 0),
-            -int(item.get("priority_score") or 0),
-            str(((item.get("target") or {}).get("label")) or ""),
-        )
-    )
-    deduped_narrow_figure_candidates: List[Dict[str, Any]] = []
-    seen_narrow_labels: set[str] = set()
-    for candidate in narrow_figure_candidates:
-        label = str(((candidate.get("target") or {}).get("label")) or "")
-        if not label or label in seen_narrow_labels:
-            continue
-        seen_narrow_labels.add(label)
-        deduped_narrow_figure_candidates.append(candidate)
-    for candidate in deduped_narrow_figure_candidates[:2]:
         _append_candidate(candidate)
 
     b3_cluster_candidates = [
@@ -545,6 +565,15 @@ def _build_deferred_global_report(reason: str) -> Dict[str, Any]:
     }
 
 
+def _build_deferred_skill_report(skill: str, reason: str) -> Dict[str, Any]:
+    return {
+        "skill": skill,
+        "status": "noop",
+        "changes": [],
+        "unresolved": [reason],
+    }
+
+
 def _has_structure_regression(diff: Dict[str, Any]) -> bool:
     return has_structure_regression(diff)
 
@@ -615,8 +644,15 @@ def execute_repair_plan(
     tex_path = Path(main_tex)
     original_tex = tex_path.read_text(encoding="utf-8") if tex_path.is_file() else ""
     float_defects = _build_float_defects(plan, max_candidates=max_candidates)
-    overflow_defects = _build_overflow_defects(plan, main_tex=main_tex, max_candidates=max_candidates)
-    space_defects = _build_space_util_defects(plan, max_candidates=max_candidates)
+    overflow_defects = [] if float_defects else _build_overflow_defects(
+        plan,
+        main_tex=main_tex,
+        max_candidates=max_candidates,
+    )
+    space_defects = [] if (float_defects or overflow_defects) else _build_space_util_defects(
+        plan,
+        max_candidates=max_candidates,
+    )
 
     report: Dict[str, Any] = {
         "schema_version": "1.0",
@@ -660,6 +696,11 @@ def execute_repair_plan(
             report["status"] = overflow_report.get("status") or "partial"
         elif overflow_changes:
             report["status"] = "partial" if report["status"] != "success" or overflow_report.get("unresolved") else "success"
+    elif float_defects:
+        report["overflow_report"] = _build_deferred_skill_report(
+            "overflow-repair",
+            "deferred D-class overflow actions until selected B-class float sizing/placement candidates are resolved",
+        )
 
     if space_defects:
         space_report = execute_space_util_candidates(
@@ -675,12 +716,30 @@ def execute_repair_plan(
             report["status"] = space_report.get("status") or "partial"
         elif space_changes:
             report["status"] = "partial" if report["status"] != "success" or space_report.get("unresolved") else "success"
+    elif float_defects:
+        report["space_report"] = _build_deferred_skill_report(
+            "space-util-fixer",
+            "deferred A-class space actions until selected B-class float sizing/placement candidates are resolved",
+        )
+    elif overflow_defects:
+        report["space_report"] = _build_deferred_skill_report(
+            "space-util-fixer",
+            "deferred A-class space actions until selected D-class overflow candidates are resolved",
+        )
 
     global_actions = _build_global_actions(plan, max_candidates=max_candidates)
     if global_actions:
         if _has_float_priority_candidates(plan):
             global_report = _build_deferred_global_report(
                 "deferred global text actions until B1/B2 float placement and sizing candidates are resolved"
+            )
+        elif overflow_defects:
+            global_report = _build_deferred_global_report(
+                "deferred global text actions until D-class overflow candidates are resolved"
+            )
+        elif space_defects:
+            global_report = _build_deferred_global_report(
+                "deferred global text actions until A-class space-util candidates are resolved"
             )
         else:
             global_report = _execute_global_actions(main_tex=main_tex, actions=global_actions)

@@ -328,6 +328,88 @@ def _choose_equation_break(rhs: str) -> Optional[Tuple[str, str]]:
     return None
 
 
+def _split_top_level_additive_terms(rhs: str) -> List[str]:
+    terms: List[str] = []
+    brace_depth = 0
+    term_start = 0
+    idx = 0
+    while idx < len(rhs):
+        char = rhs[idx]
+        if char == "{":
+            brace_depth += 1
+        elif char == "}":
+            brace_depth = max(0, brace_depth - 1)
+        elif (
+            brace_depth == 0
+            and char in {"+", "-"}
+            and idx > 0
+            and rhs[idx - 1].isspace()
+            and idx + 1 < len(rhs)
+            and rhs[idx + 1].isspace()
+        ):
+            term = rhs[term_start:idx].strip()
+            if term:
+                terms.append(term)
+            term_start = idx
+        idx += 1
+
+    final_term = rhs[term_start:].strip()
+    if final_term:
+        terms.append(final_term)
+    return terms
+
+
+def _rewrite_equation_to_aligned_terms(lhs: str, rhs: str) -> Optional[str]:
+    terms = _split_top_level_additive_terms(rhs)
+    if len(terms) < 3:
+        return None
+
+    lines = [
+        "\\begin{equation}",
+        "\\begin{aligned}",
+        f"  {lhs} &= {terms[0]} \\\\",
+    ]
+    for term in terms[1:-1]:
+        lines.append(f"  &\\quad {term} \\\\")
+    lines.append(f"  &\\quad {terms[-1]}")
+    lines.extend(["\\end{aligned}", "\\end{equation}"])
+    return "\n".join(lines)
+
+
+def _chunk_identifier_for_math_subscript(identifier: str, max_chunk_len: int = 30) -> List[str]:
+    parts = re.findall(r"[A-Z][a-z0-9]*|[a-z0-9]+", identifier)
+    if not parts:
+        parts = [identifier[idx: idx + max_chunk_len] for idx in range(0, len(identifier), max_chunk_len)]
+
+    chunks: List[str] = []
+    current = ""
+    for part in parts:
+        if current and len(current) + len(part) > max_chunk_len:
+            chunks.append(current)
+            current = part
+        else:
+            current += part
+    if current:
+        chunks.append(current)
+    if len(chunks) <= 1 and len(identifier) > max_chunk_len:
+        return [identifier[idx: idx + max_chunk_len] for idx in range(0, len(identifier), max_chunk_len)]
+    return chunks
+
+
+def _break_long_mathrm_subscripts(expression: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        identifier = match.group(1)
+        if len(identifier) < 40:
+            return match.group(0)
+        chunks = _chunk_identifier_for_math_subscript(identifier)
+        if len(chunks) <= 1:
+            return match.group(0)
+        body = r"\\".join(f"\\mathrm{{{chunk}}}" for chunk in chunks)
+        return f"_{{\\substack{{{body}}}}}"
+
+    return re.sub(r"_\{\\mathrm\{([A-Za-z][A-Za-z0-9]{39,})\}\}", replace, expression)
+
+
 def _rewrite_equation_to_multline(equation_body: str) -> Optional[str]:
     normalized = " ".join(equation_body.strip().split())
     if "=" not in normalized:
@@ -335,7 +417,7 @@ def _rewrite_equation_to_multline(equation_body: str) -> Optional[str]:
 
     lhs, rhs = normalized.split("=", 1)
     lhs = lhs.strip()
-    rhs = rhs.strip()
+    rhs = _break_long_mathrm_subscripts(rhs.strip())
     concat_fraction_break = _find_safe_concat_fraction_break(rhs)
     if concat_fraction_break is not None:
         first_line_rhs, second_line_rhs = concat_fraction_break
@@ -347,6 +429,10 @@ def _rewrite_equation_to_multline(equation_body: str) -> Optional[str]:
             "\\end{aligned}\n"
             "\\end{equation}"
         )
+
+    aligned_terms = _rewrite_equation_to_aligned_terms(lhs, rhs)
+    if aligned_terms is not None:
+        return aligned_terms
 
     break_pair = _choose_equation_break(rhs)
     if break_pair is None:
@@ -774,7 +860,7 @@ def fix_equation_overflow(
     return modified_content, FixResult(
         defect_id="D2",
         object_name=equation_label or "公式",
-        action="将长公式改为 multline 并在可断点处换行",
+        action="将长公式改为多行对齐结构，并在可断点处换行",
         before=original_equation[:120] + "..." if len(original_equation) > 120 else original_equation,
         after=rewritten_equation[:120] + "..." if len(rewritten_equation) > 120 else rewritten_equation,
         line_number=line_number,

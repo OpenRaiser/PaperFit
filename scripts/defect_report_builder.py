@@ -127,8 +127,12 @@ def _normalize_rule_report(rule_report: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _normalize_visual_report(visual_report: Dict[str, Any]) -> List[Dict[str, Any]]:
     defects: List[Dict[str, Any]] = []
+    b2_finding_keys: set[tuple[Any, ...]] = set()
 
     for finding in visual_report.get("findings") or []:
+        if str(finding.get("taxonomy_defect_id") or "") == "B2":
+            bbox = finding.get("bbox") or []
+            b2_finding_keys.add((finding.get("page"), tuple(int(v) for v in bbox) if len(bbox) == 4 else ()))
         payload = {
             "source": finding.get("source"),
             "page": finding.get("page"),
@@ -170,6 +174,10 @@ def _normalize_visual_report(visual_report: Dict[str, Any]) -> List[Dict[str, An
             continue
         if not isinstance(width_ratio, (int, float)):
             continue
+        bbox = object_item.get("bbox") or []
+        bbox_key = tuple(int(v) for v in bbox) if len(bbox) == 4 else ()
+        if (object_item.get("page"), bbox_key) in b2_finding_keys:
+            continue
         defects.append(
             {
                 "id": _stable_id(
@@ -196,6 +204,9 @@ def _normalize_visual_report(visual_report: Dict[str, Any]) -> List[Dict[str, An
                     "bbox": object_item.get("bbox"),
                     "reason": reason,
                     "object_width_ratio": float(width_ratio),
+                    "object_width_page_ratio": object_item.get("object_width_page_ratio"),
+                    "width_context": object_item.get("width_context"),
+                    "expected_width_px": object_item.get("expected_width_px"),
                     "caption_gap_px": object_item.get("caption_gap_px"),
                     "has_caption_pair": object_item.get("has_caption_pair"),
                 },

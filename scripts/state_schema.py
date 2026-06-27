@@ -30,6 +30,7 @@ ARTIFACT_FIELDS = (
     "rule_report",
     "crossrefs_report",
     "source_hygiene_report",
+    "pdf_path",
     "page_images_dir",
     "column_void_report",
     "column_void_schema_version",

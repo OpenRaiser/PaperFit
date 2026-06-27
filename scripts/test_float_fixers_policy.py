@@ -84,6 +84,44 @@ class FloatFixerPolicyTest(unittest.TestCase):
             self.assertIn(r"\begin{figure}[p]", updated)
             self.assertIn(r"\includegraphics[width=\linewidth]{target.pdf}", updated)
 
+    def test_b2_overwide_figure_is_normalized_to_linewidth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            tex_path = root / "main.tex"
+            tex_path.write_text(
+                "\n".join(
+                    [
+                        r"\documentclass{article}",
+                        r"\begin{document}",
+                        r"\begin{figure}[ht]",
+                        r"\centering",
+                        r"\includegraphics[width=1.28\linewidth]{figs/edge.pdf}",
+                        r"\caption{The schematic diagram of edges.}",
+                        r"\label{fig:edge}",
+                        r"\end{figure}",
+                        r"\end{document}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch("float_fixers._passes_hard_content_gate", return_value=(True, "pass")):
+                report = fix_float_defects(
+                    str(tex_path),
+                    [{"defect_id": "B2", "object": "fig:edge", "page": 5}],
+                )
+
+            updated = tex_path.read_text(encoding="utf-8")
+            self.assertEqual(report.status, "success")
+            self.assertEqual(len(report.changes), 1)
+            self.assertEqual(report.changes[0].defect_id, "B2")
+            self.assertEqual(report.changes[0].object_name, "fig:edge")
+            self.assertIn(r"\includegraphics[width=\linewidth]{figs/edge.pdf}", updated)
+            self.assertNotIn(r"width=1.28\linewidth", updated)
+            self.assertIn(r"\caption{The schematic diagram of edges.}", updated)
+            self.assertIn(r"\label{fig:edge}", updated)
+
     def test_floatbarrier_requires_explicit_hard_guard_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

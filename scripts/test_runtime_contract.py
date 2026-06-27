@@ -7,12 +7,14 @@ from scripts.runtime_approval import (
     build_approval_scope_carry_forward_check,
     build_candidate_approval_scope_gate,
 )
+from scripts.runtime_repair_loop import build_repair_loop_policy
 from scripts.runtime_repair_risk import classify_repair_candidate_risk
 from scripts.runtime_state_machine import (
     IllegalTransitionError,
     SOURCE_CHANGING_STATE_MACHINE,
     VISUAL_ONLY_STATE_MACHINE,
 )
+from scripts.state_schema import build_default_state, validate_state
 from scripts.runtime_types import ActionResult, TaskSpec
 
 
@@ -63,6 +65,14 @@ class RuntimeContractTest(unittest.TestCase):
             spec.to_dict()["column_void_report"],
             "data/column_void_report.json",
         )
+
+    def test_state_schema_allows_compiled_pdf_artifact(self) -> None:
+        state = build_default_state(main_tex="main.tex", task_type="visual_only")
+        state["artifacts"]["pdf_path"] = "main.pdf"
+
+        validated = validate_state(state)
+
+        self.assertEqual(validated["artifacts"]["pdf_path"], "main.pdf")
 
     def test_source_changing_task_requires_snapshot_and_rollback_contract(self) -> None:
         with self.assertRaises(ValueError):
@@ -300,6 +310,62 @@ class RuntimeContractTest(unittest.TestCase):
 
         self.assertEqual(gate["status"], "pass")
         self.assertTrue(gate["candidate_risks"][0]["allowed_under_current_scope"])
+
+    def test_repair_loop_policy_blocks_done_without_fresh_visual_evidence(self) -> None:
+        task = {
+            "task_type": "full_vto",
+            "rollback_policy": "required",
+            "pre_repair_snapshot_required": True,
+            "dry_run_source_mutation": True,
+            "max_rounds": 2,
+        }
+        runtime_actions = {
+            "repair_plan_executor": {
+                "success": True,
+                "skipped": True,
+                "reason": "dry_run_source_mutation",
+                "requires_approval": True,
+                "risk_level": "high",
+                "applied_count": 0,
+                "planned_candidates": 1,
+                "approval_scope_gate": {"status": "pass"},
+            }
+        }
+        approval = build_approval_object(
+            task=task,
+            state={"repair_plan_summary": {"total_candidates": 1}},
+            runtime_actions=runtime_actions,
+        )
+
+        policy = build_repair_loop_policy(
+            task=task,
+            state={
+                "repair_plan_summary": {"total_candidates": 1},
+                "content_integrity": {"validation_status": "mutation_reported"},
+                "current_round": 1,
+            },
+            runtime_actions=runtime_actions,
+            artifact_manifest={
+                "freshness": {
+                    "status": "stale_or_missing",
+                    "blocking_checks": ["pdf_exists"],
+                }
+            },
+            approval=approval,
+            status="blocked",
+            gatekeeper_decision="DONE",
+            round_artifact_lineage=[{"schema_version": "1.0", "round": 1, "actions": runtime_actions}],
+        )
+
+        self.assertIsNotNone(policy)
+        self.assertEqual(approval["status"], "approval_required")
+        self.assertEqual(policy["stop_condition"], "artifact_freshness_not_pass")
+        self.assertEqual(policy["next_round_reason"], "artifact_freshness_not_pass")
+        self.assertFalse(policy["next_round_allowed"])
+        self.assertEqual(policy["second_round_apply_readiness"]["status"], "blocked")
+        self.assertFalse(policy["second_round_apply_readiness"]["checks"]["artifact_freshness_pass"])
+        self.assertFalse(policy["second_round_apply_readiness"]["checks"]["source_mutation_executed"])
+        self.assertFalse(policy["second_round_apply_readiness"]["checks"]["runtime_execution_mode_can_auto_apply"])
 
 
 if __name__ == "__main__":
