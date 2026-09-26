@@ -159,6 +159,66 @@ class OverflowFixersTest(unittest.TestCase):
             self.assertIn(r"\\", updated)
             self.assertEqual(updated.count(r"\substack"), 3)
 
+    def test_executor_prefers_urgent_overflow_over_non_b2_float_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            main_tex = root / "main.tex"
+            main_tex.write_text(
+                "\n".join(
+                    [
+                        r"\documentclass{article}",
+                        r"\begin{document}",
+                        r"\begin{equation}",
+                        LONG_EQUATION,
+                        r"\end{equation}",
+                        r"\end{document}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            plan_path = root / "repair_plan.json"
+            output_path = root / "repair_execution_report.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "candidates": [
+                            {
+                                "candidate_type": "page_cluster",
+                                "defect_family": "B3",
+                                "priority_score": 91,
+                                "page": 3,
+                                "target": {"labels": ["fig:a", "fig:b"]},
+                                "proposed_action": "decluster_float_sequence",
+                            },
+                            {
+                                "candidate_type": "log_warning",
+                                "defect_family": "D1",
+                                "priority_score": 82,
+                                "line_number": 4,
+                                "target": {"scope": "overflow"},
+                                "description": LONG_EQUATION,
+                                "overflow_amount": 13.2,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = execute_repair_plan(
+                repair_plan_path=str(plan_path),
+                main_tex=str(main_tex),
+                output_path=str(output_path),
+                max_candidates=1,
+            )
+
+            self.assertTrue(report["selection_policy"]["urgent_overflow_first"])
+            self.assertEqual(report["selected_candidates"]["float"], [])
+            self.assertEqual(report["selected_candidates"]["overflow"][0]["defect_id"], "D2")
+            self.assertEqual(report["status"], "success")
+            self.assertIn(r"\begin{aligned}", main_tex.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

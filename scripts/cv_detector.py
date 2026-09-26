@@ -69,6 +69,8 @@ FALLBACK_DETECTION_DEFAULTS = {
     "column_imbalance_threshold": 0.10,
     "column_imbalance_major_threshold": 0.15,
     "float_clustering_min_distance_px": 100,
+    "float_clustering_min_count": 3,
+    "float_clustering_max_text_lines": 8,
     "density_shift_threshold": 0.18,
     "density_shift_major_delta": 0.08,
     "float_dominated_threshold": 0.65,
@@ -89,6 +91,10 @@ def load_detection_defaults(rules_path: Optional[Path] = None) -> Dict[str, Any]
     defaults["trailing_whitespace_threshold"] = float(
         whitespace.get("trailing_whitespace_max_ratio", defaults["trailing_whitespace_threshold"])
     )
+
+    float_rules = data.get("float") or {}
+    if "max_consecutive_floats" in float_rules:
+        defaults["float_clustering_min_count"] = int(float_rules.get("max_consecutive_floats") or 2) + 1
 
     detector_rules = data.get("cv_detector") or {}
     for key, value in detector_rules.items():
@@ -125,9 +131,16 @@ class DefectDetection:
 class CVDefectDetector:
     """基于 OpenCV 的缺陷检测器"""
 
-    def __init__(self, image_path: str, page_number: int = 0, rules_path: Optional[Path] = None):
+    def __init__(
+        self,
+        image_path: str,
+        page_number: int = 0,
+        rules_path: Optional[Path] = None,
+        total_pages: Optional[int] = None,
+    ):
         self.image_path = Path(image_path)
         self.page_number = page_number
+        self.total_pages = total_pages
         self.image: Optional[np.ndarray] = None
         self.gray: Optional[np.ndarray] = None
         self.detections: List[DefectDetection] = []
@@ -138,6 +151,9 @@ class CVDefectDetector:
         self.page_height_inch = 11.69
         self.dpi = 220  # 与 render_pages.py 保持一致
 
+    def _is_last_page_context(self) -> bool:
+        return self.total_pages is None or self.page_number >= self.total_pages
+
     def _content_binary(self, threshold: Optional[int] = None) -> np.ndarray:
         if self.gray is None and not self.load_image():
             return np.zeros((1, 1), dtype=np.uint8)
@@ -146,6 +162,34 @@ class CVDefectDetector:
         )
         _, binary = cv2.threshold(self.gray, threshold, 255, cv2.THRESH_BINARY_INV)
         return binary
+
+    def _estimate_text_line_count(self, binary: np.ndarray) -> int:
+        page_width = binary.shape[1]
+        h_proj = np.sum(binary > 0, axis=1)
+        min_projection = int(self.thresholds["short_line_projection_threshold"])
+        bands: List[Tuple[int, int]] = []
+        in_band = False
+        start = 0
+        for idx, val in enumerate(h_proj):
+            if val > min_projection and not in_band:
+                in_band = True
+                start = idx
+            elif val <= min_projection and in_band:
+                in_band = False
+                bands.append((start, idx))
+        if in_band:
+            bands.append((start, len(h_proj)))
+
+        text_lines = 0
+        for start, end in bands:
+            height = end - start
+            if height < 3 or height > 35:
+                continue
+            row = binary[start:end, :]
+            line_width = int(np.sum(np.any(row > 0, axis=0)))
+            if line_width >= page_width * 0.20:
+                text_lines += 1
+        return text_lines
 
     def _find_float_bboxes(self, binary: np.ndarray) -> List[Tuple[int, int, int, int]]:
         h, w = binary.shape
@@ -285,6 +329,8 @@ class CVDefectDetector:
         """
         if self.gray is None and not self.load_image():
             return []
+        if not self._is_last_page_context():
+            return []
 
         # A2 is trailing whitespace, not the full-page white-pixel ratio. In
         # academic PDFs most pixels are naturally white because of margins and
@@ -336,6 +382,8 @@ class CVDefectDetector:
         分析页面底部 30% 区域的留白比例
         """
         if self.gray is None and not self.load_image():
+            return []
+        if not self._is_last_page_context():
             return []
 
         h, w = self.gray.shape
@@ -439,6 +487,8 @@ class CVDefectDetector:
         """
         if self.gray is None and not self.load_image():
             return []
+        if not self._is_last_page_context():
+            return []
 
         h, w = self.gray.shape
 
@@ -508,45 +558,69 @@ class CVDefectDetector:
         min_distance = int(
             min_distance if min_distance is not None else self.thresholds["float_clustering_min_distance_px"]
         )
+        min_count = int(self.thresholds["float_clustering_min_count"])
 
         binary = self._content_binary()
         float_bboxes = self._find_float_bboxes(binary)
+        if len(float_bboxes) < min_count:
+            return []
+        text_line_count = self._estimate_text_line_count(binary)
+        max_text_lines = int(self.thresholds["float_clustering_max_text_lines"])
+        if text_line_count > max_text_lines:
+            return []
 
         # 按 Y 坐标排序
         float_bboxes.sort(key=lambda b: b[1])
 
-        # 检测堆叠（垂直距离过小）
-        clustered_detections = []
-        for i in range(len(float_bboxes) - 1):
-            curr_bbox = float_bboxes[i]
-            next_bbox = float_bboxes[i + 1]
-
-            # 计算垂直间距
+        def close_enough(curr_bbox: Tuple[int, int, int, int], next_bbox: Tuple[int, int, int, int]) -> Tuple[bool, int]:
             curr_bottom = curr_bbox[1] + curr_bbox[3]
             next_top = next_bbox[1]
             vertical_gap = next_top - curr_bottom
-
-            # 检查 X 方向是否有重叠（确保是同一栏的浮动体）
             x_overlap = (
                 max(curr_bbox[0], next_bbox[0]) <
                 min(curr_bbox[0] + curr_bbox[2], next_bbox[0] + next_bbox[2])
             )
+            return 0 <= vertical_gap < min_distance and x_overlap, int(vertical_gap)
 
-            if 0 <= vertical_gap < min_distance and x_overlap:
-                clustered_detections.append(DefectDetection(
-                    defect_id="B3-float-clustering",
-                    category="B",
-                    severity="minor",
-                    page=self.page_number,
-                    confidence=0.85,
-                    bbox=(curr_bbox[0], curr_bbox[1],
-                          next_bbox[0] + next_bbox[2], next_bbox[1] + next_bbox[3]),
-                    description=f"浮动体堆叠：垂直间距 {vertical_gap}px < {min_distance}px",
-                    metrics={
-                        "vertical_gap": int(vertical_gap),
-                        "float_count": 2,
-                    }
-                ))
+        clusters: List[Tuple[List[Tuple[int, int, int, int]], List[int]]] = []
+        current_group = [float_bboxes[0]]
+        current_gaps: List[int] = []
+        for next_bbox in float_bboxes[1:]:
+            is_close, vertical_gap = close_enough(current_group[-1], next_bbox)
+            if is_close:
+                current_group.append(next_bbox)
+                current_gaps.append(vertical_gap)
+                continue
+            if len(current_group) >= min_count:
+                clusters.append((current_group, current_gaps))
+            current_group = [next_bbox]
+            current_gaps = []
+        if len(current_group) >= min_count:
+            clusters.append((current_group, current_gaps))
+
+        clustered_detections = []
+        for group, gaps in clusters:
+            x1 = min(b[0] for b in group)
+            y1 = min(b[1] for b in group)
+            x2 = max(b[0] + b[2] for b in group)
+            y2 = max(b[1] + b[3] for b in group)
+            min_gap = min(gaps) if gaps else 0
+            clustered_detections.append(DefectDetection(
+                defect_id="B3-float-clustering",
+                category="B",
+                severity="minor",
+                page=self.page_number,
+                confidence=0.85,
+                bbox=(x1, y1, x2, y2),
+                description=f"浮动体堆叠：{len(group)} 个浮动体连续间距 < {min_distance}px",
+                metrics={
+                    "vertical_gap": int(min_gap),
+                    "float_count": len(group),
+                    "min_float_count_threshold": min_count,
+                    "text_line_count": text_line_count,
+                    "max_text_lines_threshold": max_text_lines,
+                }
+            ))
 
         self.detections.extend(clustered_detections)
         return clustered_detections
@@ -658,18 +732,22 @@ class CVDefectDetector:
         if short_lines:
             # 检查是否连续出现（孤行特征）
             for idx, width, page_w in short_lines[-2:]:  # 检查最后两行
+                start, end = lines[idx]
                 if width < page_w * short_line_width_ratio:
                     detection = DefectDetection(
                         defect_id="A1-widow-orphan",
                         category="A",
                         severity="minor",
                         page=self.page_number,
-                        confidence=0.75,
+                        confidence=0.60,
                         description=f"检测到短行：宽度 {width:.0f}px / 页面 {page_w:.0f}px = {width/page_w:.0%}",
                         metrics={
                             "line_width": int(width),
                             "page_width": int(page_w),
                             "ratio": width / page_w,
+                            "line_start_px": int(start),
+                            "line_end_px": int(end),
+                            "line_height_px": int(end - start),
                             "width_ratio_threshold": short_line_width_ratio,
                             "projection_threshold": line_threshold,
                         }
@@ -687,8 +765,9 @@ class CVDefectDetector:
         self.detections = []
 
         # 执行所有检测
-        self.detect_whitespace()
-        self.detect_trailing_whitespace_bottom()
+        trailing = self.detect_whitespace()
+        if not trailing:
+            self.detect_trailing_whitespace_bottom()
         self.detect_overflow()
         self.detect_float_clustering()
         self.detect_float_dominated_page()
@@ -743,7 +822,12 @@ class BatchCVDetector:
             # 从文件名解析页码
             page_num = int(page_file.stem.split("_")[1])
 
-            detector = CVDefectDetector(str(page_file), page_number=page_num, rules_path=self.rules_path)
+            detector = CVDefectDetector(
+                str(page_file),
+                page_number=page_num,
+                rules_path=self.rules_path,
+                total_pages=len(page_files),
+            )
             detector.run_all_detections()
             self.results.append(detector.to_report())
 

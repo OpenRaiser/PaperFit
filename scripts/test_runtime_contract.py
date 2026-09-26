@@ -367,6 +367,54 @@ class RuntimeContractTest(unittest.TestCase):
         self.assertFalse(policy["second_round_apply_readiness"]["checks"]["source_mutation_executed"])
         self.assertFalse(policy["second_round_apply_readiness"]["checks"]["runtime_execution_mode_can_auto_apply"])
 
+    def test_repair_loop_policy_blocks_next_round_when_carry_forward_fails(self) -> None:
+        task = {
+            "task_type": "full_vto",
+            "rollback_policy": "required",
+            "pre_repair_snapshot_required": True,
+            "dry_run_source_mutation": False,
+            "max_rounds": 2,
+        }
+        runtime_actions = {
+            "repair_plan_executor": {
+                "success": True,
+                "applied_count": 1,
+                "status": "success",
+                "approval_scope_gate": {"status": "pass"},
+            }
+        }
+        approval = build_approval_object(
+            task=task,
+            state={"repair_plan_summary": {"total_candidates": 1}},
+            runtime_actions=runtime_actions,
+        )
+        approval["policy"]["approval_scope"] = "wrong_scope"
+
+        policy = build_repair_loop_policy(
+            task=task,
+            state={
+                "repair_plan_summary": {"total_candidates": 1},
+                "content_integrity": {"validation_status": "mutation_reported"},
+                "current_round": 1,
+            },
+            runtime_actions=runtime_actions,
+            artifact_manifest={"freshness": {"status": "pass"}},
+            approval=approval,
+            status="continue",
+            gatekeeper_decision="CONTINUE",
+            round_artifact_lineage=[{"schema_version": "1.0", "round": 1, "actions": runtime_actions}],
+        )
+
+        self.assertIsNotNone(policy)
+        self.assertEqual(policy["execution_mode"], "bounded_apply")
+        self.assertEqual(policy["approval_scope_carry_forward"]["status"], "blocked")
+        self.assertFalse(
+            policy["second_round_apply_readiness"]["checks"]["approval_scope_carry_forward_pass"]
+        )
+        self.assertEqual(policy["second_round_apply_readiness"]["status"], "blocked")
+        self.assertEqual(policy["next_round_reason"], "approval_scope_carry_forward_blocked")
+        self.assertFalse(policy["next_round_allowed"])
+
 
 if __name__ == "__main__":
     unittest.main()

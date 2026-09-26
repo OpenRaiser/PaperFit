@@ -544,6 +544,13 @@ class StateManager:
             "schema_version": str(data.get("schema_version") or "1.0"),
             "total_candidates": int(((data.get("summary") or {}).get("total_candidates")) or 0),
             "top_candidates": top_candidates,
+            "b2_width_findings": (data.get("summary") or {}).get("b2_width_findings"),
+            "b2_width_candidates": (data.get("summary") or {}).get("b2_width_candidates"),
+            "b2_width_targetable_candidates": (data.get("summary") or {}).get("b2_width_targetable_candidates"),
+            "b2_width_untargetable_candidates": (data.get("summary") or {}).get("b2_width_untargetable_candidates"),
+            "b2_width_unmatched_findings": (data.get("summary") or {}).get("b2_width_unmatched_findings"),
+            "b2_width_unmatched_pages": (data.get("summary") or {}).get("b2_width_unmatched_pages"),
+            "b2_width_unmatched_finding_ids": (data.get("summary") or {}).get("b2_width_unmatched_finding_ids"),
             "immutability_policy": immutability.get("policy"),
             "source_fingerprint_sha256": source_fingerprint.get("aggregate_sha256"),
             "updated_at": datetime.now().isoformat(),
@@ -583,13 +590,20 @@ class StateManager:
 
         selected = []
         for item in selected_items[:5]:
-            selected.append(
-                {
-                    "defect_id": item.get("defect_id"),
-                    "object": item.get("object"),
-                    "page": item.get("page"),
-                }
-            )
+            selected_item = {
+                "defect_id": item.get("defect_id"),
+                "object": item.get("object"),
+                "page": item.get("page"),
+            }
+            for key in (
+                "object_kind",
+                "visual_width_subtype",
+                "visual_object_width_ratio",
+                "visual_overflow_pt",
+            ):
+                if item.get(key) is not None:
+                    selected_item[key] = item.get(key)
+            selected.append(selected_item)
 
         artifacts = self._artifacts()
         artifacts["repair_execution_report"] = rel_report
@@ -598,6 +612,7 @@ class StateManager:
             "status": data.get("status"),
             "applied_count": int(data.get("applied_count") or 0),
             "selected_candidates": selected,
+            "b2_width_selected_candidates": data.get("b2_width_selected_candidates"),
             "updated_at": datetime.now().isoformat(),
         }
 

@@ -9,6 +9,8 @@ artifact that downstream agents can consume more reliably than bare PDFs.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import statistics
 from datetime import datetime
@@ -161,6 +163,110 @@ def _infer_pdf_column_width(page: Any) -> float:
     return page_width * 0.39
 
 
+def _native_table_objects_for_page(
+    page: Any,
+    *,
+    page_area: float,
+    page_width: float,
+    page_height: float,
+) -> List[tuple[str, tuple[float, float, float, float], str]]:
+    if not hasattr(page, "find_tables"):
+        return []
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            table_finder = page.find_tables()
+        native_tables = getattr(table_finder, "tables", []) or []
+    except Exception:
+        return []
+
+    objects: List[tuple[str, tuple[float, float, float, float], str]] = []
+    for table in native_tables:
+        bbox_raw = getattr(table, "bbox", None)
+        if not bbox_raw:
+            continue
+        bbox = tuple(float(v) for v in bbox_raw)
+        width = bbox[2] - bbox[0]
+        height = bbox[3] - bbox[1]
+        if _area(bbox) >= page_area * 0.01 and width >= page_width * 0.18 and height >= page_height * 0.04:
+            objects.append(("table_like", bbox, "table"))
+    return objects
+
+
+def _native_b2_width_finding(
+    *,
+    page_index: int,
+    kind: str,
+    bbox: tuple[float, float, float, float],
+    scaled_bbox: Optional[List[int]],
+    page_width: float,
+    width_context: str,
+    expected_width: float,
+    width_ratio: float,
+    page_ratio: float,
+    taxonomy: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    object_name = "table" if kind == "table_like" else "figure"
+    left_overflow = max(0.0, -bbox[0])
+    right_overflow = max(0.0, bbox[2] - page_width)
+    edge_overflow = max(left_overflow, right_overflow)
+    expected_overflow = max(0.0, (bbox[2] - bbox[0]) - expected_width)
+    is_column_overflow = width_context == "column" and width_ratio > 1.05
+    is_page_overflow = width_context == "page" and width_ratio > 1.02
+
+    if edge_overflow >= 0.75 or is_column_overflow or is_page_overflow:
+        overflow_pt = max(edge_overflow, expected_overflow)
+        overflow_basis = "page_edge" if edge_overflow >= 0.75 else f"{width_context}_width"
+        return {
+            "source": "pymupdf_native",
+            "page": page_index,
+            "defect_id": f"B2-native-{object_name}-overflow-width",
+            "taxonomy_defect_id": "B2",
+            "category": "B",
+            "severity": "major",
+            "confidence": 0.9,
+            "description": f"native {kind} exceeds expected {width_context} width by {overflow_pt:.2f}pt",
+            "bbox": scaled_bbox,
+            "metrics": {
+                "subtype": "overflow_width",
+                "object_kind": kind,
+                "overflow_pt": round(overflow_pt, 3),
+                "overflow_basis": overflow_basis,
+                "object_width_ratio": round(width_ratio, 4),
+                "object_width_page_ratio": round(page_ratio, 4),
+                "width_context": width_context,
+                "expected_width_pt": round(expected_width, 3),
+                "pdf_bbox": [round(v, 3) for v in bbox],
+            },
+            "suggested_skill": _skill_for_defect("B2", taxonomy),
+        }
+
+    if width_context == "column" and width_ratio < 0.85:
+        severity = "major" if width_ratio < 0.60 else "minor"
+        return {
+            "source": "pymupdf_native",
+            "page": page_index,
+            "defect_id": f"B2-native-{object_name}-underfilled-width",
+            "taxonomy_defect_id": "B2",
+            "category": "B",
+            "severity": severity,
+            "confidence": 0.88,
+            "description": f"native {kind} uses {width_ratio:.3f} of inferred column width",
+            "bbox": scaled_bbox,
+            "metrics": {
+                "subtype": "underfilled_width",
+                "object_kind": kind,
+                "object_width_ratio": round(width_ratio, 4),
+                "object_width_page_ratio": round(page_ratio, 4),
+                "width_context": width_context,
+                "expected_width_pt": round(expected_width, 3),
+                "pdf_bbox": [round(v, 3) for v in bbox],
+            },
+            "suggested_skill": _skill_for_defect("B2", taxonomy),
+        }
+
+    return None
+
+
 def _extract_pymupdf_native_signals(
     pdf_path: Optional[str],
     *,
@@ -255,6 +361,15 @@ def _extract_pymupdf_native_signals(
                     if _area(bbox) >= page_area * 0.002 and width >= page_width * 0.03 and height >= page_height * 0.025:
                         native_objects.append(("figure_like", bbox, "image"))
 
+            native_objects.extend(
+                _native_table_objects_for_page(
+                    page,
+                    page_area=page_area,
+                    page_width=page_width,
+                    page_height=page_height,
+                )
+            )
+
             native_objects.sort(key=lambda item: _area(item[1]), reverse=True)
             selected_objects: List[tuple[str, tuple[float, float, float, float], str]] = []
             for item in native_objects:
@@ -290,56 +405,20 @@ def _extract_pymupdf_native_signals(
                     }
                 )
 
-                right_overflow = max(0.0, bbox[2] - page_width)
-                if right_overflow >= 0.75:
-                    findings.append(
-                        {
-                            "source": "pymupdf_native",
-                            "page": page_index,
-                            "defect_id": "B2-native-float-overflow-width",
-                            "taxonomy_defect_id": "B2",
-                            "category": "B",
-                            "severity": "major",
-                            "confidence": 0.9,
-                            "description": f"native {kind} exceeds page right edge by {right_overflow:.2f}pt",
-                            "bbox": scaled_bbox,
-                            "metrics": {
-                                "subtype": "overflow_width",
-                                "object_kind": kind,
-                                "overflow_pt": round(right_overflow, 3),
-                                "object_width_ratio": round(width_ratio, 4),
-                                "object_width_page_ratio": round(page_ratio, 4),
-                                "width_context": width_context,
-                                "pdf_bbox": [round(v, 3) for v in bbox],
-                            },
-                            "suggested_skill": _skill_for_defect("B2", taxonomy),
-                        }
-                    )
-                elif width_context == "column" and width_ratio < 0.85:
-                    severity = "major" if width_ratio < 0.60 else "minor"
-                    findings.append(
-                        {
-                            "source": "pymupdf_native",
-                            "page": page_index,
-                            "defect_id": "B2-native-underfilled-width",
-                            "taxonomy_defect_id": "B2",
-                            "category": "B",
-                            "severity": severity,
-                            "confidence": 0.88,
-                            "description": f"native {kind} uses {width_ratio:.3f} of inferred column width",
-                            "bbox": scaled_bbox,
-                            "metrics": {
-                                "subtype": "underfilled_width",
-                                "object_kind": kind,
-                                "object_width_ratio": round(width_ratio, 4),
-                                "object_width_page_ratio": round(page_ratio, 4),
-                                "width_context": width_context,
-                                "expected_width_pt": round(expected_width, 3),
-                                "pdf_bbox": [round(v, 3) for v in bbox],
-                            },
-                            "suggested_skill": _skill_for_defect("B2", taxonomy),
-                        }
-                    )
+                b2_finding = _native_b2_width_finding(
+                    page_index=page_index,
+                    kind=kind,
+                    bbox=bbox,
+                    scaled_bbox=scaled_bbox,
+                    page_width=page_width,
+                    width_context=width_context,
+                    expected_width=expected_width,
+                    width_ratio=width_ratio,
+                    page_ratio=page_ratio,
+                    taxonomy=taxonomy,
+                )
+                if b2_finding is not None:
+                    findings.append(b2_finding)
 
             page_summaries.append(
                 {
@@ -501,6 +580,35 @@ def _summarize_pairings_by_kind(object_pairings: List[Dict[str, Any]]) -> Dict[s
     return summary
 
 
+def _summarize_b2_width_findings(findings: List[Dict[str, Any]]) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {
+        "total": 0,
+        "by_subtype": {},
+        "by_object_kind": {},
+        "pages": [],
+        "finding_ids": [],
+    }
+    pages: set[int] = set()
+    for finding in findings:
+        if str(finding.get("taxonomy_defect_id") or "") != "B2":
+            continue
+        metrics = finding.get("metrics") or {}
+        subtype = str(metrics.get("subtype") or "unknown")
+        if subtype not in {"overflow_width", "underfilled_width"}:
+            continue
+        object_kind = str(metrics.get("object_kind") or "unknown")
+        summary["total"] += 1
+        summary["by_subtype"][subtype] = int(summary["by_subtype"].get(subtype) or 0) + 1
+        summary["by_object_kind"][object_kind] = int(summary["by_object_kind"].get(object_kind) or 0) + 1
+        if finding.get("page") is not None:
+            pages.add(int(finding.get("page") or 0))
+        finding_id = str(finding.get("defect_id") or finding.get("id") or "")
+        if finding_id:
+            summary["finding_ids"].append(finding_id)
+    summary["pages"] = sorted(pages)
+    return summary
+
+
 def _build_priority_objects(
     object_pairings: List[Dict[str, Any]],
     page_summaries: List[Dict[str, Any]],
@@ -524,8 +632,11 @@ def _build_priority_objects(
         kind = str(pairing.get("object_kind") or "")
         if kind not in {"figure_like", "table_like"}:
             continue
+        page_status_value = page_status.get(int(pairing.get("page") or 0), "clean")
+        if page_status_value == "clean":
+            continue
 
-        score = page_status_bonus.get(page_status.get(int(pairing.get("page") or 0), "clean"), 0)
+        score = page_status_bonus.get(page_status_value, 0)
         reasons: List[str] = []
         width_ratio = float(pairing.get("object_width_ratio") or 0.0)
         caption_gap = pairing.get("caption_gap_px")
@@ -549,7 +660,7 @@ def _build_priority_objects(
             "object_kind": kind,
             "bbox": pairing.get("object_bbox"),
             "priority_score": score,
-            "severity": page_status.get(int(pairing.get("page") or 0), "clean"),
+            "severity": page_status_value,
             "reason": ", ".join(reasons),
             "object_width_ratio": round(width_ratio, 4),
             "object_width_page_ratio": pairing.get("object_width_page_ratio"),
@@ -791,20 +902,20 @@ def aggregate_visual_signals(
         and int(f.get("page") or 0) >= max(1, total_pages - 1)
         and str(f.get("taxonomy_defect_id") or "") in {"A2", "A4", "B3", "B5", "D1"}
     ]
-    if tail_findings:
+    if any(str(finding.get("severity") or "") in {"major", "critical"} for finding in tail_findings):
         next_actions.append("Review last/reference/appendix-page findings only after float/table/formula migration defects")
+
+    findings_by_taxonomy: Dict[str, List[Dict[str, Any]]] = {}
+    for finding in findings:
+        findings_by_taxonomy.setdefault(str(finding.get("taxonomy_defect_id") or ""), []).append(finding)
 
     figure_like_count = sum(1 for c in object_clusters if c.get("kind") == "figure_like")
     table_like_count = sum(1 for c in object_clusters if c.get("kind") == "table_like")
     caption_like_count = sum(1 for c in object_clusters if c.get("kind") == "caption_like")
     if figure_like_count > 0 and caption_like_count == 0:
         next_actions.append("Review figure-caption pairing on pages with figure-like blocks")
-    if table_like_count > 0:
+    if table_like_count > 0 and any(key in findings_by_taxonomy for key in {"B2", "C1", "C3", "C4"}):
         next_actions.append("Review table-like block width usage and caption spacing")
-
-    findings_by_taxonomy: Dict[str, List[Dict[str, Any]]] = {}
-    for finding in findings:
-        findings_by_taxonomy.setdefault(str(finding.get("taxonomy_defect_id") or ""), []).append(finding)
 
     cross_page_hints: List[Dict[str, Any]] = []
     for defect_id, grouped in findings_by_taxonomy.items():
@@ -851,7 +962,7 @@ def aggregate_visual_signals(
                     ),
                 }
             )
-    if crossref_hints:
+    if crossref_hints and any(key in findings_by_taxonomy for key in {"B1", "B3", "B5"}):
         next_actions.append("Review crossref distance hints for potential B1 float-placement issues")
 
     object_pairings = _pair_object_clusters(
@@ -861,7 +972,7 @@ def aggregate_visual_signals(
     low_width_pairs = [
         p for p in object_pairings
         if p.get("object_kind") in {"figure_like", "table_like"}
-        and (p.get("object_width_ratio") or 0.0) < float(visual_rules.get("object_width_min_ratio") or 0.75)
+        and (p.get("object_width_ratio") or 0.0) < 0.85
     ]
     inconsistent_caption_gaps = [
         p for p in object_pairings if p.get("caption_gap_px") is not None
@@ -875,9 +986,9 @@ def aggregate_visual_signals(
         "object_width_ratio_max": max((float(p["object_width_ratio"]) for p in object_pairings), default=None),
         "by_kind": _summarize_pairings_by_kind(object_pairings),
     }
-    if low_width_pairs:
+    if low_width_pairs or "B2" in findings_by_taxonomy:
         next_actions.append("Review low-utilization figure/table blocks for potential B2 width mismatch")
-    if len(inconsistent_caption_gaps) >= 2:
+    if len(inconsistent_caption_gaps) >= 2 and "C4" in findings_by_taxonomy:
         gaps = [int(p["caption_gap_px"]) for p in inconsistent_caption_gaps]
         if max(gaps) - min(gaps) >= int(visual_rules.get("caption_gap_variance_px") or 40):
             next_actions.append("Review caption-to-object spacing variance for potential C4 inconsistency")
@@ -902,6 +1013,7 @@ def aggregate_visual_signals(
             "hint_category_breakdown": _count_by_category(hints),
             "pages_flagged_count": len(pages_flagged),
             "hinted_pages_count": len(hinted_pages),
+            "b2_width_findings": _summarize_b2_width_findings(findings),
             "highest_severity": next(
                 (
                     sev

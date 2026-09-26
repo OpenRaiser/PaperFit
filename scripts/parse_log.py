@@ -91,13 +91,22 @@ class LogParser:
 
     def _extract_overfull(self) -> None:
         r"""提取 Overfull \hbox 警告"""
-        pattern = r'Overfull \\hbox \(([0-9.]+)pt too wide\) (.*?)(?: at lines ([0-9]+(?:--[0-9]+)?))?'
-        matches = re.finditer(pattern, self.content, re.MULTILINE)
+        pattern = re.compile(r'^Overfull \\hbox \(([0-9.]+)pt too wide\)\s*(.*)$')
+        location_pattern = re.compile(
+            r'(?:^|\s)(?:at lines ([0-9]+(?:--[0-9]+)?)|detected at line ([0-9]+))$'
+        )
 
-        for match in matches:
+        for line in self.content.split('\n'):
+            match = pattern.match(line.strip())
+            if not match:
+                continue
             overflow_pt = float(match.group(1))
             context = match.group(2).strip()
-            lines_range = match.group(3) if match.group(3) else None
+            lines_range = None
+            location_match = location_pattern.search(context)
+            if location_match:
+                lines_range = location_match.group(1) or location_match.group(2)
+                context = context[:location_match.start()].strip()
 
             # 判断是否在表格对齐环境中
             is_alignment = 'in alignment' in context

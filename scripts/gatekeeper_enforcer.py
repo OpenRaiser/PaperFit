@@ -239,6 +239,41 @@ def _load_rule_report_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
     return _load_json(path)
 
 
+def _load_visual_report_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    artifacts = state.get("artifacts") or {}
+    candidate = artifacts.get("visual_signal_report")
+    if not candidate:
+        return {}
+    path = Path(candidate)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return _load_json(path)
+
+
+def _page_budget_defect_from_state(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    task = state.get("task") or {}
+    target_pages = int(task.get("target_pages") or 0)
+    if target_pages <= 0:
+        return None
+    if str(task.get("page_budget_scope") or "") == "main_body":
+        return None
+
+    visual_report = _load_visual_report_from_state(state)
+    current_pages = int(((visual_report.get("summary") or {}).get("pages_analyzed")) or 0)
+    if current_pages <= target_pages:
+        return None
+
+    return {
+        "id": "system:page_budget_violation",
+        "defect_family": "A3",
+        "category": "A",
+        "severity": "critical",
+        "page": current_pages,
+        "label": None,
+        "description": f"Page budget violation: current_pages={current_pages}, target_pages={target_pages}",
+    }
+
+
 def make_decision(
     state: Dict[str, Any],
     defects_payload: Dict[str, Any],
@@ -368,6 +403,11 @@ def make_decision(
         reasons.append("content_integrity missing for semantic round")
 
     defect_summary = _summarize_defects(state, defects_payload)
+    page_budget_defect = _page_budget_defect_from_state(state)
+    if page_budget_defect is not None:
+        defect_summary["open_defects"].append(page_budget_defect)
+        defect_summary["by_severity"]["critical"] += 1
+        defect_summary["by_category"]["A"]["critical"] += 1
     defect_counts = defect_summary["by_severity"]
     checks["defects"] = {
         "pass": True,

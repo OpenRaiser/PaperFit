@@ -68,6 +68,28 @@ def _is_in_comment(text: str, offset: int) -> bool:
     return False
 
 
+def _inactive_iffalse_ranges(text: str) -> List[tuple[int, int]]:
+    ranges: List[tuple[int, int]] = []
+    stack: List[int] = []
+    for match in re.finditer(r"\\(?:iffalse|fi)\b", text):
+        if _is_in_comment(text, match.start()):
+            continue
+        token = match.group(0)
+        if token == r"\iffalse":
+            stack.append(match.start())
+            continue
+        if token == r"\fi" and stack:
+            start = stack.pop()
+            ranges.append((start, match.end()))
+    for start in stack:
+        ranges.append((start, len(text)))
+    return ranges
+
+
+def _is_in_ranges(offset: int, ranges: List[tuple[int, int]]) -> bool:
+    return any(start <= offset < end for start, end in ranges)
+
+
 def _find_group_end(text: str, open_brace_offset: int) -> Optional[int]:
     depth = 0
     index = open_brace_offset
@@ -86,10 +108,10 @@ def _find_group_end(text: str, open_brace_offset: int) -> Optional[int]:
     return None
 
 
-def _scan_patterns(tex_content: str) -> Iterable[HygieneFinding]:
+def _scan_patterns(tex_content: str, inactive_ranges: List[tuple[int, int]]) -> Iterable[HygieneFinding]:
     for family, pattern, severity in POLLUTION_PATTERNS:
         for match in pattern.finditer(tex_content):
-            if _is_in_comment(tex_content, match.start()):
+            if _is_in_comment(tex_content, match.start()) or _is_in_ranges(match.start(), inactive_ranges):
                 continue
             line, column = _line_col(tex_content, match.start())
             yield HygieneFinding(
@@ -102,16 +124,18 @@ def _scan_patterns(tex_content: str) -> Iterable[HygieneFinding]:
             )
 
 
-def _scan_math_payloads(tex_content: str) -> Iterable[HygieneFinding]:
+def _scan_math_payloads(tex_content: str, inactive_ranges: List[tuple[int, int]]) -> Iterable[HygieneFinding]:
     suspicious = re.compile(
         r"(?:/Volumes/|/Users/|\\Volumes\\|\\Users\\|PLACEHOLDER|DEBUG|TODO|FIXME|\?\?|�|NaN|NULL)",
         re.IGNORECASE,
     )
     for env_match in MATH_ENV_PATTERN.finditer(tex_content):
+        if _is_in_ranges(env_match.start(), inactive_ranges):
+            continue
         body = env_match.group(0)
         for match in suspicious.finditer(body):
             offset = env_match.start() + match.start()
-            if _is_in_comment(tex_content, offset):
+            if _is_in_comment(tex_content, offset) or _is_in_ranges(offset, inactive_ranges):
                 continue
             line, column = _line_col(tex_content, offset)
             yield HygieneFinding(
@@ -124,7 +148,7 @@ def _scan_math_payloads(tex_content: str) -> Iterable[HygieneFinding]:
             )
 
 
-def _scan_title_zone(tex_content: str) -> Iterable[HygieneFinding]:
+def _scan_title_zone(tex_content: str, inactive_ranges: List[tuple[int, int]]) -> Iterable[HygieneFinding]:
     begin_match = re.search(r"\\title(?:\[[^\]]*\])?\{", tex_content)
     if not begin_match:
         return
@@ -140,10 +164,13 @@ def _scan_title_zone(tex_content: str) -> Iterable[HygieneFinding]:
         line_start = zone_start + offset
         offset += len(raw_line)
         stripped = raw_line.strip()
+        stripped_offset = line_start + raw_line.find(stripped) if stripped else line_start
+        if _is_in_ranges(stripped_offset, inactive_ranges):
+            continue
         if not stripped or LATEX_COMMAND_LINE_PATTERN.match(stripped):
             continue
         if re.fullmatch(r"[A-Za-z0-9 _./:-]{8,}", stripped):
-            line, column = _line_col(tex_content, line_start + raw_line.find(stripped))
+            line, column = _line_col(tex_content, stripped_offset)
             yield HygieneFinding(
                 family="title_stray_text",
                 severity="major",
@@ -157,9 +184,10 @@ def _scan_title_zone(tex_content: str) -> Iterable[HygieneFinding]:
 def scan_source(tex_path: str) -> Dict[str, Any]:
     path = Path(tex_path)
     tex_content = path.read_text(encoding="utf-8", errors="ignore")
-    findings = list(_scan_patterns(tex_content))
-    findings.extend(_scan_math_payloads(tex_content))
-    findings.extend(_scan_title_zone(tex_content))
+    inactive_ranges = _inactive_iffalse_ranges(tex_content)
+    findings = list(_scan_patterns(tex_content, inactive_ranges))
+    findings.extend(_scan_math_payloads(tex_content, inactive_ranges))
+    findings.extend(_scan_title_zone(tex_content, inactive_ranges))
 
     severity_rank = {"critical": 3, "major": 2, "minor": 1}
     findings.sort(key=lambda item: (-severity_rank.get(item.severity, 0), item.line, item.column, item.family))

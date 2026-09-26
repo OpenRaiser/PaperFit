@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reporting-only repair loop policy summaries for source-changing runs."""
+"""Repair loop policy summaries for bounded source-changing runs."""
 
 from __future__ import annotations
 
@@ -30,14 +30,33 @@ def _as_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _readiness_block_reason(checks: Dict[str, bool]) -> str:
+    reason_by_check = {
+        "approval_scope_carry_forward_pass": "approval_scope_carry_forward_blocked",
+        "round_artifact_lineage_present": "round_artifact_lineage_missing",
+        "artifact_freshness_pass": "artifact_freshness_not_pass",
+        "mutation_integrity_available": "mutation_integrity_missing",
+        "source_mutation_executed": "source_mutation_not_executed",
+        "candidate_approval_scope_gate_pass": "approval_scope_blocked",
+        "within_round_limit": "round_limit_reached",
+        "gatekeeper_continue": "gatekeeper_not_continue",
+        "runtime_execution_mode_can_auto_apply": "runtime_execution_mode_cannot_auto_apply",
+    }
+    for check_name, passed in checks.items():
+        if passed is False:
+            return reason_by_check.get(check_name, check_name)
+    return "readiness_blocked"
+
+
 def build_round_artifact_lineage(
     *,
     state: Dict[str, Any],
     runtime_actions: Dict[str, Any],
+    round_number: int | None = None,
 ) -> List[Dict[str, Any]]:
     """Summarize action-level artifact flow for the current runtime round."""
 
-    current_round = max(1, _as_int(state.get("current_round"), 1))
+    current_round = max(1, _as_int(round_number if round_number is not None else state.get("current_round"), 1))
     actions: Dict[str, Any] = {}
     for action_name, action in (runtime_actions or {}).items():
         if not isinstance(action, dict):
@@ -72,12 +91,7 @@ def build_repair_loop_policy(
     gatekeeper_decision: str,
     round_artifact_lineage: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any] | None:
-    """Build the V1 source-changing loop policy without changing execution.
-
-    The current runtime still applies at most one bounded repair candidate batch.
-    This object makes the intended multi-round policy visible to hosts before
-    any automatic mutation breadth is increased.
-    """
+    """Build the V1 source-changing loop policy and next-round readiness."""
 
     task_type = _task_type(task)
     if task_type not in SOURCE_CHANGING_TASK_TYPES:
@@ -97,12 +111,19 @@ def build_repair_loop_policy(
     plan_candidates = _as_int(repair_plan_summary.get("total_candidates") or repair_action.get("planned_candidates"), 0)
     applied_count = _as_int(repair_action.get("applied_count"), 0)
     dry_run = bool(task.get("dry_run_source_mutation")) or repair_action.get("reason") == "dry_run_source_mutation"
+    runtime_execution_mode_can_auto_apply = not dry_run and max_rounds > 1
+    execution_mode = "report_only" if dry_run else "bounded_apply"
 
     stop_condition = "continue"
     gatekeeper_done = str(status or "").lower() == "done" or str(gatekeeper_decision or "").upper() == "DONE"
     freshness_status = freshness.get("status")
 
-    if approval_scope_gate and approval_scope_gate.get("status") != "pass":
+    failure_tracking = state.get("failure_tracking") or {}
+    failure_type = str(failure_tracking.get("last_failure_type") or "")
+
+    if failure_type == "post_repair_hard_guard_failed":
+        stop_condition = "post_repair_hard_guard_failed"
+    elif approval_scope_gate and approval_scope_gate.get("status") != "pass":
         stop_condition = "approval_scope_blocked"
     elif gatekeeper_done and freshness_status != "pass":
         stop_condition = "artifact_freshness_not_pass"
@@ -118,7 +139,9 @@ def build_repair_loop_policy(
         stop_condition = "round_limit_reached"
 
     next_round_reason = "multi_round_apply_not_enabled_in_current_runtime"
-    if stop_condition == "approval_scope_blocked":
+    if stop_condition == "post_repair_hard_guard_failed":
+        next_round_reason = "post_repair_hard_guard_failed"
+    elif stop_condition == "approval_scope_blocked":
         next_round_reason = "approval_scope_blocked"
     elif stop_condition == "artifact_freshness_not_pass":
         next_round_reason = "artifact_freshness_not_pass"
@@ -146,13 +169,19 @@ def build_repair_loop_policy(
         "source_mutation_executed": applied_count > 0,
         "candidate_approval_scope_gate_pass": approval_scope_gate is None or approval_scope_gate.get("status") == "pass",
         "within_round_limit": current_round < max_rounds,
-        "runtime_execution_mode_can_auto_apply": False,
+        "gatekeeper_continue": str(gatekeeper_decision or "").upper() == "CONTINUE",
+        "runtime_execution_mode_can_auto_apply": runtime_execution_mode_can_auto_apply,
     }
     readiness_status = "ready" if all(readiness_checks.values()) else "blocked"
+    next_round_allowed = readiness_status == "ready" and stop_condition == "continue"
+    if next_round_allowed:
+        next_round_reason = "ready"
+    elif stop_condition == "continue":
+        next_round_reason = _readiness_block_reason(readiness_checks)
 
     return {
         "schema_version": "1.0",
-        "execution_mode": "report_only",
+        "execution_mode": execution_mode,
         "task_type": task_type,
         "round_limit": max_rounds,
         "current_round": current_round,
@@ -169,7 +198,7 @@ def build_repair_loop_policy(
         "artifact_freshness": freshness.get("status"),
         "mutation_integrity_status": content_integrity.get("validation_status"),
         "stop_condition": stop_condition,
-        "next_round_allowed": False,
+        "next_round_allowed": next_round_allowed,
         "next_round_reason": next_round_reason,
         "approval_scope_carry_forward": approval_scope_carry_forward,
         "candidate_approval_scope_gate": approval_scope_gate,

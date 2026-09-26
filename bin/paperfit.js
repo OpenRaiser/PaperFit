@@ -15,6 +15,7 @@
  *   paperfit render <pdf>  Run bundled render_pages.py (from your project cwd)
  *   paperfit run scripts/… Run bundled .py/.sh under package scripts/ (cwd = project)
  *   paperfit runtime …     Run executable orchestrator state transitions
+ *   paperfit monitor       Start the read-only PaperFit Observatory web UI
  *   e.g. scripts/detect_column_void.py — OpenCV 双栏列内竖向空洞（A5 辅助）
  */
 
@@ -150,7 +151,7 @@ function addWorkflowOptions(command, { includeSaveAs = false } = {}) {
     .option('--page-budget <scope>', '页数口径: main_body | with_refs | with_appendix')
     .option('--strict', '严格模式')
     .option('--max-rounds <n>', '最大轮次')
-    .option('--apply', '允许 typed fix-layout 执行源码修改；默认只 dry-run');
+    .option('--apply', '允许 source-changing typed runtime 执行源码写回；默认只 dry-run');
   if (includeSaveAs) {
     command.option('--save-as <dir>', '另存为目录');
   }
@@ -200,14 +201,39 @@ function printRuntimeStatusSummary(status) {
   const roundArtifactLineage = Array.isArray(status.round_artifact_lineage) ? status.round_artifact_lineage : [];
   const freshness = status.artifact_freshness || {};
   const defects = status.defect_summary || {};
+  const gatekeeper = status.gatekeeper || {};
+  const visual = status.visual || {};
+  const staleSections = Array.isArray(status.status_consistency?.stale_sections)
+    ? status.status_consistency.stale_sections
+    : [];
 
   console.log('📊 PaperFit Status\n');
   if (status.main_tex) console.log(`  Main TeX: ${status.main_tex}`);
   if (status.task_type) console.log(`  Task: ${status.task_type}`);
+  if (status.task?.target_pages != null) {
+    const scope = status.task?.page_budget_scope || 'unspecified';
+    console.log(`  Page Budget: ${status.task.target_pages} (${scope})`);
+  }
   console.log(`  Status: ${status.status || 'UNKNOWN'}`);
   if (status.gatekeeper_decision) console.log(`  Gatekeeper: ${status.gatekeeper_decision}`);
   if (status.run_result_path) console.log(`  RunResult: ${status.run_result_path}`);
   if (freshness.status) console.log(`  Artifact Freshness: ${freshness.status}`);
+  if (visual.b2_width_findings) {
+    const b2 = visual.b2_width_findings;
+    const bySubtype = b2.by_subtype && Object.keys(b2.by_subtype).length > 0
+      ? ` (${Object.entries(b2.by_subtype).map(([key, value]) => `${key}=${value}`).join(', ')})`
+      : '';
+    const pages = Array.isArray(b2.pages) && b2.pages.length > 0
+      ? ` pages=${b2.pages.join(',')}`
+      : '';
+    console.log(`  B2 Width Findings: ${b2.total ?? 0}${bySubtype}${pages}`);
+  }
+  if (status.status_consistency?.stale_state_overridden) {
+    console.log(`  Status Note: ${status.status_consistency.reason || 'current gatekeeper artifact overrides stale runtime state'}`);
+  }
+  if (Array.isArray(gatekeeper.reasons) && gatekeeper.reasons.length > 0) {
+    console.log(`  Gatekeeper Reasons: ${gatekeeper.reasons.join('; ')}`);
+  }
 
   if (
     defects.initial_total != null ||
@@ -219,9 +245,33 @@ function printRuntimeStatusSummary(status) {
     console.log(`    Resolved: ${defects.resolved ?? 0}`);
     console.log(`    Remaining: ${defects.remaining ?? 0}`);
   }
+  const gatekeeperReasons = Array.isArray(gatekeeper.reasons) ? gatekeeper.reasons : [];
+  const gatekeeperDecision = gatekeeper.decision || status.gatekeeper_decision || '';
+  const gatekeeperBlocking = gatekeeperReasons.length > 0 || ['CONTINUE', 'BLOCKED'].includes(String(gatekeeperDecision).toUpperCase());
+  if (Array.isArray(gatekeeper.remaining_defects) && gatekeeper.remaining_defects.length > 0) {
+    console.log(gatekeeperBlocking ? '\n  Gatekeeper Blocking Detail' : '\n  Gatekeeper Remaining Defects');
+    const severityRank = { critical: 0, major: 1, unknown: 2, minor: 3 };
+    const defectsForDisplay = gatekeeper.remaining_defects
+      .slice()
+      .sort((left, right) => {
+        const leftRank = severityRank[String(left?.severity || 'unknown').toLowerCase()] ?? 2;
+        const rightRank = severityRank[String(right?.severity || 'unknown').toLowerCase()] ?? 2;
+        return leftRank - rightRank;
+      });
+    defectsForDisplay.slice(0, 5).forEach((defect, index) => {
+      const family = defect?.defect_family || defect?.id || 'unknown';
+      const severity = defect?.severity || 'unknown';
+      const page = defect?.page != null ? ` p.${defect.page}` : '';
+      const description = defect?.description ? ` - ${defect.description}` : '';
+      console.log(`    ${index + 1}. ${family} [${severity}]${page}${description}`);
+    });
+  }
 
   if (runtime.run_id || runtime.event_count || runtime.event_log) {
     console.log('\n  Runtime');
+    if (staleSections.includes('runtime.last_runtime_state')) {
+      console.log('    Note: current gatekeeper artifact overrides this run state');
+    }
     if (runtime.run_id) console.log(`    Run ID: ${runtime.run_id}`);
     if (runtime.event_log) console.log(`    Event Log: ${runtime.event_log}`);
     if (runtime.event_count != null) console.log(`    Events: ${runtime.event_count}`);
@@ -232,12 +282,80 @@ function printRuntimeStatusSummary(status) {
     repair.plan_candidates ||
     repair.execution_status ||
     repair.skipped ||
-    repair.requires_approval != null
+    repair.requires_approval != null ||
+    repair.b2_width_candidates
   ) {
     console.log('\n  修复计划');
     if (repair.plan_candidates != null) console.log(`    Candidates: ${repair.plan_candidates}`);
+    if (repair.b2_width_candidates) {
+      const b2 = repair.b2_width_candidates;
+      const bySubtype = b2.by_subtype && Object.keys(b2.by_subtype).length > 0
+        ? ` (${Object.entries(b2.by_subtype).map(([key, value]) => `${key}=${value}`).join(', ')})`
+        : '';
+      console.log(`    B2 Width Candidates: ${b2.total ?? 0}${bySubtype}`);
+      if (Array.isArray(b2.labels) && b2.labels.length > 0) {
+        console.log(`    B2 Width Candidate Labels: ${b2.labels.slice(0, 5).join(', ')}`);
+      }
+    }
+    if (repair.b2_width_targetable_candidates) {
+      const b2 = repair.b2_width_targetable_candidates;
+      const bySubtype = b2.by_subtype && Object.keys(b2.by_subtype).length > 0
+        ? ` (${Object.entries(b2.by_subtype).map(([key, value]) => `${key}=${value}`).join(', ')})`
+        : '';
+      console.log(`    B2 Width Targetable Candidates: ${b2.total ?? 0}${bySubtype}`);
+      if (Array.isArray(b2.labels) && b2.labels.length > 0) {
+        console.log(`    B2 Width Targetable Labels: ${b2.labels.slice(0, 5).join(', ')}`);
+      }
+    }
+    if (repair.b2_width_untargetable_candidates && (repair.b2_width_untargetable_candidates.total ?? 0) > 0) {
+      const b2 = repair.b2_width_untargetable_candidates;
+      const byReason = b2.by_reason && Object.keys(b2.by_reason).length > 0
+        ? ` (${Object.entries(b2.by_reason).map(([key, value]) => `${key}=${value}`).join(', ')})`
+        : '';
+      console.log(`    B2 Width Untargetable Candidates: ${b2.total ?? 0}${byReason}`);
+      if (Array.isArray(b2.labels) && b2.labels.length > 0) {
+        console.log(`    B2 Width Untargetable Labels: ${b2.labels.slice(0, 5).join(', ')}`);
+      }
+    }
+    if (repair.b2_width_unmatched_findings != null) {
+      console.log(`    B2 Width Unmatched Findings: ${repair.b2_width_unmatched_findings}`);
+      const b2Findings = repair.b2_width_findings || {};
+      const unmatchedPages = Array.isArray(repair.b2_width_unmatched_pages) && repair.b2_width_unmatched_pages.length > 0
+        ? repair.b2_width_unmatched_pages
+        : b2Findings.pages;
+      const unmatchedIds = Array.isArray(repair.b2_width_unmatched_finding_ids) && repair.b2_width_unmatched_finding_ids.length > 0
+        ? repair.b2_width_unmatched_finding_ids
+        : b2Findings.finding_ids;
+      if (repair.b2_width_unmatched_findings > 0 && Array.isArray(unmatchedPages) && unmatchedPages.length > 0) {
+        console.log(`    B2 Width Unmatched Pages: ${unmatchedPages.join(', ')}`);
+      }
+      if (repair.b2_width_unmatched_findings > 0 && Array.isArray(unmatchedIds) && unmatchedIds.length > 0) {
+        console.log(`    B2 Width Unmatched IDs: ${unmatchedIds.slice(0, 5).join(', ')}`);
+      }
+    }
+    if (repair.b2_width_selected_candidates && (repair.b2_width_selected_candidates.total ?? 0) > 0) {
+      const b2 = repair.b2_width_selected_candidates;
+      const bySubtype = b2.by_subtype && Object.keys(b2.by_subtype).length > 0
+        ? ` (${Object.entries(b2.by_subtype).map(([key, value]) => `${key}=${value}`).join(', ')})`
+        : '';
+      console.log(`    B2 Width Selected Candidates: ${b2.total ?? 0}${bySubtype}`);
+      const labels = Array.isArray(b2.labels) && b2.labels.length > 0 ? b2.labels : b2.objects;
+      if (Array.isArray(labels) && labels.length > 0) {
+        console.log(`    B2 Width Selected Labels: ${labels.slice(0, 5).join(', ')}`);
+      }
+    }
     if (repair.execution_status) console.log(`    Execution: ${repair.execution_status}`);
     if (repair.applied_count != null) console.log(`    Applied: ${repair.applied_count}`);
+    if (Array.isArray(repair.selected_candidates) && repair.selected_candidates.length > 0) {
+      const selected = repair.selected_candidates.slice(0, 5).map((candidate) => {
+        const object = candidate?.object || candidate?.defect_id || 'unknown';
+        const subtype = candidate?.visual_width_subtype ? `/${candidate.visual_width_subtype}` : '';
+        const kind = candidate?.object_kind ? `/${candidate.object_kind}` : '';
+        const page = candidate?.page != null ? `@p.${candidate.page}` : '';
+        return `${object}${subtype}${kind}${page}`;
+      });
+      console.log(`    Selected: ${selected.join(', ')}`);
+    }
     if (repair.skipped) console.log(`    Skipped: ${repair.skip_reason || true}`);
     if (repair.risk_level) console.log(`    Risk: ${repair.risk_level}`);
     if (repair.requires_approval != null) console.log(`    Requires Approval: ${repair.requires_approval}`);
@@ -256,6 +374,9 @@ function printRuntimeStatusSummary(status) {
 
   if (repairLoop.schema_version) {
     console.log('\n  Repair Loop Policy');
+    if (staleSections.includes('repair_loop_policy')) {
+      console.log('    Note: policy is from the earlier run; current gatekeeper should drive next action');
+    }
     if (repairLoop.execution_mode) console.log(`    Mode: ${repairLoop.execution_mode}`);
     if (repairLoop.round_limit != null) console.log(`    Round Limit: ${repairLoop.round_limit}`);
     if (repairLoop.candidate_batch_limit != null) console.log(`    Candidate Batch Limit: ${repairLoop.candidate_batch_limit}`);
@@ -285,6 +406,13 @@ function printRuntimeStatusSummary(status) {
     }
     if (Array.isArray(candidateGate.blocked_candidates) && candidateGate.blocked_candidates.length > 0) {
       console.log(`    Blocked Candidates: ${candidateGate.blocked_candidates.length}`);
+      const blockedOperations = candidateGate.blocked_candidates
+        .map((candidate) => candidate?.risk?.operation)
+        .filter(Boolean)
+        .slice(0, 5);
+      if (blockedOperations.length > 0) {
+        console.log(`    Blocked Operations: ${blockedOperations.join(', ')}`);
+      }
     }
     const readiness = repairLoop.second_round_apply_readiness || {};
     if (readiness.status) {
@@ -392,6 +520,39 @@ program
     const i = argv.indexOf('runtime');
     const forward = i >= 0 ? argv.slice(i + 1) : [];
     const r = spawnSync(pythonRunner(), [script, ...forward], {
+      stdio: 'inherit',
+      cwd: process.cwd(),
+      env: process.env,
+    });
+    process.exit(r.status === null ? 1 : r.status ?? 1);
+  });
+
+program
+  .command('monitor')
+  .description('启动只读 PaperFit Observatory 可视化监控台')
+  .option('--project <path>', '论文项目根目录', '.')
+  .option('--benchmark-root <path>', '可选 benchmark cases 根目录')
+  .option('--host <host>', '监听地址', '127.0.0.1')
+  .option('--port <port>', '监听端口', '8765')
+  .action((options) => {
+    const script = path.join(packageRoot(), 'scripts', 'monitor_server.py');
+    if (!fs.existsSync(script)) {
+      console.error('未找到脚本:', script);
+      process.exit(1);
+    }
+    const args = [
+      script,
+      '--project',
+      options.project || '.',
+      '--host',
+      options.host || '127.0.0.1',
+      '--port',
+      String(options.port || '8765'),
+    ];
+    if (options.benchmarkRoot) {
+      args.push('--benchmark-root', options.benchmarkRoot);
+    }
+    const r = spawnSync(pythonRunner(), args, {
       stdio: 'inherit',
       cwd: process.cwd(),
       env: process.env,

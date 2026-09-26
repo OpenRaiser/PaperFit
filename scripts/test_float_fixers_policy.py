@@ -122,6 +122,97 @@ class FloatFixerPolicyTest(unittest.TestCase):
             self.assertIn(r"\caption{The schematic diagram of edges.}", updated)
             self.assertIn(r"\label{fig:edge}", updated)
 
+    def test_b2_object_kind_table_routes_table_label_even_when_label_contains_fig(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            tex_path = root / "main.tex"
+            tex_path.write_text(
+                "\n".join(
+                    [
+                        r"\documentclass{article}",
+                        r"\begin{document}",
+                        r"\begin{table}[t]",
+                        r"\centering",
+                        r"\caption{Results}",
+                        r"\label{tab:fig-results}",
+                        r"\begin{tabular}{lll}",
+                        r"A & B & C \\",
+                        r"1 & 2 & 3 \\",
+                        r"\end{tabular}",
+                        r"\end{table}",
+                        r"\end{document}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch("float_fixers._passes_hard_content_gate", return_value=(True, "pass")):
+                report = fix_float_defects(
+                    str(tex_path),
+                    [
+                        {
+                            "defect_id": "B2",
+                            "object": "tab:fig-results",
+                            "object_kind": "table_like",
+                            "visual_width_subtype": "overflow_width",
+                            "page": 3,
+                        }
+                    ],
+                )
+
+            updated = tex_path.read_text(encoding="utf-8")
+            self.assertEqual(report.status, "success")
+            self.assertEqual(report.changes[0].object_name, "tab:fig-results")
+            self.assertIn(r"\begin{tabular*}{\linewidth}", updated)
+            self.assertIn(r"\label{tab:fig-results}", updated)
+            self.assertNotIn(r"\includegraphics", updated)
+
+    def test_b2_object_kind_table_routes_table_label_without_tab_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            tex_path = root / "main.tex"
+            tex_path.write_text(
+                "\n".join(
+                    [
+                        r"\documentclass{article}",
+                        r"\begin{document}",
+                        r"\begin{table}[t]",
+                        r"\centering",
+                        r"\caption{Results}",
+                        r"\label{wide-results}",
+                        r"\begin{tabular}{lll}",
+                        r"A & B & C \\",
+                        r"1 & 2 & 3 \\",
+                        r"\end{tabular}",
+                        r"\end{table}",
+                        r"\end{document}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch("float_fixers._passes_hard_content_gate", return_value=(True, "pass")):
+                report = fix_float_defects(
+                    str(tex_path),
+                    [
+                        {
+                            "defect_id": "B2",
+                            "object": "wide-results",
+                            "object_kind": "table_like",
+                            "visual_width_subtype": "overflow_width",
+                            "page": 3,
+                        }
+                    ],
+                )
+
+            updated = tex_path.read_text(encoding="utf-8")
+            self.assertEqual(report.status, "success")
+            self.assertEqual(report.changes[0].object_name, "wide-results")
+            self.assertIn(r"\begin{tabular*}{\linewidth}", updated)
+            self.assertIn(r"\label{wide-results}", updated)
+
     def test_floatbarrier_requires_explicit_hard_guard_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

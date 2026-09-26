@@ -39,9 +39,184 @@ from state_manager import StateManager
 class OrchestratorRuntime:
     def __init__(self, state_path: str = StateManager.DEFAULT_STATE_PATH):
         self.manager = StateManager(state_path=state_path)
+        self._retryable_post_repair_hard_guard_labels: set[str] = set()
 
     def _python_executable(self) -> str:
         return sys.executable or "python3"
+
+    def _load_retryable_post_repair_hard_guard(self) -> Optional[Dict[str, Any]]:
+        """Carry the last hard-guard failure into the next bounded retry."""
+
+        if not self.manager.state_path.exists():
+            return None
+        try:
+            state = self.manager.load()
+        except (FileNotFoundError, ValueError, json.JSONDecodeError):
+            return None
+        evidence = state.get("post_repair_hard_guard")
+        if not isinstance(evidence, dict):
+            return None
+        if str(evidence.get("failure_type") or "") != "post_repair_hard_guard_failed":
+            return None
+        visual_hard_guards = evidence.get("visual_hard_guards")
+        if not isinstance(visual_hard_guards, dict):
+            return None
+        if not (visual_hard_guards.get("hard_failures") or visual_hard_guards.get("intrusions")):
+            return None
+        self._retryable_post_repair_hard_guard_labels = self._selected_float_labels_from_state(state)
+        return evidence
+
+    def _restore_retryable_post_repair_hard_guard(self, evidence: Optional[Dict[str, Any]]) -> None:
+        if evidence is None:
+            return
+        self.manager.update({"post_repair_hard_guard": evidence})
+
+    @staticmethod
+    def _selected_float_labels_from_state(state: Dict[str, Any]) -> set[str]:
+        repair_summary = state.get("repair_execution_summary")
+        if not isinstance(repair_summary, dict):
+            return set()
+        selected = repair_summary.get("selected_candidates")
+        if isinstance(selected, list):
+            labels: set[str] = set()
+            for item in selected:
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("object") or "").strip()
+                if label:
+                    labels.add(label)
+            return labels
+        if not isinstance(selected, dict):
+            return set()
+        labels: set[str] = set()
+        for item in selected.get("float") or []:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("object") or "").strip()
+            if label:
+                labels.add(label)
+        return labels
+
+    def _clear_resolved_post_repair_hard_guard(self, *, post_observe: Dict[str, Any]) -> None:
+        visual_hard_guards = post_observe.get("visual_hard_guards")
+        if not isinstance(visual_hard_guards, dict):
+            return
+        if visual_hard_guards.get("hard_failures"):
+            return
+        state = self.manager.load()
+        if state.get("post_repair_hard_guard") is not None:
+            self.manager.update({"post_repair_hard_guard": None})
+
+    def _annotate_repair_plan_with_post_repair_hard_guard_learning(
+        self,
+        *,
+        repair_plan_path: str,
+    ) -> Dict[str, Any]:
+        """Mark visual B2 figure-width candidates as barrier-protected after a failed retry.
+
+        The annotation is intentionally narrow: only a previous post-repair
+        endmatter hard-guard failure can opt a visual B2 figure width candidate
+        into the FloatBarrier path.
+        """
+
+        result: Dict[str, Any] = {
+            "schema_version": "1.0",
+            "status": "not_applicable",
+            "source": "post_repair_hard_guard",
+            "annotated_candidates": 0,
+            "reason": "no_retryable_post_repair_hard_guard",
+        }
+        state = self.manager.load()
+        evidence = state.get("post_repair_hard_guard")
+        if not isinstance(evidence, dict):
+            return result
+        if str(evidence.get("failure_type") or "") != "post_repair_hard_guard_failed":
+            return result
+        visual_hard_guards = evidence.get("visual_hard_guards")
+        if not isinstance(visual_hard_guards, dict):
+            return result
+        hard_failures = visual_hard_guards.get("hard_failures") or []
+        intrusions = visual_hard_guards.get("intrusions") or []
+        if not hard_failures and not intrusions:
+            return result
+
+        plan_path = Path(repair_plan_path)
+        if not plan_path.is_absolute():
+            plan_path = Path.cwd() / plan_path
+        if not plan_path.is_file():
+            result["reason"] = "repair_plan_missing"
+            return result
+
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        candidates = plan.get("candidates")
+        if not isinstance(candidates, list):
+            result["reason"] = "repair_plan_candidates_missing"
+            return result
+
+        annotated = 0
+        evidence_payload = {
+            "schema_version": "1.0",
+            "failure_type": "endmatter_float_intrusion",
+            "source_failure_type": "post_repair_hard_guard_failed",
+            "reason": evidence.get("reason") or "post_repair_visual_hard_guard_failed",
+            "endmatter_heading": visual_hard_guards.get("endmatter_heading"),
+            "endmatter_start_page": visual_hard_guards.get("endmatter_start_page"),
+            "hard_failures": hard_failures,
+            "intrusions": intrusions,
+        }
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            target = candidate.get("target") if isinstance(candidate.get("target"), dict) else {}
+            label = str(target.get("label") or "")
+            if str(candidate.get("defect_family") or "") != "B2":
+                continue
+            if str(candidate.get("proposed_action") or "") != "adjust_float_width":
+                continue
+            if str(candidate.get("visual_width_subtype") or "") not in {"overflow_width", "underfilled_width"}:
+                continue
+            if not label.lower().startswith("fig:"):
+                continue
+            if self._retryable_post_repair_hard_guard_labels and label not in self._retryable_post_repair_hard_guard_labels:
+                continue
+            candidate["allow_floatbarrier"] = True
+            candidate["requires_floatbarrier"] = True
+            candidate["hard_guard_float_intrusion"] = True
+            candidate["endmatter_float_intrusion"] = True
+            candidate["body_float_intrudes_endmatter"] = True
+            candidate["hard_guard_evidence"] = evidence_payload
+            evidence_sources = candidate.get("evidence_sources")
+            if not isinstance(evidence_sources, list):
+                evidence_sources = []
+            if "post_repair_hard_guard" not in evidence_sources:
+                evidence_sources.append("post_repair_hard_guard")
+            candidate["evidence_sources"] = evidence_sources
+            rationale = str(candidate.get("rationale") or "").strip()
+            learning_reason = "post_repair_hard_guard:endmatter_float_intrusion"
+            if learning_reason not in rationale:
+                candidate["rationale"] = f"{rationale}; {learning_reason}" if rationale else learning_reason
+            annotated += 1
+
+        if annotated <= 0:
+            result["reason"] = "no_visual_b2_figure_width_candidates"
+            return result
+
+        plan["post_repair_hard_guard_learning"] = {
+            "schema_version": "1.0",
+            "status": "applied",
+            "source": "post_repair_hard_guard",
+            "annotated_candidates": annotated,
+            "policy": "allow_floatbarrier_only_after_endmatter_intrusion_failure",
+            "visual_hard_guards": visual_hard_guards,
+        }
+        plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        return {
+            "schema_version": "1.0",
+            "status": "applied",
+            "source": "post_repair_hard_guard",
+            "annotated_candidates": annotated,
+            "reason": "endmatter_float_intrusion_retry",
+        }
 
     @staticmethod
     def infer_task_from_request(request: str) -> Dict[str, Any]:
@@ -575,6 +750,7 @@ class OrchestratorRuntime:
 
         try:
             os.chdir(project_root)
+            retryable_post_repair_hard_guard = self._load_retryable_post_repair_hard_guard()
             writer = RuntimeEventWriter(run_id=run_id, event_log=event_log)
             event_count = 0
 
@@ -615,9 +791,20 @@ class OrchestratorRuntime:
                 max_rounds=task_spec.max_rounds,
                 page_budget_scope=task_spec.page_budget_scope,
             )
+            self._restore_retryable_post_repair_hard_guard(retryable_post_repair_hard_guard)
             self.set_artifact("task_spec", str(task_spec_path))
 
             runtime_actions: Dict[str, Any] = {}
+            round_artifact_lineage: List[Dict[str, Any]] = []
+            repair_round_count = 0
+
+            def lineage_actions(*names: str) -> Dict[str, Any]:
+                return {
+                    name: runtime_actions[name]
+                    for name in names
+                    if name in runtime_actions
+                }
+
             snapshot = create_pre_repair_snapshot(
                 project_root=project_root,
                 main_tex=task_spec.main_tex,
@@ -699,8 +886,50 @@ class OrchestratorRuntime:
                         "repair_plan_summary": state.get("repair_plan_summary") or {},
                     },
                 )
-                repair_plan_summary = state.get("repair_plan_summary") or {}
-                if int(repair_plan_summary.get("total_candidates") or 0) > 0:
+                while True:
+                    repair_plan_summary = state.get("repair_plan_summary") or {}
+                    planned_candidates = int(repair_plan_summary.get("total_candidates") or 0)
+                    if planned_candidates <= 0:
+                        runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "no_repair_candidates")
+                        self._record_runtime_action(
+                            "repair_plan_executor",
+                            {
+                                "success": False,
+                                "skipped": True,
+                                "reason": "no_repair_candidates",
+                                "input_artifacts": {
+                                    "repair_plan": (state.get("artifacts") or {}).get("repair_plan"),
+                                    "main_tex": task_spec.main_tex,
+                                    "rollback_target": snapshot.get("rollback_target"),
+                                },
+                                "output_artifacts": {},
+                            },
+                            phase="repair",
+                            state=runtime_state,
+                            emit_event=emit_runtime_event,
+                            runtime_actions=runtime_actions,
+                        )
+                        emit_runtime_event(
+                            "phase_completed",
+                            phase="repair",
+                            state=runtime_state,
+                            payload={"reason": "no_repair_candidates"},
+                        )
+                        round_artifact_lineage.extend(
+                            build_round_artifact_lineage(
+                                state=state,
+                                runtime_actions=lineage_actions(
+                                    "visual_signal_aggregator",
+                                    "repair_plan_generator",
+                                    "defect_report_builder",
+                                    "gatekeeper_enforcer",
+                                    "repair_plan_executor",
+                                ),
+                                round_number=(repair_round_count + 1) if repair_round_count else None,
+                            )
+                        )
+                        break
+
                     runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "plan_ready")
                     emit_runtime_event(
                         "phase_started",
@@ -721,7 +950,7 @@ class OrchestratorRuntime:
                                     "rollback_target": snapshot.get("rollback_target"),
                                 },
                                 "output_artifacts": {},
-                                "planned_candidates": int(repair_plan_summary.get("total_candidates") or 0),
+                                "planned_candidates": planned_candidates,
                             },
                             phase="repair",
                             state="REPAIRING",
@@ -735,199 +964,334 @@ class OrchestratorRuntime:
                             state=runtime_state,
                             payload={"reason": "dry_run_source_mutation"},
                         )
-                    else:
-                        provisional_approval = build_approval_object(
-                            task=task_spec.to_dict(),
-                            state=state,
+                        round_artifact_lineage.extend(
+                            build_round_artifact_lineage(
+                                state=state,
+                                runtime_actions=lineage_actions(
+                                    "visual_signal_aggregator",
+                                    "repair_plan_generator",
+                                    "defect_report_builder",
+                                    "gatekeeper_enforcer",
+                                    "repair_plan_executor",
+                                ),
+                                round_number=(repair_round_count + 1) if repair_round_count else None,
+                            )
+                        )
+                        break
+
+                    provisional_approval = build_approval_object(
+                        task=task_spec.to_dict(),
+                        state=state,
+                        runtime_actions=runtime_actions,
+                    )
+                    repair_plan_for_scope_gate = self._load_repair_plan_for_scope_gate(state)
+                    execution_plan_learning = (
+                        repair_plan_for_scope_gate.get("post_repair_hard_guard_learning")
+                        if isinstance(repair_plan_for_scope_gate, dict)
+                        else None
+                    ) or {"status": "not_applicable"}
+                    candidate_scope_gate = build_candidate_approval_scope_gate(
+                        task=task_spec.to_dict(),
+                        approval=provisional_approval,
+                        repair_plan=repair_plan_for_scope_gate,
+                        candidate_limit=1,
+                    )
+                    if candidate_scope_gate.get("status") != "pass":
+                        self._record_runtime_action(
+                            "repair_plan_executor",
+                            {
+                                "success": False,
+                                "skipped": True,
+                                "reason": "approval_scope_blocked",
+                                "requires_approval": True,
+                                "input_artifacts": {
+                                    "repair_plan": (state.get("artifacts") or {}).get("repair_plan"),
+                                    "main_tex": task_spec.main_tex,
+                                    "rollback_target": snapshot.get("rollback_target"),
+                                },
+                                "output_artifacts": {},
+                                "approval_scope_gate": candidate_scope_gate,
+                                "post_repair_hard_guard_learning": execution_plan_learning,
+                                "planned_candidates": planned_candidates,
+                            },
+                            phase="repair",
+                            state="REPAIRING",
+                            emit_event=emit_runtime_event,
                             runtime_actions=runtime_actions,
                         )
-                        candidate_scope_gate = build_candidate_approval_scope_gate(
-                            task=task_spec.to_dict(),
-                            approval=provisional_approval,
-                            repair_plan=self._load_repair_plan_for_scope_gate(state),
-                            candidate_limit=1,
+                        runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "repair_skipped")
+                        emit_runtime_event(
+                            "phase_completed",
+                            phase="repair",
+                            state=runtime_state,
+                            payload={"reason": "approval_scope_blocked", "approval_scope_gate": candidate_scope_gate},
                         )
-                        if candidate_scope_gate.get("status") != "pass":
-                            self._record_runtime_action(
-                                "repair_plan_executor",
-                                {
-                                    "success": False,
-                                    "skipped": True,
-                                    "reason": "approval_scope_blocked",
-                                    "requires_approval": True,
-                                    "input_artifacts": {
-                                        "repair_plan": (state.get("artifacts") or {}).get("repair_plan"),
-                                        "main_tex": task_spec.main_tex,
-                                        "rollback_target": snapshot.get("rollback_target"),
-                                    },
-                                    "output_artifacts": {},
-                                    "approval_scope_gate": candidate_scope_gate,
-                                    "planned_candidates": int(repair_plan_summary.get("total_candidates") or 0),
-                                },
-                                phase="repair",
-                                state="REPAIRING",
-                                emit_event=emit_runtime_event,
-                                runtime_actions=runtime_actions,
+                        self.manager.update_failure_tracking(
+                            decision="BLOCKED",
+                            failure_type="approval_scope_blocked",
+                        )
+                        self.manager.update(
+                            {
+                                "status": "BLOCKED",
+                                "last_gatekeeper_decision": "BLOCKED",
+                                "next_actions": [
+                                    "Request fresh approval for the selected high-risk repair candidate or regenerate a lower-risk repair plan",
+                                ],
+                            }
+                        )
+                        state = self.manager.load()
+                        round_artifact_lineage.extend(
+                            build_round_artifact_lineage(
+                                state=state,
+                                runtime_actions=lineage_actions(
+                                    "visual_signal_aggregator",
+                                    "repair_plan_generator",
+                                    "defect_report_builder",
+                                    "gatekeeper_enforcer",
+                                    "repair_plan_executor",
+                                ),
+                                round_number=(repair_round_count + 1) if repair_round_count else None,
                             )
-                            runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "repair_skipped")
-                            emit_runtime_event(
-                                "phase_completed",
-                                phase="repair",
-                                state=runtime_state,
-                                payload={"reason": "approval_scope_blocked", "approval_scope_gate": candidate_scope_gate},
-                            )
-                            self.manager.update_failure_tracking(
-                                decision="BLOCKED",
-                                failure_type="approval_scope_blocked",
-                            )
-                            self.manager.update(
-                                {
-                                    "status": "BLOCKED",
-                                    "last_gatekeeper_decision": "BLOCKED",
-                                    "next_actions": [
-                                        "Request fresh approval for the selected high-risk repair candidate or regenerate a lower-risk repair plan",
-                                    ],
-                                }
-                            )
-                            state = self.manager.load()
-                            repair_summary = {}
-                        else:
-                            repair_state = self.execute_repair_plan(
-                                main_tex=task_spec.main_tex,
-                                output_path="data/repair_execution_report.json",
-                                max_candidates=1,
-                            )
-                            repair_summary = repair_state.get("repair_execution_summary") or {}
-                            self._record_runtime_action(
-                                "repair_plan_executor",
-                                {
-                                    "success": True,
-                                    "input_artifacts": {
-                                        "repair_plan": (state.get("artifacts") or {}).get("repair_plan"),
-                                        "main_tex": task_spec.main_tex,
-                                        "rollback_target": snapshot.get("rollback_target"),
-                                    },
-                                    "output_path": "data/repair_execution_report.json",
-                                    "output_artifacts": {
-                                        "repair_execution_report": "data/repair_execution_report.json",
-                                    },
-                                    "approval_scope_gate": candidate_scope_gate,
-                                    "applied_count": int(repair_summary.get("applied_count") or 0),
-                                    "status": repair_summary.get("status"),
-                                },
-                                phase="repair",
-                                state="REPAIRING",
-                                emit_event=emit_runtime_event,
-                                runtime_actions=runtime_actions,
-                            )
-                            runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "repair_applied")
-                            emit_runtime_event(
-                                "phase_completed",
-                                phase="repair",
-                                state=runtime_state,
-                                payload=repair_summary,
-                            )
-                            mutation_report = build_source_mutation_report(
-                                project_root=project_root,
-                                rollback_target=str(snapshot.get("rollback_target")),
-                                output_path="data/source_mutation_report.json",
-                            )
-                            self.manager.update(
-                                {
-                                    "artifacts": {"source_mutation_report": "data/source_mutation_report.json"},
-                                    "content_integrity": {
-                                        "validation_status": "mutation_reported",
-                                        "rollback_target": snapshot.get("rollback_target"),
-                                    },
-                                }
-                            )
-                            self._record_runtime_action(
-                                "source_mutation_integrity",
-                                {
-                                    "success": True,
-                                    "input_artifacts": {
-                                        "rollback_target": snapshot.get("rollback_target"),
-                                        "main_tex": task_spec.main_tex,
-                                    },
-                                    "output_path": "data/source_mutation_report.json",
-                                    "output_artifacts": {
-                                        "source_mutation_report": "data/source_mutation_report.json",
-                                    },
-                                    "changed_files": int((mutation_report.get("summary") or {}).get("changed_files") or 0),
-                                    "missing_files": int((mutation_report.get("summary") or {}).get("missing_files") or 0),
-                                },
-                                phase="verify",
-                                state="VERIFYING",
-                                emit_event=emit_runtime_event,
-                                runtime_actions=runtime_actions,
-                            )
-                            runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "start_post_observe")
-                            emit_runtime_event(
-                                "phase_started",
-                                phase="observe",
-                                state=runtime_state,
-                                message="Observing post-repair compile and render artifacts",
-                            )
-                            post_observe = self._run_visual_only_observe_actions(
-                                task_spec=task_spec,
-                                emit_event=emit_runtime_event,
-                            )
-                            runtime_actions["post_repair_observe"] = post_observe
-                            state = self._run_round_core(
-                                main_tex=task_spec.main_tex,
-                                log_file=task_spec.log_file,
-                                page_dir=task_spec.page_dir,
-                                template=task_spec.template,
-                                target_pages=task_spec.target_pages,
-                                column_void_report=task_spec.column_void_report,
-                                emit_event=emit_runtime_event,
-                                runtime_actions=runtime_actions,
-                            )
-                            runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "artifacts_observed")
-                            emit_runtime_event(
-                                "phase_completed",
-                                phase="observe",
-                                state=runtime_state,
-                                payload={"artifacts": state.get("artifacts") or {}},
-                            )
-                            runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(
-                                runtime_state,
-                                "post_repair_diagnosis_complete",
-                            )
-                            emit_runtime_event(
-                                "phase_completed",
-                                phase="diagnose",
-                                state=runtime_state,
-                                payload={
-                                    "defect_summary": state.get("defect_summary") or {},
-                                    "repair_plan_summary": state.get("repair_plan_summary") or {},
-                                },
-                            )
-                else:
-                    runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "no_repair_candidates")
+                        )
+                        break
+
+                    repair_round_count += 1
+                    repair_state = self.execute_repair_plan(
+                        main_tex=task_spec.main_tex,
+                        output_path="data/repair_execution_report.json",
+                        max_candidates=1,
+                    )
+                    repair_summary = repair_state.get("repair_execution_summary") or {}
                     self._record_runtime_action(
                         "repair_plan_executor",
                         {
-                            "success": False,
-                            "skipped": True,
-                            "reason": "no_repair_candidates",
+                            "success": True,
                             "input_artifacts": {
                                 "repair_plan": (state.get("artifacts") or {}).get("repair_plan"),
                                 "main_tex": task_spec.main_tex,
                                 "rollback_target": snapshot.get("rollback_target"),
                             },
-                            "output_artifacts": {},
+                            "output_path": "data/repair_execution_report.json",
+                            "output_artifacts": {
+                                "repair_execution_report": "data/repair_execution_report.json",
+                            },
+                            "approval_scope_gate": candidate_scope_gate,
+                            "post_repair_hard_guard_learning": execution_plan_learning,
+                            "applied_count": int(repair_summary.get("applied_count") or 0),
+                            "status": repair_summary.get("status"),
                         },
                         phase="repair",
-                        state=runtime_state,
+                        state="REPAIRING",
                         emit_event=emit_runtime_event,
                         runtime_actions=runtime_actions,
                     )
+                    runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "repair_applied")
                     emit_runtime_event(
                         "phase_completed",
                         phase="repair",
                         state=runtime_state,
-                        payload={"reason": "no_repair_candidates"},
+                        payload=repair_summary,
+                    )
+                    mutation_report = build_source_mutation_report(
+                        project_root=project_root,
+                        rollback_target=str(snapshot.get("rollback_target")),
+                        output_path="data/source_mutation_report.json",
+                    )
+                    self.manager.update(
+                        {
+                            "artifacts": {"source_mutation_report": "data/source_mutation_report.json"},
+                            "content_integrity": {
+                                "validation_status": "mutation_reported",
+                                "rollback_target": snapshot.get("rollback_target"),
+                            },
+                        }
+                    )
+                    self._record_runtime_action(
+                        "source_mutation_integrity",
+                        {
+                            "success": True,
+                            "input_artifacts": {
+                                "rollback_target": snapshot.get("rollback_target"),
+                                "main_tex": task_spec.main_tex,
+                            },
+                            "output_path": "data/source_mutation_report.json",
+                            "output_artifacts": {
+                                "source_mutation_report": "data/source_mutation_report.json",
+                            },
+                            "changed_files": int((mutation_report.get("summary") or {}).get("changed_files") or 0),
+                            "missing_files": int((mutation_report.get("summary") or {}).get("missing_files") or 0),
+                        },
+                        phase="verify",
+                        state="VERIFYING",
+                        emit_event=emit_runtime_event,
+                        runtime_actions=runtime_actions,
+                    )
+                    runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "start_post_observe")
+                    emit_runtime_event(
+                        "phase_started",
+                        phase="observe",
+                        state=runtime_state,
+                        message="Observing post-repair compile and render artifacts",
+                    )
+                    post_observe = self._run_visual_only_observe_actions(
+                        task_spec=task_spec,
+                        emit_event=emit_runtime_event,
+                    )
+                    self._record_runtime_action(
+                        "post_repair_observe",
+                        {
+                            "success": bool((post_observe.get("compile") or {}).get("success"))
+                            and bool((post_observe.get("render") or {}).get("success")),
+                            "input_artifacts": {
+                                "main_tex": task_spec.main_tex,
+                                "repair_execution_report": "data/repair_execution_report.json",
+                                "source_mutation_report": "data/source_mutation_report.json",
+                            },
+                            "output_artifacts": {
+                                "pdf_path": (post_observe.get("compile") or {}).get("pdf_path"),
+                                "page_dir": (post_observe.get("render") or {}).get("page_dir"),
+                            },
+                            "compile": post_observe.get("compile"),
+                            "render": post_observe.get("render"),
+                            "visual_hard_guards": post_observe.get("visual_hard_guards"),
+                        },
+                        phase="observe",
+                        state="OBSERVING",
+                        emit_event=emit_runtime_event,
+                        runtime_actions=runtime_actions,
+                    )
+                    post_repair_hard_guard_failure = self._post_repair_hard_guard_failure(
+                        post_observe=post_observe,
+                        rollback_target=str(snapshot.get("rollback_target") or ""),
+                    )
+                    if post_repair_hard_guard_failure is not None:
+                        state = self._rollback_after_post_repair_hard_guard_failure(
+                            project_root=project_root,
+                            rollback_target=str(snapshot.get("rollback_target") or ""),
+                            failure=post_repair_hard_guard_failure,
+                            emit_event=emit_runtime_event,
+                            runtime_actions=runtime_actions,
+                        )
+                        runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "artifacts_observed")
+                        emit_runtime_event(
+                            "phase_completed",
+                            phase="observe",
+                            state=runtime_state,
+                            payload={
+                                "post_repair_hard_guard_failure": post_repair_hard_guard_failure,
+                                "artifacts": state.get("artifacts") or {},
+                            },
+                        )
+                        runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(
+                            runtime_state,
+                            "post_repair_diagnosis_complete",
+                        )
+                        emit_runtime_event(
+                            "phase_completed",
+                            phase="diagnose",
+                            state=runtime_state,
+                            payload={
+                                "failure_type": "post_repair_hard_guard_failed",
+                                "defect_summary": state.get("defect_summary") or {},
+                            },
+                        )
+                        round_artifact_lineage.extend(
+                            build_round_artifact_lineage(
+                                state=state,
+                                runtime_actions=lineage_actions(
+                                    "repair_plan_executor",
+                                    "source_mutation_integrity",
+                                    "post_repair_observe",
+                                    "rollback_to_snapshot",
+                                ),
+                                round_number=repair_round_count,
+                            )
+                        )
+                        break
+                    self._clear_resolved_post_repair_hard_guard(post_observe=post_observe)
+                    state = self._run_round_core(
+                        main_tex=task_spec.main_tex,
+                        log_file=task_spec.log_file,
+                        page_dir=task_spec.page_dir,
+                        template=task_spec.template,
+                        target_pages=task_spec.target_pages,
+                        column_void_report=task_spec.column_void_report,
+                        emit_event=emit_runtime_event,
+                        runtime_actions=runtime_actions,
+                    )
+                    runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "artifacts_observed")
+                    emit_runtime_event(
+                        "phase_completed",
+                        phase="observe",
+                        state=runtime_state,
+                        payload={"artifacts": state.get("artifacts") or {}},
+                    )
+                    runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(
+                        runtime_state,
+                        "post_repair_diagnosis_complete",
+                    )
+                    emit_runtime_event(
+                        "phase_completed",
+                        phase="diagnose",
+                        state=runtime_state,
+                        payload={
+                            "defect_summary": state.get("defect_summary") or {},
+                            "repair_plan_summary": state.get("repair_plan_summary") or {},
+                        },
+                    )
+
+                    round_artifact_lineage.extend(
+                        build_round_artifact_lineage(
+                            state=state,
+                            runtime_actions=lineage_actions(
+                                "repair_plan_executor",
+                                "source_mutation_integrity",
+                                "post_repair_observe",
+                                "visual_signal_aggregator",
+                                "repair_plan_generator",
+                                "defect_report_builder",
+                                "gatekeeper_enforcer",
+                            ),
+                            round_number=repair_round_count,
+                        )
+                    )
+                    current_decision = str(state.get("last_gatekeeper_decision") or "CONTINUE").upper()
+                    current_artifact_manifest = collect_artifact_manifest(
+                        project_root=Path.cwd(),
+                        main_tex=task_spec.main_tex,
+                        artifacts=state.get("artifacts") or {},
+                    )
+                    current_status = (
+                        "done"
+                        if current_decision == "DONE"
+                        else ("blocked" if current_decision == "BLOCKED" else "continue")
+                    )
+                    current_approval = build_approval_object(
+                        task=task_spec.to_dict(),
+                        state=state,
+                        runtime_actions=runtime_actions,
+                    )
+                    current_policy = build_repair_loop_policy(
+                        task=task_spec.to_dict(),
+                        state={**state, "current_round": repair_round_count},
+                        runtime_actions=runtime_actions,
+                        artifact_manifest=current_artifact_manifest,
+                        approval=current_approval,
+                        status=current_status,
+                        gatekeeper_decision=current_decision,
+                        round_artifact_lineage=round_artifact_lineage,
+                    )
+                    if not (current_policy or {}).get("next_round_allowed"):
+                        break
+                    emit_runtime_event(
+                        "phase_completed",
+                        phase="repair_loop",
+                        state=runtime_state,
+                        payload={
+                            "next_round_allowed": True,
+                            "current_round": repair_round_count,
+                            "round_limit": task_spec.max_rounds,
+                        },
                     )
 
             decision = str(state.get("last_gatekeeper_decision") or "CONTINUE").upper()
@@ -983,13 +1347,14 @@ class OrchestratorRuntime:
                 state=state,
                 runtime_actions=runtime_actions,
             )
-            round_artifact_lineage = build_round_artifact_lineage(
-                state=state,
-                runtime_actions=runtime_actions,
-            )
+            if not round_artifact_lineage:
+                round_artifact_lineage = build_round_artifact_lineage(
+                    state=state,
+                    runtime_actions=runtime_actions,
+                )
             repair_loop_policy = build_repair_loop_policy(
                 task=task_spec.to_dict(),
-                state=state,
+                state={**state, "current_round": repair_round_count or state.get("current_round")},
                 runtime_actions=runtime_actions,
                 artifact_manifest=artifact_manifest,
                 approval=approval,
@@ -1026,6 +1391,117 @@ class OrchestratorRuntime:
             return result_payload
         finally:
             os.chdir(cwd_before)
+
+    def _post_repair_hard_guard_failure(
+        self,
+        *,
+        post_observe: Dict[str, Any],
+        rollback_target: str,
+    ) -> Optional[Dict[str, Any]]:
+        visual_hard_guards = post_observe.get("visual_hard_guards")
+        if not isinstance(visual_hard_guards, dict):
+            return None
+        hard_failures = visual_hard_guards.get("hard_failures") or []
+        if not hard_failures:
+            return None
+        return {
+            "schema_version": "1.0",
+            "failure_type": "post_repair_hard_guard_failed",
+            "reason": "post_repair_visual_hard_guard_failed",
+            "visual_hard_guards": visual_hard_guards,
+            "rollback_target": rollback_target,
+            "next_actions": [
+                "Rollback the source mutation that introduced endmatter float intrusion",
+                "Regenerate repair plan after rollback and avoid the failed candidate or require a safer strategy",
+                "Inspect rendered endmatter pages before any further source mutation",
+            ],
+        }
+
+    def _rollback_after_post_repair_hard_guard_failure(
+        self,
+        *,
+        project_root: Path,
+        rollback_target: str,
+        failure: Dict[str, Any],
+        emit_event: Callable[..., Dict[str, Any]],
+        runtime_actions: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        output_path = "data/rollback_report_post_repair_hard_guard.json"
+        try:
+            rollback_report = restore_snapshot(
+                project_root=project_root,
+                rollback_target=rollback_target,
+                output_path=output_path,
+            )
+            rollback_result = {
+                "success": True,
+                "reason": "post_repair_hard_guard_failed",
+                "input_artifacts": {
+                    "rollback_target": rollback_target,
+                },
+                "output_path": output_path,
+                "output_artifacts": {
+                    "rollback_report": output_path,
+                },
+                "restored_files": len(rollback_report.get("restored_files") or []),
+                "visual_hard_guards": failure.get("visual_hard_guards"),
+            }
+            content_integrity = {
+                "validation_status": "rolled_back",
+                "action_taken": "restore_snapshot",
+                "rollback_target": rollback_target,
+                "reason": "post_repair_hard_guard_failed",
+            }
+        except Exception as exc:  # pragma: no cover - exercised by integration failures
+            rollback_result = {
+                "success": False,
+                "reason": "post_repair_hard_guard_failed",
+                "failure_type": "rollback_failed",
+                "error": str(exc),
+                "input_artifacts": {
+                    "rollback_target": rollback_target,
+                },
+                "output_artifacts": {},
+                "visual_hard_guards": failure.get("visual_hard_guards"),
+            }
+            content_integrity = {
+                "validation_status": "rollback_failed",
+                "action_taken": "manual_review",
+                "rollback_target": rollback_target,
+                "reason": "post_repair_hard_guard_failed",
+                "error": str(exc),
+            }
+
+        self._record_runtime_action(
+            "rollback_to_snapshot",
+            rollback_result,
+            phase="verify",
+            state="VERIFYING",
+            emit_event=emit_event,
+            runtime_actions=runtime_actions,
+        )
+        self.manager.update_failure_tracking(
+            decision="BLOCKED",
+            failure_type="post_repair_hard_guard_failed",
+        )
+        self.manager.update(
+            {
+                "status": "BLOCKED",
+                "last_gatekeeper_decision": "BLOCKED",
+                "artifacts": {
+                    "rollback_report": output_path if rollback_result.get("success") else None,
+                },
+                "content_integrity": content_integrity,
+                "post_repair_hard_guard": {
+                    "status": "blocked",
+                    "failure_type": "post_repair_hard_guard_failed",
+                    "reason": failure.get("reason"),
+                    "visual_hard_guards": failure.get("visual_hard_guards"),
+                },
+                "next_actions": failure.get("next_actions") or [],
+            }
+        )
+        return self.manager.load()
 
     def _terminal_visual_evidence_failure(
         self,
@@ -1412,6 +1888,13 @@ class OrchestratorRuntime:
                     rule_report_output=rule_report_output,
                     target_pages=target_pages,
                 )
+                hard_guard_learning = {"status": "not_applicable"}
+                if repair_plan:
+                    hard_guard_learning = self._annotate_repair_plan_with_post_repair_hard_guard_learning(
+                        repair_plan_path=repair_plan_output,
+                    )
+                    if hard_guard_learning.get("status") == "applied":
+                        repair_plan = json.loads(Path(repair_plan_output).read_text(encoding="utf-8"))
                 self._record_runtime_action(
                     "repair_plan_generator",
                     {
@@ -1426,6 +1909,7 @@ class OrchestratorRuntime:
                             "repair_plan": repair_plan_output,
                         },
                         "candidates_count": len((repair_plan or {}).get("candidates") or []),
+                        "post_repair_hard_guard_learning": hard_guard_learning,
                     },
                     phase="plan",
                     state="DIAGNOSING",
@@ -1724,11 +2208,29 @@ class OrchestratorRuntime:
         summary = report.get("summary") or {}
         actions: list[str] = []
         float_priority_pending = self._has_pending_float_priority_candidates()
+        visual_findings = (visual_signal_report or {}).get("findings") or []
+        active_visual_families = {
+            str(finding.get("taxonomy_defect_id") or "")
+            for finding in visual_findings
+        }
+        repair_plan = (self.manager.load().get("repair_plan_summary") or {})
+        top_candidates = repair_plan.get("top_candidates") or []
+        planned_families = {
+            str(candidate.get("defect_family") or "")
+            for candidate in top_candidates
+        }
         if not report.get("compile_success", False):
             actions.append("Fix compilation blockers before visual loop continues")
         if int(summary.get("overfull_hbox_total") or 0) > 0:
             actions.append("Route D-class overflow defects to overflow-repair")
-        if int(summary.get("underfull_hbox_total") or 0) > 0:
+        if (
+            int(summary.get("underfull_hbox_total") or 0) > 0
+            and (
+                float_priority_pending
+                or bool(active_visual_families & {"A1", "C1", "C2", "C3", "C4"})
+                or "A/C" in planned_families
+            )
+        ):
             if float_priority_pending:
                 actions.append("Defer paragraph looseness/text edits until figure/table placement and sizing repairs are done")
             else:
@@ -1744,7 +2246,7 @@ class OrchestratorRuntime:
         if cross_page_hints:
             actions.append("Review recurring cross-page visual defects before local patching")
         crossref_hints = (visual_signal_report or {}).get("crossref_hints") or []
-        if crossref_hints:
+        if crossref_hints and (bool(active_visual_families & {"B1", "B3", "B5"}) or "B1" in planned_families):
             actions.append("Review crossref distance hints for float-placement issues before moving figures")
         priority_objects = (visual_signal_report or {}).get("priority_objects") or []
         if priority_objects:
@@ -1754,7 +2256,6 @@ class OrchestratorRuntime:
                 kind = str(item.get("object_kind") or "object").replace("_like", "")
                 top_objects.append(f"p.{page} {kind}")
             actions.append(f"Inspect priority objects from visual signals: {', '.join(top_objects)}")
-        repair_plan = (self.manager.load().get("repair_plan_summary") or {})
         if int(repair_plan.get("total_candidates") or 0) > 0:
             actions.append(
                 f"Execute top repair-plan candidates first: {int(repair_plan.get('total_candidates') or 0)} queued"

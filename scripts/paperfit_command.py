@@ -1404,6 +1404,115 @@ def _run_typed_source_changing(
     return report
 
 
+def _template_migration_apply_block_report(
+    project_root: Path,
+    *,
+    main_tex: Path,
+    target_template: str,
+    max_rounds: Optional[int],
+    report_mode: str,
+    report_output_path: str,
+    run_result_output_path: str,
+) -> Dict[str, Any]:
+    reason = "template_migration_apply_requires_runtime_owned_migration_executor"
+    root = project_root.resolve()
+    main_tex_rel = str(main_tex.resolve().relative_to(root))
+    next_actions = [
+        "Run template migration without --apply to inspect the dry-run plan and approval state",
+        "Add a runtime-owned template migration candidate executor before enabling direct template apply",
+    ]
+    task = {
+        "schema_version": "1.0",
+        "task_type": "template_migration",
+        "project_root": str(root),
+        "main_tex": main_tex_rel,
+        "template": target_template,
+        "allow_source_mutation": True,
+        "pre_repair_snapshot_required": True,
+        "dry_run_source_mutation": True,
+        "rollback_policy": "required",
+        "max_rounds": int(max_rounds or 1),
+        "user_request": f"migrate-template {target_template}",
+        "required_phases": ["observe", "diagnose", "repair", "verify"],
+    }
+    run_result = {
+        "schema_version": "1.0",
+        "run_id": "template_migration_apply_blocked",
+        "task": task,
+        "status": "blocked",
+        "gatekeeper_decision": "BLOCKED",
+        "state_path": "data/state.json",
+        "runtime_actions": {
+            "repair_plan_executor": {
+                "success": False,
+                "skipped": True,
+                "reason": reason,
+                "requires_approval": True,
+                "risk_level": "high",
+                "planned_candidates": 1,
+                "input_artifacts": {
+                    "main_tex": main_tex_rel,
+                    "target_template": target_template,
+                },
+                "output_artifacts": {},
+            },
+            "template_migration_apply_gate": {
+                "success": False,
+                "skipped": True,
+                "reason": reason,
+                "requires_approval": True,
+                "risk_level": "high",
+            }
+        },
+        "artifact_manifest": {
+            "freshness": {
+                "status": "unknown",
+                "blocking_checks": ["template_migration_apply_blocked_before_runtime"],
+            }
+        },
+        "failure": {
+            "failure_type": reason,
+            "reason": reason,
+            "next_actions": next_actions,
+        },
+    }
+    state_path = project_root / "data" / "state.json"
+    state = _load_json(state_path)
+    state.update(
+        {
+            "main_tex": main_tex_rel,
+            "status": "BLOCKED",
+            "last_gatekeeper_decision": "BLOCKED",
+            "task": {"type": "template_migration"},
+            "artifacts": {
+                **((state.get("artifacts") or {}) if isinstance(state.get("artifacts"), dict) else {}),
+                "task_spec": "data/task.json",
+            },
+            "next_actions": next_actions,
+        }
+    )
+    _write_json(project_root / "data" / "task.json", task)
+    _write_json(project_root / run_result_output_path, run_result)
+    _write_json(state_path, state)
+    report = {
+        "mode": report_mode,
+        "runtime_contract": "template_migration",
+        "status": "blocked",
+        "project_root": str(project_root),
+        "target_template": target_template,
+        "reason": reason,
+        "dry_run_source_mutation": True,
+        "run_result_path": run_result_output_path,
+        "run_result": run_result,
+        "state_summary": _summarize_runtime_status(project_root, run_result_path=run_result_output_path),
+        "next_actions": next_actions,
+    }
+    report_path = project_root / report_output_path
+    _write_json(report_path, report)
+    report["report_path"] = str(report_path)
+    return report
+
+
 def _layout_completion_status(fix_report: Dict[str, Any]) -> Dict[str, Any]:
     final_summary = fix_report.get("final_state_summary") or {}
     defect_summary = final_summary.get("defect_summary") or {}
@@ -1510,40 +1619,45 @@ def _handle_paperfit_request(
             _build_portrait(
                 working_root,
                 main_tex=main_tex,
-                template=template,
+                template=target_template,
                 page_budget="main_body",
                 target_pages=migration_target_pages,
                 strict=False,
                 max_rounds=portrait_max_rounds,
             )
-        migration = _migrate_template(working_root, main_tex=main_tex, target_template=target_template)
-        _build_portrait(
+        else:
+            _build_portrait(
+                working_root,
+                main_tex=main_tex,
+                template=target_template,
+                page_budget="main_body",
+                target_pages=migration_target_pages,
+                strict=False,
+                max_rounds=portrait_max_rounds,
+            )
+        if apply_source_mutation:
+            return _template_migration_apply_block_report(
+                working_root,
+                main_tex=main_tex,
+                target_template=target_template,
+                max_rounds=max_rounds,
+                report_mode=report_mode,
+                report_output_path=report_output_path,
+                run_result_output_path=run_result_output_path,
+            )
+        return _run_typed_source_changing(
             working_root,
-            main_tex=main_tex,
-            template=target_template,
-            page_budget="main_body",
-            target_pages=migration_target_pages,
-            strict=False,
-            max_rounds=portrait_max_rounds,
-        )
-        fix_report = _run_fix_layout(
-            working_root,
+            task_type="template_migration",
             main_tex=main_tex,
             template=target_template,
             target_pages=migration_target_pages,
             max_rounds=max_rounds,
+            user_request=request,
+            apply_source_mutation=apply_source_mutation,
+            run_result_output_path=run_result_output_path,
+            report_output_path=report_output_path,
+            report_mode=report_mode,
         )
-        completion = _layout_completion_status(fix_report)
-        return {
-            "mode": "paperfit_request",
-            "status": completion["status"],
-            "request": request,
-            "task_type": task_type,
-            "project_root": str(working_root),
-            "migration": migration,
-            "fix_layout": fix_report,
-            "layout_completion": completion,
-        }
 
     if task_type == "visual_only":
         return _run_visual_only(
@@ -1605,7 +1719,7 @@ def main() -> None:
     common.add_argument(
         "--apply",
         action="store_true",
-        help="Allow typed fix-layout to execute source-changing repair candidates",
+        help="Allow source-changing typed runtime to write source changes",
     )
 
     slash_parser = subparsers.add_parser("slash", parents=[common], help="Execute a slash-command style request")
@@ -1635,8 +1749,8 @@ def main() -> None:
     else:
         target_pages = args.target_pages or _default_target_pages(template, args.page_budget)
     effective_max_rounds = args.max_rounds
-    if effective_max_rounds is None and args.command != "migrate-template":
-        effective_max_rounds = 3
+    if effective_max_rounds is None:
+        effective_max_rounds = 1
     portrait_max_rounds = effective_max_rounds if effective_max_rounds is not None else 0
 
     if args.command in {"slash", "run-agent"}:
@@ -1729,7 +1843,6 @@ def main() -> None:
             strict=args.strict,
             max_rounds=portrait_max_rounds,
         )
-        migration = _migrate_template(working_root, main_tex=main_tex, target_template=target_template)
         effective_target_pages = args.target_pages
         _build_portrait(
             working_root,
@@ -1740,22 +1853,31 @@ def main() -> None:
             strict=args.strict,
             max_rounds=portrait_max_rounds,
         )
-        fix_report = _run_fix_layout(
+        if args.apply:
+            report = _template_migration_apply_block_report(
+                working_root,
+                main_tex=main_tex,
+                target_template=target_template,
+                max_rounds=effective_max_rounds,
+                report_mode="migrate_template",
+                report_output_path="data/template_migration_typed_report.json",
+                run_result_output_path="data/run_result_template_migration.json",
+            )
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return
+        report = _run_typed_source_changing(
             working_root,
+            task_type="template_migration",
             main_tex=main_tex,
             template=target_template,
             target_pages=effective_target_pages,
             max_rounds=effective_max_rounds,
+            user_request=f"migrate-template {target_template}",
+            apply_source_mutation=args.apply,
+            run_result_output_path="data/run_result_template_migration.json",
+            report_output_path="data/template_migration_typed_report.json",
+            report_mode="migrate_template",
         )
-        completion = _layout_completion_status(fix_report)
-        report = {
-            "mode": "migrate_template",
-            "status": completion["status"],
-            "project_root": str(working_root),
-            "migration": migration,
-            "fix_layout": fix_report,
-            "layout_completion": completion,
-        }
     else:
         raise SystemExit(f"unsupported command: {args.command}")
 

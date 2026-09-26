@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -389,6 +390,229 @@ class CheckVisualRuntimeTest(unittest.TestCase):
             self.assertEqual(typed_runner.call_args.kwargs["report_output_path"], "data/agent_report.json")
             self.assertEqual(typed_runner.call_args.kwargs["report_mode"], "paperfit_agent")
 
+    def test_template_migration_request_routes_to_typed_dry_run_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            main_tex = root / "main.tex"
+            main_tex.write_text(
+                "\\documentclass{article}\n\\begin{document}\nFixture.\n\\end{document}\n",
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch.object(
+                    OrchestratorRuntime,
+                    "infer_task_from_request",
+                    return_value={"task_type": "template_migration", "template": "CVPR2026"},
+                ),
+                mock.patch.object(paperfit_command, "_build_portrait", return_value={}),
+                mock.patch.object(
+                    paperfit_command,
+                    "_run_typed_source_changing",
+                    return_value={"mode": "paperfit_agent"},
+                ) as typed_runner,
+                mock.patch.object(paperfit_command, "_migrate_template") as legacy_migrator,
+                mock.patch.object(paperfit_command, "_run_fix_layout") as legacy_fix_layout,
+            ):
+                report = paperfit_command._handle_paperfit_request(
+                    root,
+                    request="migrate this paper to CVPR2026",
+                    main_tex=main_tex,
+                    template=None,
+                    target_pages=None,
+                    max_rounds=1,
+                    save_as=None,
+                    run_result_output_path="data/run_result_agent.json",
+                    report_output_path="data/agent_report.json",
+                    report_mode="paperfit_agent",
+                )
+
+            self.assertEqual(report["mode"], "paperfit_agent")
+            self.assertFalse(legacy_migrator.called)
+            self.assertFalse(legacy_fix_layout.called)
+            self.assertEqual(typed_runner.call_args.kwargs["task_type"], "template_migration")
+            self.assertEqual(typed_runner.call_args.kwargs["template"], "CVPR2026")
+            self.assertFalse(typed_runner.call_args.kwargs["apply_source_mutation"])
+            self.assertEqual(typed_runner.call_args.kwargs["max_rounds"], 1)
+
+    def test_migrate_template_cli_defaults_to_typed_dry_run_max_rounds_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            main_tex = root / "main.tex"
+            main_tex.write_text(
+                "\\documentclass{article}\n\\begin{document}\nFixture.\n\\end{document}\n",
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.object(sys, "argv", ["paperfit_command.py", "migrate-template", "CVPR2026"]),
+                mock.patch.object(paperfit_command.Path, "cwd", return_value=root.resolve()),
+                mock.patch.object(paperfit_command, "_detect_main_tex", return_value=main_tex),
+                mock.patch.object(paperfit_command, "_build_portrait", return_value={}),
+                mock.patch.object(
+                    paperfit_command,
+                    "_run_typed_source_changing",
+                    return_value={"mode": "migrate_template"},
+                ) as typed_runner,
+                mock.patch.object(paperfit_command, "_migrate_template") as legacy_migrator,
+                mock.patch("builtins.print"),
+            ):
+                paperfit_command.main()
+
+            self.assertFalse(legacy_migrator.called)
+            self.assertEqual(typed_runner.call_args.args[0], root.resolve())
+            self.assertEqual(typed_runner.call_args.kwargs["task_type"], "template_migration")
+            self.assertEqual(typed_runner.call_args.kwargs["template"], "CVPR2026")
+            self.assertEqual(typed_runner.call_args.kwargs["max_rounds"], 1)
+            self.assertFalse(typed_runner.call_args.kwargs["apply_source_mutation"])
+            self.assertEqual(
+                typed_runner.call_args.kwargs["run_result_output_path"],
+                "data/run_result_template_migration.json",
+            )
+            self.assertEqual(
+                typed_runner.call_args.kwargs["report_output_path"],
+                "data/template_migration_typed_report.json",
+            )
+
+    def test_migrate_template_cli_apply_is_blocked_until_runtime_executor_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            main_tex = root / "main.tex"
+            main_tex.write_text(
+                "\\documentclass{article}\n\\begin{document}\nFixture.\n\\end{document}\n",
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "paperfit_command.py",
+                        "migrate-template",
+                        "CVPR2026",
+                        "--apply",
+                        "--max-rounds",
+                        "3",
+                    ],
+                ),
+                mock.patch.object(paperfit_command.Path, "cwd", return_value=root.resolve()),
+                mock.patch.object(paperfit_command, "_detect_main_tex", return_value=main_tex),
+                mock.patch.object(paperfit_command, "_build_portrait", return_value={}),
+                mock.patch.object(
+                    paperfit_command,
+                    "_run_typed_source_changing",
+                    return_value={"mode": "migrate_template"},
+                ) as typed_runner,
+                mock.patch.object(paperfit_command, "_migrate_template") as legacy_migrator,
+                mock.patch("builtins.print") as print_mock,
+            ):
+                paperfit_command.main()
+
+            self.assertFalse(legacy_migrator.called)
+            self.assertFalse(typed_runner.called)
+            payload = json.loads(print_mock.call_args.args[0])
+            self.assertEqual(payload["mode"], "migrate_template")
+            self.assertEqual(payload["status"], "blocked")
+            self.assertEqual(
+                payload["reason"],
+                "template_migration_apply_requires_runtime_owned_migration_executor",
+            )
+            self.assertTrue(payload["dry_run_source_mutation"])
+            report_path = root / "data" / "template_migration_typed_report.json"
+            self.assertTrue(report_path.is_file())
+            persisted = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["status"], "blocked")
+            self.assertEqual(
+                persisted["reason"],
+                "template_migration_apply_requires_runtime_owned_migration_executor",
+            )
+            run_result_path = root / "data" / "run_result_template_migration.json"
+            self.assertTrue(run_result_path.is_file())
+            run_result = json.loads(run_result_path.read_text(encoding="utf-8"))
+            self.assertEqual(run_result["status"], "blocked")
+            self.assertEqual(run_result["task"]["task_type"], "template_migration")
+            self.assertEqual(run_result["failure"]["failure_type"], persisted["reason"])
+            self.assertEqual(
+                run_result["runtime_actions"]["repair_plan_executor"]["reason"],
+                persisted["reason"],
+            )
+            self.assertTrue(run_result["runtime_actions"]["repair_plan_executor"]["requires_approval"])
+            self.assertEqual(run_result["runtime_actions"]["repair_plan_executor"]["risk_level"], "high")
+            state = json.loads((root / "data" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "BLOCKED")
+            self.assertEqual(state["task"]["type"], "template_migration")
+            status = paperfit_command._summarize_runtime_status(root)
+            self.assertEqual(status["run_result_path"], "data/run_result_template_migration.json")
+            self.assertEqual(status["status"], "BLOCKED")
+            self.assertEqual(status["approval"]["status"], "approval_required")
+            self.assertEqual(status["approval"]["reason"], persisted["reason"])
+            self.assertEqual(status["repair"]["skip_reason"], persisted["reason"])
+
+    def test_template_migration_request_apply_is_blocked_until_runtime_executor_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            main_tex = root / "main.tex"
+            main_tex.write_text(
+                "\\documentclass{article}\n\\begin{document}\nFixture.\n\\end{document}\n",
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch.object(
+                    OrchestratorRuntime,
+                    "infer_task_from_request",
+                    return_value={"task_type": "template_migration", "template": "CVPR2026"},
+                ),
+                mock.patch.object(paperfit_command, "_build_portrait", return_value={}),
+                mock.patch.object(paperfit_command, "_run_typed_source_changing") as typed_runner,
+                mock.patch.object(paperfit_command, "_migrate_template") as legacy_migrator,
+            ):
+                report = paperfit_command._handle_paperfit_request(
+                    root,
+                    request="migrate this paper to CVPR2026",
+                    main_tex=main_tex,
+                    template=None,
+                    target_pages=None,
+                    max_rounds=3,
+                    save_as=None,
+                    apply_source_mutation=True,
+                    run_result_output_path="data/run_result_agent.json",
+                    report_output_path="data/agent_report.json",
+                    report_mode="paperfit_agent",
+                )
+
+            self.assertFalse(legacy_migrator.called)
+            self.assertFalse(typed_runner.called)
+            self.assertEqual(report["mode"], "paperfit_agent")
+            self.assertEqual(report["status"], "blocked")
+            self.assertEqual(
+                report["reason"],
+                "template_migration_apply_requires_runtime_owned_migration_executor",
+            )
+            self.assertTrue(report["dry_run_source_mutation"])
+            report_path = root / "data" / "agent_report.json"
+            self.assertTrue(report_path.is_file())
+            persisted = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["mode"], "paperfit_agent")
+            self.assertEqual(persisted["status"], "blocked")
+            self.assertEqual(persisted["reason"], report["reason"])
+            run_result_path = root / "data" / "run_result_agent.json"
+            self.assertTrue(run_result_path.is_file())
+            run_result = json.loads(run_result_path.read_text(encoding="utf-8"))
+            self.assertEqual(run_result["status"], "blocked")
+            self.assertEqual(run_result["failure"]["failure_type"], report["reason"])
+            self.assertEqual(
+                run_result["runtime_actions"]["repair_plan_executor"]["reason"],
+                report["reason"],
+            )
+            self.assertTrue(run_result["runtime_actions"]["repair_plan_executor"]["requires_approval"])
+            self.assertEqual(report["state_summary"]["run_result_path"], "data/run_result_agent.json")
+            self.assertEqual(report["state_summary"]["approval"]["status"], "approval_required")
+            self.assertEqual(report["state_summary"]["approval"]["reason"], report["reason"])
+
     def test_status_query_uses_runtime_status_without_visual_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -657,6 +881,29 @@ class CheckVisualRuntimeTest(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertTrue(paperfit_command._typed_fix_layout_enabled())
+
+    def test_apply_help_mentions_source_changing_runtime_not_fix_layout_only(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        node_cli = repo_root / "bin" / "paperfit.js"
+        py_cli = repo_root / "scripts" / "paperfit_command.py"
+
+        node_help = subprocess.run(
+            ["node", str(node_cli), "run-agent", "--help"],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout
+        py_help = subprocess.run(
+            [sys.executable, str(py_cli), "run-agent", "--help"],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout
+
+        self.assertIn("source-changing typed runtime", node_help)
+        self.assertNotIn("typed fix-layout", node_help)
+        self.assertIn("source-changing typed runtime", py_help)
+        self.assertNotIn("typed fix-layout", py_help)
 
     def test_typed_fix_layout_default_builds_dry_run_source_changing_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

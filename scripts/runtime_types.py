@@ -185,7 +185,7 @@ class TaskSpec:
     dry_run_source_mutation: bool = False
     rollback_policy: Optional[str] = None
     strict_mode: bool = False
-    max_rounds: int = 10
+    max_rounds: int = 1
     user_request: Optional[str] = None
     required_phases: List[str] = field(default_factory=list)
 
@@ -223,7 +223,7 @@ class TaskSpec:
             dry_run_source_mutation=_as_bool(payload.get("dry_run_source_mutation"), False),
             rollback_policy=payload.get("rollback_policy"),
             strict_mode=_as_bool(payload.get("strict_mode"), False),
-            max_rounds=int(payload.get("max_rounds") or 10),
+            max_rounds=int(payload.get("max_rounds") or 1),
             user_request=payload.get("user_request"),
             required_phases=[str(item) for item in required_phases],
         )

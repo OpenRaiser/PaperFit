@@ -37,6 +37,37 @@ x + /Volumes/PAPERFIT_TEST/debug-token
         self.assertIn("title_stray_text", families)
         self.assertEqual(report["summary"]["highest_severity"], "critical")
 
+    def test_ignores_title_examples_inside_iffalse_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tex_path = Path(tmpdir) / "main.tex"
+            tex_path.write_text(
+                r"""
+\documentclass{article}
+\title{A Paper}
+\author{Real Author}
+\iffalse
+\title{My Publication Title --- Single Author}
+\author {
+    Author Name
+}
+\affiliations{
+    Affiliation\\
+    name@example.com
+}
+\fi
+\begin{document}
+\maketitle
+Body text.
+\end{document}
+""",
+                encoding="utf-8",
+            )
+
+            report = scan_source(str(tex_path))
+
+        self.assertEqual(report["summary"]["finding_count"], 0)
+        self.assertEqual(report["summary"]["highest_severity"], "clean")
+
 
 if __name__ == "__main__":
     unittest.main()

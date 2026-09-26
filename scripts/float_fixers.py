@@ -2142,13 +2142,20 @@ def fix_float_defects(
 
         elif defect_id == "B2":
             # 浮动体大小不适配
-            if "fig" in object_name.lower():
+            object_kind = str(defect.get("object_kind") or "")
+            is_table_like = object_kind == "table_like" or (
+                not object_kind and "tab" in object_name.lower()
+            )
+            is_figure_like = object_kind == "figure_like" or (
+                not object_kind and "fig" in object_name.lower()
+            )
+            if is_figure_like:
                 new_content, fix_result = fix_figure_width_mismatch(
                     active_content,
                     figure_label=object_name,
                     template_type=template_type,
                 )
-            elif "tab" in object_name.lower():
+            elif is_table_like:
                 new_content, fix_result = fix_table_width_mismatch(
                     active_content,
                     table_label=object_name,

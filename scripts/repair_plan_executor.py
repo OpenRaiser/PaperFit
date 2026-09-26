@@ -149,6 +149,11 @@ def _build_float_defects(plan: Dict[str, Any], max_candidates: int) -> List[Dict
 
         if defect_family not in {"B1", "B2"} or not label:
             return
+        if defect_family == "B2" and str(candidate.get("visual_width_subtype") or "") not in {
+            "overflow_width",
+            "underfilled_width",
+        }:
+            return
 
         object_key = str(label)
         if object_key in seen_objects:
@@ -169,7 +174,12 @@ def _build_float_defects(plan: Dict[str, Any], max_candidates: int) -> List[Dict
             defect["ref_page"] = candidate.get("page") or 0
             defect.update(merged_b1_metadata.get(str(label)) or {})
         if defect_family == "B2":
+            target_object_kind = target.get("object_kind")
+            if target_object_kind is not None:
+                defect["object_kind"] = target_object_kind
             for key in (
+                "source_table_env",
+                "source_tabcolsep",
                 "source_width_spec",
                 "visual_width_subtype",
                 "visual_object_width_ratio",
@@ -178,6 +188,14 @@ def _build_float_defects(plan: Dict[str, Any], max_candidates: int) -> List[Dict
                 "visual_overflow_pt",
                 "visual_pdf_bbox",
                 "visual_confidence",
+                "allow_floatbarrier",
+                "requires_floatbarrier",
+                "hard_guard_float_intrusion",
+                "endmatter_float_intrusion",
+                "body_float_intrudes_endmatter",
+                "visual_hard_guard",
+                "hard_guard",
+                "hard_guard_evidence",
             ):
                 if candidate.get(key) is not None:
                     defect[key] = candidate.get(key)
@@ -205,18 +223,13 @@ def _build_float_defects(plan: Dict[str, Any], max_candidates: int) -> List[Dict
                 current[key] = candidate.get(key)
 
     # Keep strong semantic-distance B1 candidates and visually confirmed B2
-    # width candidates so targetable float fixes are not starved by generic
-    # page-level signals.
+    # width candidates so targetable float/table fixes are not starved by
+    # generic page-level signals.
     visual_width_candidates = [
         candidate
         for candidate in (plan.get("candidates") or [])
         if str(candidate.get("defect_family") or "") == "B2"
-        and str(((candidate.get("target") or {}).get("label")) or "")
-        and str(((candidate.get("target") or {}).get("label")) or "").startswith("fig:")
-        and (
-            str(candidate.get("visual_width_subtype") or "") in {"overflow_width", "underfilled_width"}
-            or (_parse_width_ratio(candidate.get("source_width_spec")) or 1.0) <= 0.5
-        )
+        and _is_targetable_visual_b2_candidate(candidate)
     ]
     visual_width_candidates.sort(
         key=lambda item: (
@@ -434,8 +447,98 @@ def _build_global_actions(plan: Dict[str, Any], max_candidates: int) -> List[Dic
     return actions
 
 
+def _candidate_label(candidate: Dict[str, Any]) -> str:
+    return str(((candidate.get("target") or {}).get("label")) or "")
+
+
+def _candidate_object_kind(candidate: Dict[str, Any]) -> str:
+    return str(((candidate.get("target") or {}).get("object_kind")) or "")
+
+
+def _is_targetable_visual_b2_candidate(candidate: Dict[str, Any]) -> bool:
+    label = _candidate_label(candidate)
+    if not label:
+        return False
+    if str(candidate.get("visual_width_subtype") or "") not in {"overflow_width", "underfilled_width"}:
+        return False
+    object_kind = _candidate_object_kind(candidate)
+    return object_kind in {"figure_like", "table_like"} or label.startswith(("fig:", "tab:"))
+
+
+def _summarize_selected_b2_width_candidates(defects: List[Dict[str, Any]]) -> Dict[str, Any]:
+    selected = [
+        defect
+        for defect in defects
+        if str(defect.get("defect_id") or "") == "B2"
+        and str(defect.get("visual_width_subtype") or "") in {"overflow_width", "underfilled_width"}
+    ]
+    summary: Dict[str, Any] = {
+        "total": len(selected),
+        "by_subtype": {},
+        "by_object_kind": {},
+        "labels": [],
+        "objects": [],
+        "pages": [],
+    }
+    labels: List[str] = []
+    objects: List[str] = []
+    pages: List[int] = []
+    for defect in selected:
+        subtype = str(defect.get("visual_width_subtype") or "unknown")
+        summary["by_subtype"][subtype] = int(summary["by_subtype"].get(subtype, 0)) + 1
+
+        object_kind = str(defect.get("object_kind") or "")
+        if object_kind:
+            summary["by_object_kind"][object_kind] = int(summary["by_object_kind"].get(object_kind, 0)) + 1
+
+        object_name = str(defect.get("object") or "")
+        if object_name:
+            labels.append(object_name)
+            objects.append(object_name)
+
+        try:
+            page = int(defect.get("page") or 0)
+        except (TypeError, ValueError):
+            page = 0
+        if page > 0:
+            pages.append(page)
+
+    summary["labels"] = sorted(set(labels))
+    summary["objects"] = sorted(set(objects))
+    summary["pages"] = sorted(set(pages))
+    return summary
+
+
 def _has_float_priority_candidates(plan: Dict[str, Any]) -> bool:
-    return any(str(candidate.get("defect_family") or "") in {"B1", "B2", "B3"} for candidate in plan.get("candidates") or [])
+    for candidate in plan.get("candidates") or []:
+        family = str(candidate.get("defect_family") or "")
+        if family == "B1" and _candidate_label(candidate):
+            return True
+        if family == "B2" and _is_targetable_visual_b2_candidate(candidate):
+            return True
+        if family == "B3" and len((candidate.get("target") or {}).get("labels") or []) >= 2:
+            return True
+    return False
+
+
+def _has_visual_b2_width_candidates(plan: Dict[str, Any]) -> bool:
+    for candidate in plan.get("candidates") or []:
+        if str(candidate.get("defect_family") or "") != "B2":
+            continue
+        if _is_targetable_visual_b2_candidate(candidate):
+            return True
+    return False
+
+
+def _has_urgent_overflow_candidates(plan: Dict[str, Any]) -> bool:
+    for candidate in plan.get("candidates") or []:
+        if str(candidate.get("defect_family") or "") not in {"D1", "D2", "D3"}:
+            continue
+        overflow_amount = float(candidate.get("overflow_amount") or 0.0)
+        priority_score = int(candidate.get("priority_score") or 0)
+        if priority_score >= 90 or overflow_amount >= 5.0:
+            return True
+    return False
 
 
 def _passes_global_content_gate(original_tex: str, repaired_tex: str) -> bool:
@@ -643,12 +746,21 @@ def execute_repair_plan(
     plan = _load_json(repair_plan_path)
     tex_path = Path(main_tex)
     original_tex = tex_path.read_text(encoding="utf-8") if tex_path.is_file() else ""
-    float_defects = _build_float_defects(plan, max_candidates=max_candidates)
-    overflow_defects = [] if float_defects else _build_overflow_defects(
-        plan,
-        main_tex=main_tex,
-        max_candidates=max_candidates,
-    )
+    urgent_overflow_first = _has_urgent_overflow_candidates(plan) and not _has_visual_b2_width_candidates(plan)
+    if urgent_overflow_first:
+        overflow_defects = _build_overflow_defects(
+            plan,
+            main_tex=main_tex,
+            max_candidates=max_candidates,
+        )
+        float_defects = [] if overflow_defects else _build_float_defects(plan, max_candidates=max_candidates)
+    else:
+        float_defects = _build_float_defects(plan, max_candidates=max_candidates)
+        overflow_defects = [] if float_defects else _build_overflow_defects(
+            plan,
+            main_tex=main_tex,
+            max_candidates=max_candidates,
+        )
     space_defects = [] if (float_defects or overflow_defects) else _build_space_util_defects(
         plan,
         max_candidates=max_candidates,
@@ -665,6 +777,15 @@ def execute_repair_plan(
             "float": float_defects,
             "overflow": overflow_defects,
             "space_util": space_defects,
+        },
+        "b2_width_selected_candidates": _summarize_selected_b2_width_candidates(float_defects),
+        "selection_policy": {
+            "urgent_overflow_first": urgent_overflow_first,
+            "reason": (
+                "urgent_d_overflow_without_visual_b2_width_candidate"
+                if urgent_overflow_first
+                else "default_float_first_order"
+            ),
         },
         "applied_count": 0,
         "status": "noop",

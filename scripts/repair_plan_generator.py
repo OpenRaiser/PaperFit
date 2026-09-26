@@ -28,6 +28,242 @@ def _candidate_severity_rank(severity: str) -> int:
     return {"critical": 3, "major": 2, "minor": 1}.get(str(severity).lower(), 0)
 
 
+def _active_visual_families(visual_report: Dict[str, Any]) -> set[str]:
+    return {
+        str(finding.get("taxonomy_defect_id") or "")
+        for finding in visual_report.get("findings") or []
+    }
+
+
+def _has_visual_float_placement_pressure(visual_report: Dict[str, Any]) -> bool:
+    return bool(_active_visual_families(visual_report) & {"B1", "B3", "B5"})
+
+
+def _has_visual_b2_width_candidate(candidates: List[Dict[str, Any]]) -> bool:
+    return any(_is_targetable_b2_width_candidate(candidate) for candidate in candidates)
+
+
+def _summarize_b2_width_candidates(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {
+        "total": 0,
+        "by_subtype": {},
+        "by_object_kind": {},
+        "labels": [],
+    }
+    for candidate in candidates:
+        if str(candidate.get("defect_family") or "") != "B2":
+            continue
+        subtype = str(candidate.get("visual_width_subtype") or "")
+        if subtype not in {"overflow_width", "underfilled_width"}:
+            continue
+        target = candidate.get("target") or {}
+        object_kind = str(target.get("object_kind") or "unknown")
+        label = str(target.get("label") or "")
+        summary["total"] += 1
+        summary["by_subtype"][subtype] = int(summary["by_subtype"].get(subtype) or 0) + 1
+        summary["by_object_kind"][object_kind] = int(summary["by_object_kind"].get(object_kind) or 0) + 1
+        if label:
+            summary["labels"].append(label)
+    return summary
+
+
+def _is_targetable_b2_width_candidate(candidate: Dict[str, Any]) -> bool:
+    if str(candidate.get("defect_family") or "") != "B2":
+        return False
+    if str(candidate.get("visual_width_subtype") or "") not in {"overflow_width", "underfilled_width"}:
+        return False
+    target = candidate.get("target") or {}
+    label = str(target.get("label") or "")
+    if not label:
+        return False
+    object_kind = str(target.get("object_kind") or "")
+    return object_kind in {"figure_like", "table_like"} or label.startswith(("fig:", "tab:"))
+
+
+def _b2_width_untargetable_reason(candidate: Dict[str, Any]) -> Optional[str]:
+    if str(candidate.get("defect_family") or "") != "B2":
+        return None
+    if str(candidate.get("visual_width_subtype") or "") not in {"overflow_width", "underfilled_width"}:
+        return None
+    target = candidate.get("target") or {}
+    label = str(target.get("label") or "")
+    if not label:
+        return "missing_label"
+    object_kind = str(target.get("object_kind") or "")
+    if object_kind not in {"figure_like", "table_like"} and not label.startswith(("fig:", "tab:")):
+        return "unsupported_label_or_object_kind"
+    return None
+
+
+def _summarize_targetable_b2_width_candidates(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    targetable = [candidate for candidate in candidates if _is_targetable_b2_width_candidate(candidate)]
+    return _summarize_b2_width_candidates(targetable)
+
+
+def _summarize_untargetable_b2_width_candidates(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    summary = _summarize_b2_width_candidates(
+        [
+            candidate
+            for candidate in candidates
+            if _b2_width_untargetable_reason(candidate) is not None
+        ]
+    )
+    by_reason: Dict[str, int] = {}
+    for candidate in candidates:
+        reason = _b2_width_untargetable_reason(candidate)
+        if reason is None:
+            continue
+        by_reason[reason] = int(by_reason.get(reason) or 0) + 1
+    summary["by_reason"] = by_reason
+    return summary
+
+
+def _summarize_visual_b2_width_findings(visual_report: Dict[str, Any]) -> Dict[str, Any]:
+    existing = (visual_report.get("summary") or {}).get("b2_width_findings")
+    if isinstance(existing, dict):
+        summary = {
+            "total": int(existing.get("total") or 0),
+            "by_subtype": existing.get("by_subtype") or {},
+            "by_object_kind": existing.get("by_object_kind") or {},
+            "pages": existing.get("pages") or [],
+            "finding_ids": existing.get("finding_ids") or [],
+        }
+        if summary["total"] > 0 and (not summary["pages"] or not summary["finding_ids"]):
+            fallback = _summarize_visual_b2_width_findings({"findings": visual_report.get("findings") or []})
+            if not summary["pages"]:
+                summary["pages"] = fallback.get("pages") or []
+            if not summary["finding_ids"]:
+                summary["finding_ids"] = fallback.get("finding_ids") or []
+        return summary
+
+    summary: Dict[str, Any] = {
+        "total": 0,
+        "by_subtype": {},
+        "by_object_kind": {},
+        "pages": [],
+        "finding_ids": [],
+    }
+    pages: set[int] = set()
+    for finding in visual_report.get("findings") or []:
+        if str(finding.get("taxonomy_defect_id") or "") != "B2":
+            continue
+        metrics = finding.get("metrics") or {}
+        subtype = str(metrics.get("subtype") or "")
+        if subtype not in {"overflow_width", "underfilled_width"}:
+            continue
+        object_kind = str(metrics.get("object_kind") or "unknown")
+        summary["total"] += 1
+        summary["by_subtype"][subtype] = int(summary["by_subtype"].get(subtype) or 0) + 1
+        summary["by_object_kind"][object_kind] = int(summary["by_object_kind"].get(object_kind) or 0) + 1
+        if finding.get("page") is not None:
+            pages.add(int(finding.get("page") or 0))
+        finding_id = str(finding.get("defect_id") or finding.get("id") or "")
+        if finding_id:
+            summary["finding_ids"].append(finding_id)
+    summary["pages"] = sorted(pages)
+    return summary
+
+
+def _rounded_pdf_bbox(value: Any) -> tuple[float, ...]:
+    if not isinstance(value, list):
+        return ()
+    rounded: List[float] = []
+    for item in value:
+        if not isinstance(item, (int, float)):
+            return ()
+        rounded.append(round(float(item), 2))
+    return tuple(rounded)
+
+
+def _b2_width_finding_entries(visual_report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    for finding in visual_report.get("findings") or []:
+        if str(finding.get("taxonomy_defect_id") or "") != "B2":
+            continue
+        metrics = finding.get("metrics") or {}
+        subtype = str(metrics.get("subtype") or "")
+        if subtype not in {"overflow_width", "underfilled_width"}:
+            continue
+        entries.append(
+            {
+                "finding_id": str(finding.get("defect_id") or finding.get("id") or ""),
+                "page": int(finding.get("page") or 0) if finding.get("page") is not None else None,
+                "subtype": subtype,
+                "object_kind": str(metrics.get("object_kind") or "unknown"),
+                "pdf_bbox": _rounded_pdf_bbox(metrics.get("pdf_bbox")),
+            }
+        )
+    return entries
+
+
+def _b2_width_entry_key(entry: Dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        entry.get("page"),
+        entry.get("subtype"),
+        entry.get("object_kind"),
+        entry.get("pdf_bbox") or (),
+    )
+
+
+def _b2_width_candidate_key(candidate: Dict[str, Any]) -> tuple[Any, ...]:
+    target = candidate.get("target") or {}
+    return (
+        int(candidate.get("page") or 0) if candidate.get("page") is not None else None,
+        str(candidate.get("visual_width_subtype") or ""),
+        str(target.get("object_kind") or "unknown"),
+        _rounded_pdf_bbox(candidate.get("visual_pdf_bbox")),
+    )
+
+
+def _summarize_b2_width_conversion(
+    visual_report: Dict[str, Any],
+    candidates: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    entries = _b2_width_finding_entries(visual_report)
+    remaining = list(entries)
+    for candidate in candidates:
+        if str(candidate.get("defect_family") or "") != "B2":
+            continue
+        if str(candidate.get("visual_width_subtype") or "") not in {"overflow_width", "underfilled_width"}:
+            continue
+        key = _b2_width_candidate_key(candidate)
+        for index, entry in enumerate(remaining):
+            if _b2_width_entry_key(entry) == key:
+                remaining.pop(index)
+                break
+
+    if entries:
+        return {
+            "unmatched_count": len(remaining),
+            "unmatched_pages": sorted(
+                {int(entry["page"]) for entry in remaining if entry.get("page") is not None}
+            ),
+            "unmatched_finding_ids": [
+                entry["finding_id"] for entry in remaining if entry.get("finding_id")
+            ],
+        }
+
+    b2_width_findings = _summarize_visual_b2_width_findings(visual_report)
+    b2_width_candidates = _summarize_b2_width_candidates(candidates)
+    unmatched_count = max(
+        0,
+        int(b2_width_findings.get("total") or 0) - int(b2_width_candidates.get("total") or 0),
+    )
+    return {
+        "unmatched_count": unmatched_count,
+        "unmatched_pages": (b2_width_findings.get("pages") or []) if unmatched_count > 0 else [],
+        "unmatched_finding_ids": (b2_width_findings.get("finding_ids") or []) if unmatched_count > 0 else [],
+    }
+
+
+def _is_urgent_overflow_candidate(candidate: Dict[str, Any]) -> bool:
+    if str(candidate.get("defect_family") or "") not in {"D1", "D2", "D3"}:
+        return False
+    overflow_amount = float(candidate.get("overflow_amount") or 0.0)
+    priority_score = int(candidate.get("priority_score") or 0)
+    return priority_score >= 90 or overflow_amount >= 5.0
+
+
 def _is_width_already_sufficient(width_spec: Any) -> bool:
     spec = str(width_spec or "").replace(" ", "")
     if not spec:
@@ -41,6 +277,21 @@ def _is_width_already_sufficient(width_spec: Any) -> bool:
         except ValueError:
             return False
     return False
+
+
+def _width_spec_ratio(width_spec: Any) -> Optional[float]:
+    spec = str(width_spec or "").replace(" ", "")
+    if not spec or spec == "none":
+        return None
+    if spec in {r"\linewidth", r"\columnwidth", r"\textwidth"}:
+        return 1.0
+    match = re.fullmatch(r"([0-9]*\.?[0-9]+)\\(?:linewidth|columnwidth|textwidth)", spec)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
 
 
 def _parse_mm_value(value: Any) -> Optional[float]:
@@ -336,6 +587,8 @@ def _match_priority_objects_to_labels(
         return matched
 
     matched: List[Dict[str, Any]] = []
+    width_matched_labels: set[str] = set()
+    source_order_offsets = {"figure_like": 0, "table_like": 0}
     for item in _priority_objects_with_pairing_fallback(visual_report):
         kind = str(item.get("object_kind") or "")
         bbox = item.get("bbox") or []
@@ -345,22 +598,70 @@ def _match_priority_objects_to_labels(
         width_spec = None
         table_env = None
         tabcolsep = None
+
+        visual_width_subtype = str(item.get("visual_width_subtype") or "")
+        visual_width_ratio = item.get("object_width_ratio")
+        if kind == "figure_like" and visual_width_subtype in {"overflow_width", "underfilled_width"}:
+            width_candidates: List[tuple[float, int, Dict[str, Any]]] = []
+            for source_index, source_float in enumerate(by_kind.get(kind) or []):
+                source_label = str(source_float.get("label") or "")
+                if source_label in width_matched_labels:
+                    continue
+                ratio = _width_spec_ratio(source_float.get("width_spec"))
+                if ratio is None:
+                    continue
+                if visual_width_subtype == "overflow_width" and ratio <= 1.02:
+                    continue
+                if visual_width_subtype == "underfilled_width" and ratio >= 0.85:
+                    continue
+                if isinstance(visual_width_ratio, (int, float)):
+                    distance = abs(float(visual_width_ratio) - ratio)
+                else:
+                    distance = 0.0
+                width_candidates.append((distance, source_index, source_float))
+            if width_candidates:
+                _, _, best_float = min(width_candidates, key=lambda value: (value[0], value[1]))
+                label = best_float.get("label")
+                match_strategy = "source_width_visual_b2"
+                width_spec = best_float.get("width_spec")
+                table_env = best_float.get("table_env")
+                tabcolsep = best_float.get("tabcolsep")
+                if label:
+                    width_matched_labels.add(str(label))
+
+        if label is None and visual_width_subtype in {"overflow_width", "underfilled_width"} and not ordered_objects_by_kind.get(kind):
+            source_floats = by_kind.get(kind) or []
+            idx = source_order_offsets.get(kind, 0)
+            while idx < len(source_floats) and str(source_floats[idx].get("label") or "") in width_matched_labels:
+                idx += 1
+            if idx < len(source_floats):
+                source_float = source_floats[idx]
+                label = source_float.get("label")
+                match_strategy = "source_order_visual_b2"
+                width_spec = source_float.get("width_spec")
+                table_env = source_float.get("table_env")
+                tabcolsep = source_float.get("tabcolsep")
+                source_order_offsets[kind] = idx + 1
+                if label:
+                    width_matched_labels.add(str(label))
+
         best_distance = None
-        for obj in ordered_objects_by_kind.get(kind) or []:
-            if int(obj.get("page") or 0) != page:
-                continue
-            obox = obj.get("bbox") or []
-            if not bbox or not obox:
-                continue
-            distance = sum(abs(int(a) - int(b)) for a, b in zip(bbox, obox))
-            if best_distance is None or distance < best_distance:
-                best_distance = distance
-                label = obj.get("label")
-                match_strategy = obj.get("match_strategy")
-                width_spec = obj.get("width_spec")
-                table_env = obj.get("table_env")
-                tabcolsep = obj.get("tabcolsep")
         if label is None:
+            for obj in ordered_objects_by_kind.get(kind) or []:
+                if int(obj.get("page") or 0) != page:
+                    continue
+                obox = obj.get("bbox") or []
+                if not bbox or not obox:
+                    continue
+                distance = sum(abs(int(a) - int(b)) for a, b in zip(bbox, obox))
+                if best_distance is None or distance < best_distance:
+                    best_distance = distance
+                    label = obj.get("label")
+                    match_strategy = obj.get("match_strategy")
+                    width_spec = obj.get("width_spec")
+                    table_env = obj.get("table_env")
+                    tabcolsep = obj.get("tabcolsep")
+        if label is None and visual_width_subtype not in {"overflow_width", "underfilled_width"}:
             for obj in ordered_objects_by_kind.get(kind) or []:
                 label = obj.get("label")
                 match_strategy = obj.get("match_strategy")
@@ -384,6 +685,7 @@ def _build_object_candidates(visual_report: Dict[str, Any], crossrefs_report: Di
     candidates: List[Dict[str, Any]] = []
     distance_lookup = _build_distance_lookup(crossrefs_report)
     float_lookup = _build_float_lookup(crossrefs_report)
+    active_visual_families = _active_visual_families(visual_report)
     for item in _dedupe_matched_objects(_match_priority_objects_to_labels(visual_report, crossrefs_report)):
         reason = str(item.get("reason") or "")
         label = str(item.get("label") or "")
@@ -397,12 +699,14 @@ def _build_object_candidates(visual_report: Dict[str, Any], crossrefs_report: Di
         if visual_width_subtype == "underfilled_width":
             width_ratio = _extract_ratio_from_reason(reason, "underfilled_width") or width_ratio
         source_width_is_sufficient = _is_width_already_sufficient(item.get("width_spec"))
-        if "low_width_ratio" in reason or visual_width_subtype in {"overflow_width", "underfilled_width"}:
+        if visual_width_subtype in {"overflow_width", "underfilled_width"}:
             defect_family = "B2"
-        elif "caption_gap" in reason:
+        elif "caption_gap" in reason or "missing_caption_pair" in reason:
+            if "C4" not in active_visual_families:
+                continue
             defect_family = "C4"
         else:
-            defect_family = "B?"
+            continue
         tabcolsep_mm = _parse_mm_value(item.get("tabcolsep"))
         action = (
             "normalize_float_position_near_reference"
@@ -497,43 +801,6 @@ def _build_b3_candidates(visual_report: Dict[str, Any], crossrefs_report: Dict[s
     if candidates:
         return candidates
 
-    b3_findings = [
-        finding
-        for finding in visual_report.get("findings") or []
-        if str(finding.get("taxonomy_defect_id") or "") in {"B3", "B5"}
-    ]
-    if not b3_findings:
-        return candidates
-
-    source_labels: List[str] = []
-    for flt in crossrefs_report.get("floats") or []:
-        label = str(flt.get("label") or "")
-        if label and label not in source_labels:
-            source_labels.append(label)
-    if len(source_labels) < 2:
-        return candidates
-
-    pages = [int(finding.get("page") or 0) for finding in b3_findings if int(finding.get("page") or 0) > 0]
-    for index, start in enumerate(range(0, len(source_labels), 4)):
-        labels = source_labels[start:start + 4]
-        if len(labels) < 2:
-            continue
-        page = pages[min(index, len(pages) - 1)] if pages else 0
-        candidates.append(
-            {
-                "candidate_type": "source_order_cluster",
-                "page": page,
-                "target": {
-                    "labels": labels,
-                },
-                "defect_family": "B3",
-                "priority_score": 78,
-                "severity": "major",
-                "proposed_action": "decluster_float_sequence",
-                "rationale": "visual B3 float clustering with source-order fallback labels",
-                "evidence_sources": ["visual_signal_report", "crossrefs_report"],
-            }
-        )
     return candidates
 
 
@@ -553,7 +820,12 @@ def _build_tail_float_packing_candidates(
         page = int(finding.get("page") or 0)
         if target_pages is not None and target_pages > 0 and page > target_pages:
             continue
-        if taxonomy_id in {"A2", "A4"} and page == current_pages:
+        severity = str(finding.get("severity") or "")
+        has_page_budget_pressure = target_pages is not None and target_pages > 0
+        has_major_tail_pressure = severity in {"major", "critical"}
+        explicit_float_tail_pressure = taxonomy_id in {"B3", "B5"} and has_major_tail_pressure
+        budget_tail_space_pressure = taxonomy_id in {"A2", "A4"} and has_page_budget_pressure
+        if page == current_pages and (explicit_float_tail_pressure or budget_tail_space_pressure):
             has_tail_pressure = True
             description = str(finding.get("description") or taxonomy_id)
             if description not in tail_reasons:
@@ -604,8 +876,11 @@ def _build_visual_space_candidates(
         if target_pages is not None and target_pages > 0 and page > target_pages:
             continue
         metrics = finding.get("metrics") or {}
+        severity = str(finding.get("severity") or "minor")
+        has_page_budget_pressure = target_pages is not None and target_pages > 0
+        should_plan_tail_repair = has_page_budget_pressure or severity in {"major", "critical"}
 
-        if taxonomy_id == "A2" and page == current_pages:
+        if taxonomy_id == "A2" and page == current_pages and should_plan_tail_repair:
             whitespace_ratio = (
                 metrics.get("bottom_whitespace_ratio")
                 or metrics.get("whitespace_ratio")
@@ -617,8 +892,8 @@ def _build_visual_space_candidates(
                     "page": page,
                     "target": {"scope": "trailing_whitespace"},
                     "defect_family": "A2",
-                    "priority_score": 90,
-                    "severity": "major",
+                    "priority_score": 90 if severity in {"major", "critical"} else 64,
+                    "severity": severity,
                     "proposed_action": "compress_trailing_whitespace",
                     "rationale": str(finding.get("description") or "last-page trailing whitespace"),
                     "description": str(finding.get("description") or "last-page trailing whitespace"),
@@ -628,7 +903,7 @@ def _build_visual_space_candidates(
                 }
             )
 
-        if taxonomy_id == "A4" and page == current_pages:
+        if taxonomy_id == "A4" and page == current_pages and should_plan_tail_repair:
             height_difference = (metrics.get("height_diff_ratio") or 0.0)
             candidates.append(
                 {
@@ -636,8 +911,8 @@ def _build_visual_space_candidates(
                     "page": page,
                     "target": {"scope": "column_balance"},
                     "defect_family": "A4",
-                    "priority_score": 82,
-                    "severity": str(finding.get("severity") or "major"),
+                    "priority_score": 82 if severity in {"major", "critical"} else 58,
+                    "severity": severity,
                     "proposed_action": "balance_final_columns",
                     "rationale": str(finding.get("description") or "last-page column imbalance"),
                     "description": str(finding.get("description") or "last-page column imbalance"),
@@ -650,114 +925,53 @@ def _build_visual_space_candidates(
     return candidates
 
 
-def _build_crossref_candidates(crossrefs_report: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _build_crossref_candidates(
+    crossrefs_report: Dict[str, Any],
+    visual_report: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
     distance_lookup = _build_distance_lookup(crossrefs_report)
     float_lookup = _build_float_lookup(crossrefs_report)
+    visual_report = visual_report or {}
+    allow_source_b1 = _has_visual_float_placement_pressure(visual_report)
     for item in crossrefs_report.get("distances") or []:
         severity = str(item.get("severity") or "none")
-        if severity not in {"major", "minor"}:
-            continue
         label = str(item.get("label") or "")
         semantic_home = _build_semantic_home(item, float_lookup.get(label))
-        candidates.append(
-            {
-                "candidate_type": "source_anchor",
-                "page": None,
-                "target": {
-                    "label": item.get("label"),
-                    "float_type": item.get("float_type"),
-                },
-                "defect_family": "B1",
-                "priority_score": 80 if severity == "major" else 55,
-                "severity": severity,
-                "proposed_action": "move_float_closer_to_first_reference",
-                "rationale": (
-                    f"crossref distance line={int(item.get('line_distance') or 0)}, "
-                    f"section={int(item.get('section_distance') or 0)}"
-                ),
-                "semantic_home": semantic_home,
-                "ref_line": item.get("ref_line"),
-                "float_line": item.get("float_line"),
-                "line_distance": item.get("line_distance"),
-                "section_distance": item.get("section_distance"),
-                "reference_source": item.get("reference_source"),
-                "reference_text": item.get("reference_text"),
-                "float_section": (float_lookup.get(label) or {}).get("section"),
-                "evidence_sources": ["crossrefs_report"],
-            }
-        )
-        width_spec = item.get("width_spec")
-        if item.get("float_type") == "figure" and width_spec and not _is_width_already_sufficient(width_spec):
-            factor_match = re.match(r"^\s*([0-9]+(?:\.[0-9]+)?)\\(?:linewidth|columnwidth|textwidth)\s*$", str(width_spec))
-            try:
-                width_factor = float(factor_match.group(1)) if factor_match else 0.8
-            except ValueError:
-                width_factor = 0.8
+        if allow_source_b1 and severity in {"major", "minor"}:
             candidates.append(
                 {
                     "candidate_type": "source_anchor",
                     "page": None,
                     "target": {
-                        "label": label,
+                        "label": item.get("label"),
                         "float_type": item.get("float_type"),
                     },
-                    "defect_family": "B2",
-                    "priority_score": 70 if width_factor <= 0.65 else 62,
-                    "severity": "major" if width_factor <= 0.65 else "minor",
-                    "proposed_action": "adjust_float_width",
-                    "rationale": f"source_width_spec={width_spec}",
+                    "defect_family": "B1",
+                    "priority_score": 80 if severity == "major" else 55,
+                    "severity": severity,
+                    "proposed_action": "move_float_closer_to_first_reference",
+                    "rationale": (
+                        f"crossref distance line={int(item.get('line_distance') or 0)}, "
+                        f"section={int(item.get('section_distance') or 0)}"
+                    ),
                     "semantic_home": semantic_home,
-                    "ref_line": semantic_distance.get("ref_line") if semantic_distance else None,
-                    "float_line": semantic_distance.get("float_line") if semantic_distance else None,
-                    "line_distance": semantic_distance.get("line_distance") if semantic_distance else None,
-                    "section_distance": semantic_distance.get("section_distance") if semantic_distance else None,
-                    "reference_source": semantic_distance.get("reference_source") if semantic_distance else None,
-                    "reference_text": semantic_distance.get("reference_text") if semantic_distance else None,
-                    "float_section": item.get("section"),
-                    "source_width_spec": width_spec,
-                    "evidence_sources": ["crossrefs_report"],
+                    "ref_line": item.get("ref_line"),
+                    "float_line": item.get("float_line"),
+                    "line_distance": item.get("line_distance"),
+                    "section_distance": item.get("section_distance"),
+                    "reference_source": item.get("reference_source"),
+                    "reference_text": item.get("reference_text"),
+                    "float_section": (float_lookup.get(label) or {}).get("section"),
+                    "evidence_sources": ["crossrefs_report", "visual_signal_report"],
                 }
             )
     for item in crossrefs_report.get("floats") or []:
         label = str(item.get("label") or "")
         if not label:
             continue
-        width_spec = item.get("width_spec")
-        if item.get("float_type") == "figure" and width_spec and not _is_width_already_sufficient(width_spec):
-            factor_match = re.match(r"^\s*([0-9]+(?:\.[0-9]+)?)\\(?:linewidth|columnwidth|textwidth)\s*$", str(width_spec))
-            try:
-                width_factor = float(factor_match.group(1)) if factor_match else 0.8
-            except ValueError:
-                width_factor = 0.8
-            semantic_home = _build_semantic_home(distance_lookup.get(label), item)
-            candidates.append(
-                {
-                    "candidate_type": "source_anchor",
-                    "page": None,
-                    "target": {
-                        "label": label,
-                        "float_type": item.get("float_type"),
-                    },
-                    "defect_family": "B2",
-                    "priority_score": 70 if width_factor <= 0.65 else 62,
-                    "severity": "major" if width_factor <= 0.65 else "minor",
-                    "proposed_action": "adjust_float_width",
-                    "rationale": f"source_width_spec={width_spec}",
-                    "semantic_home": semantic_home,
-                    "ref_line": (distance_lookup.get(label) or {}).get("ref_line"),
-                    "float_line": (distance_lookup.get(label) or {}).get("float_line"),
-                    "line_distance": (distance_lookup.get(label) or {}).get("line_distance"),
-                    "section_distance": (distance_lookup.get(label) or {}).get("section_distance"),
-                    "reference_source": (distance_lookup.get(label) or {}).get("reference_source"),
-                    "reference_text": (distance_lookup.get(label) or {}).get("reference_text"),
-                    "float_section": item.get("section"),
-                    "source_width_spec": width_spec,
-                    "evidence_sources": ["crossrefs_report"],
-                }
-            )
         float_position = str(item.get("float_position") or "")
-        if float_position not in {"p", "!p", "b", "!b"}:
+        if not allow_source_b1 or float_position not in {"p", "!p", "b", "!b"}:
             continue
         semantic_distance = distance_lookup.get(label)
         semantic_home = _build_semantic_home(semantic_distance, item)
@@ -790,7 +1004,7 @@ def _build_crossref_candidates(crossrefs_report: Dict[str, Any]) -> List[Dict[st
                 "reference_text": semantic_distance.get("reference_text") if semantic_distance else None,
                 "float_section": item.get("section"),
                 "source_float_position": float_position,
-                "evidence_sources": ["crossrefs_report"],
+                "evidence_sources": ["crossrefs_report", "visual_signal_report"],
             }
         )
     return candidates
@@ -943,10 +1157,20 @@ def _build_space_candidates(
     return candidates
 
 
-def _build_log_candidates(rule_report: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _build_log_candidates(
+    rule_report: Dict[str, Any],
+    visual_report: Optional[Dict[str, Any]] = None,
+    target_pages: Optional[int] = None,
+) -> List[Dict[str, Any]]:
     summary = rule_report.get("summary") or {}
+    visual_report = visual_report or {}
+    active_visual_families = _active_visual_families(visual_report)
+    has_page_budget_pressure = target_pages is not None and target_pages > 0
     candidates: List[Dict[str, Any]] = []
-    if int(summary.get("underfull_hbox_total") or 0) > 0:
+    if (
+        int(summary.get("underfull_hbox_total") or 0) > 0
+        and (has_page_budget_pressure or bool(active_visual_families & {"A1", "C1", "C2", "C3", "C4"}))
+    ):
         candidates.append(
             {
                 "candidate_type": "global",
@@ -957,7 +1181,7 @@ def _build_log_candidates(rule_report: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "severity": "minor",
                 "proposed_action": "review_paragraph_spacing_and_looseness",
                 "rationale": f"underfull_hbox_total={int(summary.get('underfull_hbox_total') or 0)}",
-                "evidence_sources": ["rule_report"],
+                "evidence_sources": ["rule_report", "visual_signal_report"] if active_visual_families else ["rule_report"],
             }
         )
     if int(summary.get("overfull_hbox_total") or 0) > 0:
@@ -1028,7 +1252,7 @@ def generate_repair_plan(
         crossrefs,
         target_pages=target_pages,
     )
-    crossref_candidates = _build_crossref_candidates(crossrefs)
+    crossref_candidates = _build_crossref_candidates(crossrefs, visual_report=visual_report)
     semantic_band_candidates = _build_semantic_band_candidates(
         crossrefs_report=crossrefs,
         existing_candidates=object_candidates + b3_candidates + crossref_candidates,
@@ -1038,7 +1262,11 @@ def generate_repair_plan(
         visual_report=visual_report,
         target_pages=target_pages,
     )
-    log_candidates = _build_log_candidates(rule_report_data)
+    log_candidates = _build_log_candidates(
+        rule_report_data,
+        visual_report=visual_report,
+        target_pages=target_pages,
+    )
 
     candidates = (
         object_candidates
@@ -1051,8 +1279,15 @@ def generate_repair_plan(
         + log_candidates
     )
     candidates = annotate_repair_candidates(candidates)
+    has_visual_b2_width_candidate = _has_visual_b2_width_candidate(candidates)
+    b2_width_findings = _summarize_visual_b2_width_findings(visual_report)
+    b2_width_candidates = _summarize_b2_width_candidates(candidates)
+    b2_width_targetable_candidates = _summarize_targetable_b2_width_candidates(candidates)
+    b2_width_untargetable_candidates = _summarize_untargetable_b2_width_candidates(candidates)
+    b2_width_conversion = _summarize_b2_width_conversion(visual_report, candidates)
     candidates.sort(
         key=lambda item: (
+            0 if _is_urgent_overflow_candidate(item) and not has_visual_b2_width_candidate else 1,
             -int(item.get("priority_score") or 0),
             -_candidate_severity_rank(str(item.get("severity") or "")),
             int(item.get("page") or 0) if item.get("page") is not None else 10**6,
@@ -1069,6 +1304,13 @@ def generate_repair_plan(
             "source_anchor_candidates": len([c for c in candidates if c["candidate_type"] == "source_anchor"]),
             "semantic_band_candidates": len([c for c in candidates if c["candidate_type"] == "semantic_band"]),
             "global_candidates": len([c for c in candidates if c["candidate_type"] == "global"]),
+            "b2_width_findings": b2_width_findings,
+            "b2_width_candidates": b2_width_candidates,
+            "b2_width_targetable_candidates": b2_width_targetable_candidates,
+            "b2_width_untargetable_candidates": b2_width_untargetable_candidates,
+            "b2_width_unmatched_findings": b2_width_conversion["unmatched_count"],
+            "b2_width_unmatched_pages": b2_width_conversion["unmatched_pages"],
+            "b2_width_unmatched_finding_ids": b2_width_conversion["unmatched_finding_ids"],
         },
         "candidates": candidates,
     }

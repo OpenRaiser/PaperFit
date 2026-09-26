@@ -174,6 +174,8 @@ def _normalize_visual_report(visual_report: Dict[str, Any]) -> List[Dict[str, An
             continue
         if not isinstance(width_ratio, (int, float)):
             continue
+        if float(width_ratio) >= 0.85:
+            continue
         bbox = object_item.get("bbox") or []
         bbox_key = tuple(int(v) for v in bbox) if len(bbox) == 4 else ()
         if (object_item.get("page"), bbox_key) in b2_finding_keys:

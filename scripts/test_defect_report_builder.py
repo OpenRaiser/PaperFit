@@ -45,6 +45,23 @@ class DefectReportBuilderTest(unittest.TestCase):
         self.assertEqual(len([d for d in defects if d["defect_family"] == "B2"]), 1)
         self.assertEqual(defects[0]["source"], "pymupdf_native")
 
+    def test_priority_object_near_full_width_is_not_b2_defect(self) -> None:
+        defects = _normalize_visual_report(
+            {
+                "priority_objects": [
+                    {
+                        "page": 4,
+                        "object_kind": "figure_like",
+                        "bbox": [1006, 176, 1683, 720],
+                        "reason": "low_width_ratio:0.929",
+                        "object_width_ratio": 0.9287,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(defects, [])
+
 
 if __name__ == "__main__":
     unittest.main()

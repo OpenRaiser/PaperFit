@@ -49,6 +49,8 @@ CONTENT_INTEGRITY_FIELDS = (
     "violation_level",
     "action_taken",
     "rollback_target",
+    "reason",
+    "error",
 )
 FAILURE_TRACKING_FIELDS = (
     "consecutive_failures",
@@ -77,6 +79,12 @@ TERMINAL_SUCCESS_GUARD_FIELDS = (
     "failure_type",
     "reason",
     "artifact_freshness",
+)
+POST_REPAIR_HARD_GUARD_FIELDS = (
+    "status",
+    "failure_type",
+    "reason",
+    "visual_hard_guards",
 )
 ROOT_FIELDS = (
     "project",
@@ -107,6 +115,7 @@ ROOT_FIELDS = (
     "failure_tracking",
     "runtime_event_summary",
     "terminal_success_guard",
+    "post_repair_hard_guard",
 )
 
 
@@ -204,6 +213,8 @@ def build_default_state(
             "violation_level": None,
             "action_taken": None,
             "rollback_target": None,
+            "reason": None,
+            "error": None,
         },
         "semantic_budget_summary": None,
         "failure_tracking": {
@@ -229,6 +240,7 @@ def build_default_state(
             "actions": {},
         },
         "terminal_success_guard": None,
+        "post_repair_hard_guard": None,
         "archived_at": None,
     }
 
@@ -361,6 +373,19 @@ def validate_state(state: Dict[str, Any]) -> Dict[str, Any]:
                 errors.append(
                     "terminal_success_guard contains unknown keys: "
                     + ", ".join(unknown_guard_fields)
+                )
+    post_repair_hard_guard = current.get("post_repair_hard_guard")
+    if post_repair_hard_guard is not None:
+        if not isinstance(post_repair_hard_guard, dict):
+            errors.append("post_repair_hard_guard must be an object or null")
+        else:
+            unknown_hard_guard_fields = sorted(
+                set(post_repair_hard_guard.keys()) - set(POST_REPAIR_HARD_GUARD_FIELDS)
+            )
+            if unknown_hard_guard_fields:
+                errors.append(
+                    "post_repair_hard_guard contains unknown keys: "
+                    + ", ".join(unknown_hard_guard_fields)
                 )
     if not isinstance(current.get("history"), list):
         errors.append("history must be a list")
