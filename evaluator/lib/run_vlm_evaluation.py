@@ -106,6 +106,7 @@ def _labeled_comparison_image(
     candidate_pages_dir: Path,
     candidate_method: str,
     max_dim: int,
+    swap_order: bool = False,
 ) -> Image.Image:
     b0_stitched = stitch_images(_load_pages(b0_pages_dir), max_dim=max_dim)
     candidate_stitched = stitch_images(_load_pages(candidate_pages_dir), max_dim=max_dim)
@@ -116,20 +117,28 @@ def _labeled_comparison_image(
 
     label_h = 44
     gap = 16
-    total_w = b0_stitched.width + candidate_stitched.width + gap
+    if swap_order:
+        left, right = candidate_stitched, b0_stitched
+        left_label = f"LEFT: {candidate_method} candidate"
+        right_label = "RIGHT: B0 perturbed input"
+    else:
+        left, right = b0_stitched, candidate_stitched
+        left_label = "LEFT: B0 perturbed input"
+        right_label = f"RIGHT: {candidate_method} candidate"
+    total_w = left.width + right.width + gap
     total_h = target_h + label_h
     canvas = Image.new("RGB", (total_w, total_h), "white")
     draw = ImageDraw.Draw(canvas)
     font = _default_font(24)
     small = _default_font(16)
 
-    canvas.paste(b0_stitched, (0, label_h))
-    canvas.paste(candidate_stitched, (b0_stitched.width + gap, label_h))
-    draw.rectangle((0, 0, b0_stitched.width, label_h), fill=(235, 238, 242))
-    draw.rectangle((b0_stitched.width + gap, 0, total_w, label_h), fill=(229, 244, 236))
-    draw.text((12, 8), "LEFT: B0 perturbed input", fill=(20, 24, 32), font=font)
-    draw.text((b0_stitched.width + gap + 12, 8), f"RIGHT: {candidate_method} candidate", fill=(20, 24, 32), font=font)
-    draw.line((b0_stitched.width + gap // 2, 0, b0_stitched.width + gap // 2, total_h), fill=(40, 40, 40), width=3)
+    canvas.paste(left, (0, label_h))
+    canvas.paste(right, (left.width + gap, label_h))
+    draw.rectangle((0, 0, left.width, label_h), fill=(235, 238, 242))
+    draw.rectangle((left.width + gap, 0, total_w, label_h), fill=(229, 244, 236))
+    draw.text((12, 8), left_label, fill=(20, 24, 32), font=font)
+    draw.text((left.width + gap + 12, 8), right_label, fill=(20, 24, 32), font=font)
+    draw.line((left.width + gap // 2, 0, left.width + gap // 2, total_h), fill=(40, 40, 40), width=3)
     draw.text((12, total_h - 22), "Pages in each side are ordered left-to-right, top-to-bottom.", fill=(80, 80, 80), font=small)
 
     if max(canvas.width, canvas.height) > max_dim:
@@ -265,6 +274,7 @@ def _build_config(args: argparse.Namespace) -> VLMAbsoluteConfig:
             jpeg_quality=args.jpeg_quality,
             max_retries=args.max_retries,
             verify_ssl=_parse_bool(args.vlm_verify_ssl, default=True),
+            swap_pair_order=bool(args.swap_pair_order),
         )
     config = _config_from_env_or_claude_env()
     config.protocol_version = "v3"
@@ -273,6 +283,7 @@ def _build_config(args: argparse.Namespace) -> VLMAbsoluteConfig:
     config.max_image_dim = args.max_image_dim
     config.jpeg_quality = args.jpeg_quality
     config.max_retries = args.max_retries
+    config.swap_pair_order = bool(args.swap_pair_order)
     if args.vlm_verify_ssl is not None:
         config.verify_ssl = _parse_bool(args.vlm_verify_ssl, default=config.verify_ssl)
     return config
@@ -377,6 +388,7 @@ def _evaluate_one(
                 candidate_pages_dir=run_dir / "pages",
                 candidate_method=method,
                 max_dim=config.max_image_dim,
+                swap_order=getattr(config, "swap_pair_order", False),
             )
             comparison.save(comparison_path)
             prompt = build_v3_user_prompt(
@@ -385,6 +397,7 @@ def _evaluate_one(
                 profile=case_payload.get("profile"),
                 target_pages=case_payload.get("target_pages") or evaluation.get("target_pages"),
                 requested_perturbations=case_payload.get("requested_perturbations") or [],
+                swap_order=getattr(config, "swap_pair_order", False),
                 b0_page_count=b0_evaluation.get("page_count"),
                 candidate_page_count=evaluation.get("page_count"),
                 candidate_compile_success=constraints.get("compile_success"),
@@ -413,6 +426,7 @@ def _evaluate_one(
         "generated_at": datetime.now().isoformat(),
         "run_dir": str(run_dir),
         "b0_run_dir": str(b0_run_dir),
+        "pair_order": "swapped" if getattr(config, "swap_pair_order", False) else "normal",
         "comparison_image": str(comparison_path) if comparison_path.exists() else None,
         "raw_response_path": str(raw_path) if raw_path.exists() else None,
         "case_context": {
@@ -529,6 +543,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-image-dim", type=int, default=1800)
     parser.add_argument("--jpeg-quality", type=int, default=78)
     parser.add_argument("--max-retries", type=int, default=2)
+    parser.add_argument(
+        "--swap-pair-order",
+        action="store_true",
+        help="Place the candidate montage on the LEFT and B0 on the RIGHT (position-bias control; roles stay labeled)",
+    )
     args = parser.parse_args(argv)
 
     method_roots = _filter_methods(_parse_method_root(args.method_root), args.methods)
@@ -577,6 +596,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest = {
         "generated_at": datetime.now().isoformat(),
         "protocol_version": "v3",
+        "swap_pair_order": bool(args.swap_pair_order),
         "sample_size": len(selected_cases),
         "seed": args.seed,
         "selected_cases": selected_cases,

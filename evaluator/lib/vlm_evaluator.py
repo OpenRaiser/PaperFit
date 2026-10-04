@@ -35,6 +35,7 @@ class VLMAbsoluteConfig:
     jpeg_quality: int = 78
     max_retries: int = 2
     verify_ssl: bool = True
+    swap_pair_order: bool = False
 
     @classmethod
     def from_env(cls) -> "VLMAbsoluteConfig":

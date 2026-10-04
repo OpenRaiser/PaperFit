@@ -310,6 +310,7 @@ def build_v3_user_prompt(
     candidate_render_success: bool | None,
     candidate_page_budget_hit: bool | None,
     candidate_undefined_ref_count: int | None,
+    swap_order: bool = False,
 ) -> str:
     target_pages_text = "unknown" if target_pages is None else str(target_pages)
     b0_page_count_text = "unknown" if b0_page_count is None else str(b0_page_count)
@@ -317,12 +318,22 @@ def build_v3_user_prompt(
     perturbation_text = ", ".join(str(p) for p in requested_perturbations) or "unknown"
     defect_type_text = ", ".join(DEFECT_TYPES)
     severity_text = ", ".join(SEVERITY_LEVELS)
+    if swap_order:
+        layout_lines = (
+            f"- LEFT montage: candidate output from method {method_id}.\n"
+            "- RIGHT montage: B0 perturbed input."
+        )
+    else:
+        layout_lines = (
+            "- LEFT montage: B0 perturbed input.\n"
+            f"- RIGHT montage: candidate output from method {method_id}."
+        )
     return f"""Evaluate the candidate method output using the V3 VTO evaluation protocol.
 
 Image layout:
-- LEFT montage: B0 perturbed input.
-- RIGHT montage: candidate output from method {method_id}.
+{layout_lines}
 - Pages are arranged left-to-right, top-to-bottom inside each montage.
+- Side roles are defined by these labels only; judge layout quality, not paper content.
 
 Case context:
 - Method: {method_id}
