@@ -1,4 +1,9 @@
 """
+Semantic micro-tuning helpers (NOT wired into the executor).
+
+The runtime-controlled semantic path is scripts/semantic_budgeter.py
+(guarded writes, risk scores, audit reports); treat this module as a
+reference implementation only.
 Semantic Micro-Tuning - 语义级动态微调执行器
 
 当物理排版手段（\looseness、浮动体参数等）用尽后，

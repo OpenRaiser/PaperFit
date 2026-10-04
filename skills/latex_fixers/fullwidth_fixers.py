@@ -1,4 +1,8 @@
 """
+Full-width table strategy helpers (NOT wired into the executor).
+
+scripts/repair_plan_executor.py never routes here; treat this as a
+reference implementation until it is registered in fixer_registry.py.
 Full-Width and Reference Separation Fixers
 
 确保：

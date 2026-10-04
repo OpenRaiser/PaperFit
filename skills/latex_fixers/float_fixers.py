@@ -1,4 +1,10 @@
 """
+Simplified float-repair helpers (DEPRECATED for execution).
+
+The canonical execution adapter is scripts/float_fixers.py (routed via
+scripts/fixer_registry.py); it owns file IO, hard content gates, and
+end-to-end semantics. This module lags behind it; use it only for
+reading strategy examples.
 Float Optimizer Fixers - Category B 缺陷修复
 
 处理浮动体位置、尺寸、堆叠、跨页分裂等问题。
