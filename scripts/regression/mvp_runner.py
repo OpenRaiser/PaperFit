@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPTS_DIR.parent.parent
-for entry in (str(SCRIPTS_DIR), str(REPO_ROOT)):
+for entry in (str(SCRIPTS_DIR.parent), str(REPO_ROOT), str(SCRIPTS_DIR)):
     if entry not in sys.path:
         sys.path.insert(0, entry)
 
@@ -191,7 +191,10 @@ def run_mvp(
     paperfit_runner=None,
     compile_fn=None,
     render_fn=None,
+    inject: bool = True,
 ) -> Dict[str, Any]:
+    paperfit_data = paperfit_data.resolve()
+    out_root = out_root.resolve()
     run_id = f"MVP1_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     run_dir = out_root / run_id
     pack_root = run_dir / "benchmark_pack"
@@ -224,7 +227,13 @@ def run_mvp(
 
     compile_fn = compile_fn or real_compile_fn
     render_fn = render_fn or real_render_fn
-    pack_manifest = build_pack(entries=entries, pack_root=pack_root, compile_fn=compile_fn, render_fn=render_fn)
+    pack_manifest = build_pack(
+        entries=entries,
+        pack_root=pack_root,
+        compile_fn=compile_fn,
+        render_fn=render_fn,
+        skip_injection=not inject,
+    )
 
     case_records: List[Dict[str, Any]] = []
     b0_evaluations: List[Dict[str, Any]] = []
@@ -245,7 +254,11 @@ def run_mvp(
             "column_type": benchmark.get("column_type"),
             "profile": benchmark.get("profile"),
             "assigned": True,
-            "injection_status": pack_result["injection_status"] if pack_result["status"] != "injection_failed" else (pack_result.get("injection_status") or "failed"),
+            "injection_status": (
+                "skipped_by_design"
+                if not inject
+                else pack_result["injection_status"] if pack_result["status"] != "injection_failed" else (pack_result.get("injection_status") or "failed")
+            ),
             "b0_status": "layout_evaluable" if pack_result["status"] == "success" else "input_incomplete",
             "candidate_status": "not_run",
             "environment_state": "clean",
@@ -345,6 +358,11 @@ def main() -> int:
     parser.add_argument("--cases", type=int, default=10)
     parser.add_argument("--max-rounds", type=int, default=1)
     parser.add_argument("--dry-run", action="store_true", help="PaperFit 只诊断不写回（默认 apply）")
+    parser.add_argument(
+        "--no-inject",
+        action="store_true",
+        help="数据集已是扰动 B0（paperfit-data 即如此）：跳过二次注入，原样冻结",
+    )
     args = parser.parse_args()
 
     result = run_mvp(
@@ -353,6 +371,7 @@ def main() -> int:
         case_count=args.cases,
         max_rounds=args.max_rounds,
         apply=not args.dry_run,
+        inject=not args.no_inject,
     )
     print(json.dumps({key: value for key, value in result.items() if key != "report"}, ensure_ascii=False, indent=2))
     print(f"report: {result['run_dir']}/reports/regression_report.md")

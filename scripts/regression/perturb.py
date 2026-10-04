@@ -70,9 +70,10 @@ def inject_long_token(tex: str) -> Tuple[str, List[Dict[str, Any]], Optional[str
         return (tex, [], "no \\begin{document}")
     insert_at = _first_paragraph_end(tex, body_start, body_end)
     if insert_at is None:
-        return (tex, [], "no plain paragraph found in body")
+        # 兜底：正文分文件（\input）或无纯文本段时，在 \end{document} 前自成一段
+        insert_at = body_end
     marker = f" % PERTURBED: D1_long_token_overflow\n"
-    injected = f"{marker}{_LONG_TOKEN} "
+    injected = f"{marker}{_LONG_TOKEN} \n"
     return (
         tex[:insert_at] + injected + tex[insert_at:],
         [{"perturbation_id": "D1_long_token_overflow", "kind": "long_token", "token_length": len(_LONG_TOKEN)}],

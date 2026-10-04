@@ -60,10 +60,12 @@ class LongTokenInjectionTest(unittest.TestCase):
         figure_pos = perturbed.find("\\begin{figure}")
         self.assertLess(token_pos, figure_pos)
 
-    def test_d1_fails_honestly_without_plain_paragraph(self):
+    def test_d1_falls_back_to_body_end_without_paragraph(self):
         hostile = "\\documentclass{article}\\begin{document}\\includegraphics{x}\\end{document}"
-        _, results = apply_perturbations(hostile, ["D1_long_token_overflow"])
-        self.assertEqual(results[0].status, "target_not_found")
+        perturbed, results = apply_perturbations(hostile, ["D1_long_token_overflow"])
+        self.assertEqual(results[0].status, "success")
+        # 兜底注入自成一段，位于 \end{document} 之前（正文分文件/无纯文本段的论文）
+        self.assertLess(perturbed.find("PerturbationStressToken"), perturbed.find("\\end{document}"))
 
 
 class LongFormulaInjectionTest(unittest.TestCase):

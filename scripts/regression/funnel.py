@@ -34,7 +34,8 @@ def _stage_flags(record: Dict[str, Any]) -> Dict[str, bool]:
     candidate_status = str(record.get("candidate_status") or "")
     vlm = record.get("vlm") or {}
     # 漏斗必须单调：前一阶段失败的 case 不可能在后一阶段被计数
-    injected = injection_status == "success"
+    # skipped_by_design：数据集本身已是扰动 B0（paperfit-data），无需再注入
+    injected = injection_status in {"success", "skipped_by_design"}
     b0_rendered = injected and b0_status == "layout_evaluable"
     candidate_rendered = b0_rendered and candidate_status == "layout_evaluable"
     scored = candidate_rendered and bool(vlm.get("effective", True))

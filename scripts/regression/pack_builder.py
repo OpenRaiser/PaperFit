@@ -105,8 +105,12 @@ def build_case(
     compile_fn: Callable[[Path], Dict[str, Any]],
     render_fn: Callable[[Path, Path], Dict[str, Any]],
     column_type: Optional[str] = None,
+    skip_injection: bool = False,
 ) -> CaseBuildResult:
-    """构建并冻结一个 B0 case。compile_fn(project_root) / render_fn(project_root, pages_dir)。"""
+    """构建并冻结一个 B0 case。compile_fn(project_root) / render_fn(project_root, pages_dir)。
+
+    skip_injection=True：数据集本身已是扰动 B0（如 paperfit-data），原样冻结。
+    """
     result = CaseBuildResult(case_id=case_id, paper_id=paper_id, status="success", injection_status="success")
     case_dir = pack_root / paper_id / case_id
     work_dir = case_dir / "b0_project"
@@ -135,7 +139,13 @@ def build_case(
         source_manifest["main_tex_relpath"] = str(main_tex.relative_to(project_root))
         source_manifest["original_main_tex_sha256"] = _sha256_text(original_tex)
 
-        perturbed_tex, injection_results = apply_perturbations(original_tex, perturbation_ids)
+        if skip_injection:
+            perturbed_tex = original_tex
+            injection_results = []
+            source_manifest["injection_mode"] = "skipped_by_design"
+        else:
+            perturbed_tex, injection_results = apply_perturbations(original_tex, perturbation_ids)
+            source_manifest["injection_mode"] = "injector" 
         source_manifest["injection_results"] = [
             {"perturbation_id": item.perturbation_id, "status": item.status, "reason": item.reason,
              "edits": item.edits}
@@ -213,6 +223,7 @@ def build_pack(
     pack_root: Path,
     compile_fn: Callable[[Path], Dict[str, Any]],
     render_fn: Callable[[Path, Path], Dict[str, Any]],
+    skip_injection: bool = False,
 ) -> Dict[str, Any]:
     """批量构建冻结 pack 并写 pack_manifest.json。entries: 见 build_case 参数（archive/paper_id/...）。"""
     results: List[Dict[str, Any]] = []
@@ -230,6 +241,7 @@ def build_pack(
             compile_fn=compile_fn,
             render_fn=render_fn,
             column_type=entry.get("column_type"),
+            skip_injection=skip_injection,
         )
         results.append(
             {
