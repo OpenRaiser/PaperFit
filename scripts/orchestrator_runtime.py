@@ -43,6 +43,7 @@ from runtime_status import build_runtime_status
 from runtime_state_machine import SOURCE_CHANGING_STATE_MACHINE, VISUAL_ONLY_STATE_MACHINE
 from runtime_types import ActionResult, RunResult, SOURCE_CHANGING_TASK_TYPES, TaskSpec, load_task_spec
 from state_manager import StateManager
+from visual_action_plan import build_visual_action_plan, write_visual_action_plan
 
 
 class OrchestratorRuntime:
@@ -2002,6 +2003,15 @@ class OrchestratorRuntime:
                         repair_plan_path=repair_plan_output,
                     )
                     self.manager.ingest_repair_plan(repair_plan_output)
+
+                # 统一诊断协议：每条 finding/hint 都进入动作计划，禁止静默丢弃
+                action_plan_output = "data/visual_action_plan.json"
+                action_plan = build_visual_action_plan(
+                    visual_report=visual_report,
+                    crossrefs_report=crossrefs_report,
+                )
+                write_visual_action_plan(action_plan, Path(action_plan_output))
+                self.set_artifact("visual_action_plan", action_plan_output)
 
         defect_report = self._run_defect_report_builder(
             rule_report_output=rule_report_output,

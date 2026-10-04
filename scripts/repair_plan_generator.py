@@ -227,6 +227,10 @@ def _summarize_b2_width_conversion(
             continue
         if str(candidate.get("visual_width_subtype") or "") not in {"overflow_width", "underfilled_width"}:
             continue
+        # 诊断协议引入的 review-only 候选不算"已匹配"：unmatched 语义
+        # 保持为"没有可执行（有源码锚点）候选"的发现数
+        if candidate.get("requires_human_review"):
+            continue
         key = _b2_width_candidate_key(candidate)
         for index, entry in enumerate(remaining):
             if _b2_width_entry_key(entry) == key:
@@ -802,6 +806,30 @@ def _build_object_candidates(visual_report: Dict[str, Any], crossrefs_report: Di
         reason = str(item.get("reason") or "")
         label = str(item.get("label") or "")
         if not label:
+            # 诊断协议要求：无源码锚点的对象缺陷不许静默丢弃——转为人工复核候选
+            unanchored_family = "B2" if str(item.get("visual_width_subtype") or "") in {"overflow_width", "underfilled_width"} else None
+            if unanchored_family:
+                candidates.append(
+                    {
+                        "candidate_type": "object",
+                        "page": int(item.get("page") or 0),
+                        "target": {
+                            "object_kind": item.get("object_kind"),
+                            "bbox": item.get("bbox"),
+                            "label": None,
+                        },
+                        "defect_family": unanchored_family,
+                        "priority_score": max(40, int(item.get("priority_score") or 0) - 30),
+                        "severity": str(item.get("severity") or "major"),
+                        "proposed_action": "review_only",
+                        "rationale": f"source anchor unresolved: {reason}",
+                        "description": str(item.get("reason") or ""),
+                        "visual_width_subtype": item.get("visual_width_subtype"),
+                        "requires_human_review": True,
+                        "anchor_status": "unresolved",
+                        "evidence_sources": [str(item.get("source") or "visual_signal_report")],
+                    }
+                )
             continue
         semantic_distance = distance_lookup.get(label)
         semantic_float = float_lookup.get(label)
