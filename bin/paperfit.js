@@ -604,6 +604,60 @@ program
     console.log(JSON.stringify(loadRuntimeStatusView(options), null, 2));
   });
 
+program
+  .command('rollback [target]')
+  .description('从修复前快照回滚源码（target 缺省时读 state 里的 rollback_target）')
+  .option('--state <path>', 'State file path', 'data/state.json')
+  .option('--output <path>', '回滚报告输出路径', 'data/rollback_report.json')
+  .action((target, options) => {
+    let rollbackTarget = target;
+    if (!rollbackTarget) {
+      const state = safeReadJson(path.resolve(process.cwd(), options.state || 'data/state.json'));
+      rollbackTarget =
+        (state && state.content_integrity && state.content_integrity.rollback_target) ||
+        (state && state.pre_repair_snapshot && state.pre_repair_snapshot.rollback_target);
+    }
+    if (!rollbackTarget) {
+      console.error('未找到回滚目标：请传入快照 manifest 路径，或先执行 source-changing 任务生成快照。');
+      process.exit(1);
+    }
+    const script = path.join(packageRoot(), 'scripts', 'orchestrator_runtime.py');
+    const args = [
+      script,
+      '--state',
+      options.state || 'data/state.json',
+      'rollback-to-snapshot',
+      rollbackTarget,
+      '--output',
+      options.output || 'data/rollback_report.json',
+    ];
+    const r = spawnSync(pythonRunner(), args, { stdio: 'inherit', cwd: process.cwd(), env: process.env });
+    process.exit(r.status === null ? 1 : r.status ?? 1);
+  });
+
+program
+  .command('resume')
+  .description('从 data/task.json 恢复并重跑上一次 typed runtime 任务')
+  .option('--task <path>', 'TaskSpec JSON 路径', 'data/task.json')
+  .option('--output <path>', 'RunResult 输出路径', 'data/run_result_resumed.json')
+  .action((options) => {
+    const taskPath = path.resolve(process.cwd(), options.task || 'data/task.json');
+    if (!fs.existsSync(taskPath)) {
+      console.error(`未找到任务文件 ${taskPath}：resume 需要先跑过一次 typed 任务（如 fix-layout）生成 data/task.json。`);
+      process.exit(1);
+    }
+    const script = path.join(packageRoot(), 'scripts', 'orchestrator_runtime.py');
+    const args = [
+      script,
+      'run-task',
+      taskPath,
+      '--output',
+      options.output || 'data/run_result_resumed.json',
+    ];
+    const r = spawnSync(pythonRunner(), args, { stdio: 'inherit', cwd: process.cwd(), env: process.env });
+    process.exit(r.status === null ? 1 : r.status ?? 1);
+  });
+
 addWorkflowOptions(
   program
     .command('slash')
