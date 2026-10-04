@@ -1,0 +1,7 @@
+{
+  "schema_version": "1.0",
+  "selection_mode": "user_configured",
+  "benchmark_root_hint": "benchmark_cases",
+  "description": "Configure local benchmark cases here. No dataset or recorded results are distributed.",
+  "representatives": []
+}

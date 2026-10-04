@@ -1,0 +1,25 @@
+{
+  "asset_id": "ACL_STYLE_FAMILY",
+  "status": "prepared",
+  "asset_type": "repo_snapshot_zip",
+  "source_local_path": "config/host_assets/template_kits/ACL_STYLE_FAMILY/acl-style-files-master.zip",
+  "prepared_dir": "config/host_assets/template_kits_prepared/ACL_STYLE_FAMILY",
+  "payload_dir": "config/host_assets/template_kits_prepared/ACL_STYLE_FAMILY/payload",
+  "effective_root": "config/host_assets/template_kits_prepared/ACL_STYLE_FAMILY/payload/acl-style-files-master",
+  "zip_entry_count": 9,
+  "stripped_top_level_prefix": "acl-style-files-master",
+  "main_tex_candidates": [
+    "acl_latex.tex",
+    "acl_lualatex.tex"
+  ],
+  "style_candidates": [
+    "acl.sty"
+  ],
+  "bibliography_candidates": [
+    "acl_natbib.bst",
+    "custom.bib"
+  ],
+  "source_candidates": [],
+  "main_tex_sample": "\\documentclass[11pt]{article}\n% Change \"review\" to \"final\" to generate the final (sometimes called camera-ready) version.\n% Change to \"preprint\" to generate a non-anonymous version with page numbers.\n\\usepackage[review]{acl}\n% Standard package includes\n\\usepackage{times}\n\\usepackage{latexsym}\n% For proper rendering and hyphenation of words containing Latin characters (including in bib files)",
+  "style_sample": "% This is the LaTex style file for *ACL.\n% The official sources can be found at\n%\n%     https://github.com/acl-org/acl-style-files/\n%\n% This package is activated by adding\n%\n%    \\usepackage{acl}"
+}

@@ -1,0 +1,262 @@
+{
+  "prepared_root": "config/host_assets/template_kits_prepared",
+  "assets": {
+    "AAAI2026_OVERLEAF_MIRROR": {
+      "asset_id": "AAAI2026_OVERLEAF_MIRROR",
+      "status": "prepared",
+      "asset_type": "public_mirror_html",
+      "source_local_path": "config/host_assets/template_kits/AAAI2026/overleaf_template_page.html",
+      "prepared_dir": "config/host_assets/template_kits_prepared/AAAI2026_OVERLEAF_MIRROR",
+      "payload_dir": "config/host_assets/template_kits_prepared/AAAI2026_OVERLEAF_MIRROR/payload",
+      "copied_file": "config/host_assets/template_kits_prepared/AAAI2026_OVERLEAF_MIRROR/payload/overleaf_template_page.html",
+      "main_tex_candidates": [],
+      "style_candidates": [],
+      "bibliography_candidates": [],
+      "source_candidates": [],
+      "file_sample": null
+    },
+    "ICLR2025_MASTER_TEMPLATE": {
+      "asset_id": "ICLR2025_MASTER_TEMPLATE",
+      "status": "prepared",
+      "asset_type": "repo_snapshot_zip",
+      "source_local_path": "config/host_assets/template_kits/ICLR2025/Master-Template-master.zip",
+      "prepared_dir": "config/host_assets/template_kits_prepared/ICLR2025_MASTER_TEMPLATE",
+      "payload_dir": "config/host_assets/template_kits_prepared/ICLR2025_MASTER_TEMPLATE/payload",
+      "effective_root": "config/host_assets/template_kits_prepared/ICLR2025_MASTER_TEMPLATE/payload/Master-Template-master",
+      "zip_entry_count": 56,
+      "stripped_top_level_prefix": "Master-Template-master",
+      "main_tex_candidates": [
+        "iclr2019_conference.tex",
+        "iclr2020/iclr2020_conference.tex",
+        "iclr2020/math_commands.tex",
+        "iclr2021/iclr2021_conference.tex",
+        "iclr2021/math_commands.tex",
+        "iclr2025/iclr2025_conference.tex",
+        "iclr2025/math_commands.tex",
+        "iclr2026/iclr2026_conference.tex",
+        "iclr2026/math_commands.tex",
+        "math_commands.tex"
+      ],
+      "style_candidates": [
+        "fancyhdr.sty",
+        "iclr2019_conference.sty",
+        "iclr2020/fancyhdr.sty",
+        "iclr2020/iclr2020_conference.sty",
+        "iclr2020/natbib.sty",
+        "iclr2021/fancyhdr.sty",
+        "iclr2021/iclr2021_conference.sty",
+        "iclr2021/natbib.sty",
+        "iclr2025/fancyhdr.sty",
+        "iclr2025/iclr2025_conference.sty",
+        "iclr2025/natbib.sty",
+        "iclr2026/fancyhdr.sty",
+        "iclr2026/iclr2026_conference.sty",
+        "iclr2026/natbib.sty",
+        "natbib.sty"
+      ],
+      "bibliography_candidates": [
+        "iclr2019_conference.bst",
+        "iclr2020/iclr2020_conference.bst",
+        "iclr2021/iclr2021_conference.bst",
+        "iclr2025/iclr2025_conference.bst",
+        "iclr2026/iclr2026_conference.bst",
+        "iclr2019_conference.bib",
+        "iclr2020/iclr2020_conference.bib",
+        "iclr2021/iclr2021_conference.bib",
+        "iclr2025/iclr2025_conference.bib",
+        "iclr2026/iclr2026_conference.bib"
+      ],
+      "source_candidates": [],
+      "main_tex_sample": "\\documentclass{article} % For LaTeX2e\n\\usepackage{iclr2020_conference,times}\n% Optional math commands from https://github.com/goodfeli/dlbook_notation.\n\\input{math_commands.tex}\n\\usepackage{hyperref}\n\\usepackage{url}\n\\title{Formatting Instructions for ICLR 2020 / \\\\ Conference Submissions}\n% Authors must not appear in the submitted version. They should be hidden",
+      "style_sample": "% fancyhdr.sty version 3.2\n% Fancy headers and footers for LaTeX.\n% Piet van Oostrum,\n% Dept of Computer and Information Sciences, University of Utrecht,\n% Padualaan 14, P.O. Box 80.089, 3508 TB Utrecht, The Netherlands\n% Telephone: +31 30 2532180. Email: piet@cs.uu.nl\n% ========================================================================\n% LICENCE:"
+    },
+    "ICML2025_STYLE_ZIP": {
+      "asset_id": "ICML2025_STYLE_ZIP",
+      "status": "prepared",
+      "asset_type": "official_zip",
+      "source_local_path": "config/host_assets/template_kits/ICML2025/icml2025.zip",
+      "prepared_dir": "config/host_assets/template_kits_prepared/ICML2025_STYLE_ZIP",
+      "payload_dir": "config/host_assets/template_kits_prepared/ICML2025_STYLE_ZIP/payload",
+      "effective_root": "config/host_assets/template_kits_prepared/ICML2025_STYLE_ZIP/payload/icml2025",
+      "zip_entry_count": 10,
+      "stripped_top_level_prefix": "icml2025",
+      "main_tex_candidates": [
+        "example_paper.tex"
+      ],
+      "style_candidates": [
+        "algorithm.sty",
+        "algorithmic.sty",
+        "fancyhdr.sty",
+        "icml2025.sty"
+      ],
+      "bibliography_candidates": [
+        "icml2025.bst",
+        "example_paper.bib"
+      ],
+      "source_candidates": [],
+      "main_tex_sample": "%%%%%%%% ICML 2025 EXAMPLE LATEX SUBMISSION FILE %%%%%%%%%%%%%%%%%\n\\documentclass{article}\n% Recommended, but optional, packages for figures and better typesetting:\n\\usepackage{microtype}\n\\usepackage{graphicx}\n\\usepackage{subfigure}\n\\usepackage{booktabs} % for professional tables\n% hyperref makes hyperlinks in the resulting PDF.",
+      "style_sample": "% ALGORITHM STYLE -- Released 8 April 1996\n%    for LaTeX-2e\n% Copyright -- 1994 Peter Williams\n% E-mail Peter.Williams@dsto.defence.gov.au\n\\NeedsTeXFormat{LaTeX2e}\n\\ProvidesPackage{algorithm}\n\\typeout{Document Style `algorithm' - floating environment}\n\\RequirePackage{float}"
+    },
+    "NEURIPS2025_STYLE_ZIP": {
+      "asset_id": "NEURIPS2025_STYLE_ZIP",
+      "status": "prepared",
+      "asset_type": "official_zip",
+      "source_local_path": "config/host_assets/template_kits/NeurIPS2025/Styles.zip",
+      "prepared_dir": "config/host_assets/template_kits_prepared/NEURIPS2025_STYLE_ZIP",
+      "payload_dir": "config/host_assets/template_kits_prepared/NEURIPS2025_STYLE_ZIP/payload",
+      "effective_root": "config/host_assets/template_kits_prepared/NEURIPS2025_STYLE_ZIP/payload/Styles",
+      "zip_entry_count": 3,
+      "stripped_top_level_prefix": "Styles",
+      "main_tex_candidates": [
+        "neurips_2025.tex"
+      ],
+      "style_candidates": [
+        "neurips_2025.sty"
+      ],
+      "bibliography_candidates": [],
+      "source_candidates": [],
+      "main_tex_sample": "\\documentclass{article}\n% if you need to pass options to natbib, use, e.g.:\n%     \\PassOptionsToPackage{numbers, compress}{natbib}\n% before loading neurips_2025\n% The authors should use one of these tracks.\n% Before accepting by the NeurIPS conference, select one of the options below.\n% 0. \"default\" for submission\n \\usepackage{neurips_2025}",
+      "style_sample": "% partial rewrite of the LaTeX2e package for submissions to the\n% Conference on Neural Information Processing Systems (NeurIPS):\n%\n% - uses more LaTeX conventions\n% - line numbers at submission time replaced with aligned numbers from\n%   lineno package\n% - \\nipsfinalcopy replaced with [final] package option\n% - automatically loads times package for authors"
+    },
+    "ICCV2025_AUTHOR_KIT": {
+      "asset_id": "ICCV2025_AUTHOR_KIT",
+      "status": "prepared",
+      "asset_type": "official_zip",
+      "source_local_path": "config/host_assets/template_kits/ICCV2025/ICCV2025-Author-Kit-Feb.zip",
+      "prepared_dir": "config/host_assets/template_kits_prepared/ICCV2025_AUTHOR_KIT",
+      "payload_dir": "config/host_assets/template_kits_prepared/ICCV2025_AUTHOR_KIT/payload",
+      "effective_root": "config/host_assets/template_kits_prepared/ICCV2025_AUTHOR_KIT/payload",
+      "zip_entry_count": 28,
+      "stripped_top_level_prefix": null,
+      "main_tex_candidates": [
+        "ICCV2025-Author-Kit-Feb/main.tex",
+        "ICCV2025-Author-Kit-Feb/preamble.tex",
+        "ICCV2025-Author-Kit-Feb/rebuttal.tex",
+        "ICCV2025-Author-Kit-Feb/sec/0_abstract.tex",
+        "ICCV2025-Author-Kit-Feb/sec/1_intro.tex",
+        "ICCV2025-Author-Kit-Feb/sec/2_formatting.tex",
+        "ICCV2025-Author-Kit-Feb/sec/3_finalcopy.tex"
+      ],
+      "style_candidates": [
+        "ICCV2025-Author-Kit-Feb/iccv.sty"
+      ],
+      "bibliography_candidates": [
+        "ICCV2025-Author-Kit-Feb/ieeenat_fullname.bst",
+        "ICCV2025-Author-Kit-Feb/main.bib"
+      ],
+      "source_candidates": [],
+      "main_tex_sample": "% ICCV 2025 Paper Template\n\\documentclass[10pt,twocolumn,letterpaper]{article}\n%%%%%%%%% PAPER TYPE  - PLEASE UPDATE FOR FINAL VERSION\n% \\usepackage{iccv}              % To produce the CAMERA-READY version\n\\usepackage[review]{iccv}      % To produce the REVIEW version\n% \\usepackage[pagenumbers]{iccv} % To force page numbers, e.g. for an arXiv version\n% Import additional packages in the preamble file, before hyperref\n\\input{preamble}",
+      "style_sample": "% ---------------------------------------------------------------\n%\n% No guarantee is given that the format corresponds perfectly to\n% IEEE 8.5\" x 11\" Proceedings, but most features should be ok.\n%\n% ---------------------------------------------------------------\n% with LaTeX2e:\n% ============="
+    },
+    "CVPR2026_AUTHOR_KIT": {
+      "asset_id": "CVPR2026_AUTHOR_KIT",
+      "status": "prepared",
+      "asset_type": "release_archive_zip",
+      "source_local_path": "config/host_assets/template_kits/CVPR2026/author-kit-CVPR2026-v1-latex.zip",
+      "prepared_dir": "config/host_assets/template_kits_prepared/CVPR2026_AUTHOR_KIT",
+      "payload_dir": "config/host_assets/template_kits_prepared/CVPR2026_AUTHOR_KIT/payload",
+      "effective_root": "config/host_assets/template_kits_prepared/CVPR2026_AUTHOR_KIT/payload/author-kit-CVPR2026-v1-latex-",
+      "zip_entry_count": 18,
+      "stripped_top_level_prefix": "author-kit-CVPR2026-v1-latex-",
+      "main_tex_candidates": [
+        "main.tex",
+        "preamble.tex",
+        "rebuttal.tex",
+        "sec/0_abstract.tex",
+        "sec/1_intro.tex",
+        "sec/2_formatting.tex",
+        "sec/3_finalcopy.tex",
+        "sec/X_suppl.tex"
+      ],
+      "style_candidates": [
+        "cvpr.sty"
+      ],
+      "bibliography_candidates": [
+        "ieeenat_fullname.bst",
+        "main.bib"
+      ],
+      "source_candidates": [],
+      "main_tex_sample": "% CVPR 2026 Paper Template; see https://github.com/cvpr-org/author-kit\n\\documentclass[10pt,twocolumn,letterpaper]{article}\n%%%%%%%%% PAPER TYPE  - PLEASE UPDATE FOR FINAL VERSION\n% \\usepackage{cvpr}              % To produce the CAMERA-READY version\n\\usepackage[review]{cvpr}      % To produce the REVIEW version\n% \\usepackage[pagenumbers]{cvpr} % To force page numbers, e.g. for an arXiv version\n% Import additional packages in the preamble file, before hyperref\n\\input{preamble}",
+      "style_sample": "% ---------------------------------------------------------------\n%\n% No guarantee is given that the format corresponds perfectly to\n% IEEE 8.5\" x 11\" Proceedings, but most features should be ok.\n%\n% ---------------------------------------------------------------\n% with LaTeX2e:\n% ============="
+    },
+    "ECCV2026_TEMPLATE": {
+      "asset_id": "ECCV2026_TEMPLATE",
+      "status": "prepared",
+      "asset_type": "release_archive_zip",
+      "source_local_path": "config/host_assets/template_kits/ECCV2026/paper-template-Latest.zip",
+      "prepared_dir": "config/host_assets/template_kits_prepared/ECCV2026_TEMPLATE",
+      "payload_dir": "config/host_assets/template_kits_prepared/ECCV2026_TEMPLATE/payload",
+      "effective_root": "config/host_assets/template_kits_prepared/ECCV2026_TEMPLATE/payload/paper-template-Latest",
+      "zip_entry_count": 15,
+      "stripped_top_level_prefix": "paper-template-Latest",
+      "main_tex_candidates": [
+        "main.tex"
+      ],
+      "style_candidates": [
+        "eccv.sty",
+        "eccvabbrv.sty",
+        "llncs.cls"
+      ],
+      "bibliography_candidates": [
+        "splncs04.bst",
+        "main.bib"
+      ],
+      "source_candidates": [],
+      "main_tex_sample": "\\documentclass[runningheads]{llncs}\n% ---------------------------------------------------------------\n% Include basic ECCV package\n% TODO REVIEW: Insert your submission number below by replacing '*****'\n% TODO FINAL: Comment out the following line for the camera-ready version\n\\usepackage[review,year=2026,ID=*****]{eccv}\n% TODO FINAL: Un-comment the following line for the camera-ready version\n%\\usepackage{eccv}",
+      "style_sample": "% ---------------------------------------------------------------\n%\n% Formatting Package for ECCV Submissions\n%\n% initially created for ECCV 2024\n% by Stefan Roth\n%\n% based on previous ECCV templates:"
+    },
+    "ACL_STYLE_FAMILY": {
+      "asset_id": "ACL_STYLE_FAMILY",
+      "status": "prepared",
+      "asset_type": "repo_snapshot_zip",
+      "source_local_path": "config/host_assets/template_kits/ACL_STYLE_FAMILY/acl-style-files-master.zip",
+      "prepared_dir": "config/host_assets/template_kits_prepared/ACL_STYLE_FAMILY",
+      "payload_dir": "config/host_assets/template_kits_prepared/ACL_STYLE_FAMILY/payload",
+      "effective_root": "config/host_assets/template_kits_prepared/ACL_STYLE_FAMILY/payload/acl-style-files-master",
+      "zip_entry_count": 9,
+      "stripped_top_level_prefix": "acl-style-files-master",
+      "main_tex_candidates": [
+        "acl_latex.tex",
+        "acl_lualatex.tex"
+      ],
+      "style_candidates": [
+        "acl.sty"
+      ],
+      "bibliography_candidates": [
+        "acl_natbib.bst",
+        "custom.bib"
+      ],
+      "source_candidates": [],
+      "main_tex_sample": "\\documentclass[11pt]{article}\n% Change \"review\" to \"final\" to generate the final (sometimes called camera-ready) version.\n% Change to \"preprint\" to generate a non-anonymous version with page numbers.\n\\usepackage[review]{acl}\n% Standard package includes\n\\usepackage{times}\n\\usepackage{latexsym}\n% For proper rendering and hyphenation of words containing Latin characters (including in bib files)",
+      "style_sample": "% This is the LaTex style file for *ACL.\n% The official sources can be found at\n%\n%     https://github.com/acl-org/acl-style-files/\n%\n% This package is activated by adding\n%\n%    \\usepackage{acl}"
+    },
+    "ACM_ACMART": {
+      "asset_id": "ACM_ACMART",
+      "status": "prepared",
+      "asset_type": "ctan_package_zip",
+      "source_local_path": "config/host_assets/template_kits/ACM_ACMART/acmart.zip",
+      "prepared_dir": "config/host_assets/template_kits_prepared/ACM_ACMART",
+      "payload_dir": "config/host_assets/template_kits_prepared/ACM_ACMART/payload",
+      "effective_root": "config/host_assets/template_kits_prepared/ACM_ACMART/payload/acmart",
+      "zip_entry_count": 41,
+      "stripped_top_level_prefix": "acmart",
+      "main_tex_candidates": [],
+      "style_candidates": [],
+      "bibliography_candidates": [
+        "ACM-Reference-Format.bst",
+        "acmart.bib",
+        "samples/abbrev.bib",
+        "samples/sample-base.bib",
+        "samples/software.bib"
+      ],
+      "source_candidates": [
+        "acmart.dtx",
+        "samples/acmengage.dtx",
+        "samples/samples.dtx",
+        "acmart.ins",
+        "samples/samples.ins"
+      ],
+      "source_sample": null
+    }
+  }
+}

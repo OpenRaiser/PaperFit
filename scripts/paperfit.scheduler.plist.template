@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.paperfit.scheduler</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__SCRIPT_PATH__</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO_ROOT__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PAPERFIT_AUTOMATION_HOOK</key>
+    <string>__AUTOMATION_HOOK__</string>
+  </dict>
+
+  <key>StartInterval</key>
+  <integer>__START_INTERVAL__</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__STDOUT_PATH__</string>
+
+  <key>StandardErrorPath</key>
+  <string>__STDERR_PATH__</string>
+</dict>
+</plist>

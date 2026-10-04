@@ -1,0 +1,98 @@
+{
+  "schema_version": "1.0",
+  "canonical_assets": {
+    "commands_dir": ".claude/commands",
+    "agents_dir": "agents",
+    "skills_dir": "skills",
+    "rules_file": "CLAUDE.md",
+    "config_dir": "config"
+  },
+  "targets": {
+    "claude": {
+      "home_env_var": "HOME",
+      "root_suffix": ".claude",
+      "copies": [
+        {
+          "source": ".claude/commands",
+          "type": "directory",
+          "target": "commands"
+        },
+        {
+          "source": "agents",
+          "type": "directory",
+          "target": "agents"
+        },
+        {
+          "source": "skills",
+          "type": "directory",
+          "target": "skills"
+        },
+        {
+          "source": "CLAUDE.md",
+          "type": "file",
+          "target": "rules/paperfit.md"
+        }
+      ]
+    },
+    "codex": {
+      "home_env_var": "HOME",
+      "root_suffix": ".codex",
+      "copies": [
+        {
+          "source": "skills",
+          "type": "directory",
+          "target": "skills/paperfit"
+        },
+        {
+          "source": "agents",
+          "type": "directory",
+          "target": "skills/paperfit/agents"
+        },
+        {
+          "source": "config/host_assets/codex/AGENTS.md",
+          "type": "file",
+          "target": "AGENTS.md"
+        },
+        {
+          "source": "config/host_assets/codex/agents/paperfit.toml",
+          "type": "file",
+          "target": "agents/paperfit.toml"
+        }
+      ]
+    },
+    "cursor": {
+      "home_env_var": "HOME",
+      "root_suffix": ".cursor",
+      "copies": [
+        {
+          "source": "skills",
+          "type": "directory",
+          "target": "skills/paperfit"
+        },
+        {
+          "source": "agents",
+          "type": "directory",
+          "target": "skills/paperfit/agents"
+        }
+      ],
+      "project_copies": [
+        {
+          "source": "config/host_assets/cursor/paperfit.mdc",
+          "type": "file",
+          "target": ".cursor/rules/paperfit.mdc"
+        }
+      ]
+    }
+  },
+  "shared_copy": {
+    "root_env_var": "HOME",
+    "root_suffix": ".paperfit",
+    "copies": [
+      {
+        "source": "config",
+        "type": "directory",
+        "target": "config"
+      }
+    ]
+  }
+}

@@ -1,0 +1,50 @@
+# Local runtime state and generated artifacts
+.git/
+.venv/
+node_modules/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.pyo
+.DS_Store
+logs/
+run/
+page_images/
+data/state.json
+data/logs/
+data/pages/
+data/evidence/
+data/backups/
+data/archives/
+data/benchmarks/
+internal/
+
+# Personal host configuration
+.claude/settings.local.json
+.claude/memory/
+.claude/projects/
+*.pem
+*.key
+*.crt
+.env
+.env.*
+secrets/
+credentials/
+
+# Temporary and backup files
+*.bak
+*.tmp
+*.temp
+*.partial_failed_*
+tmp/
+temp/
+
+# Keep datasets and generated research artifacts local.
+/regression_runs/
+/experiments/
+/visualmr-reference/
+/benchmark_cases/
+/examples/
+/baseline_result/
+/results/
+*.bundle

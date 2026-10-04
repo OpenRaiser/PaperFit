@@ -1,0 +1,14 @@
+{
+  "asset_id": "AAAI2026_OVERLEAF_MIRROR",
+  "status": "prepared",
+  "asset_type": "public_mirror_html",
+  "source_local_path": "config/host_assets/template_kits/AAAI2026/overleaf_template_page.html",
+  "prepared_dir": "config/host_assets/template_kits_prepared/AAAI2026_OVERLEAF_MIRROR",
+  "payload_dir": "config/host_assets/template_kits_prepared/AAAI2026_OVERLEAF_MIRROR/payload",
+  "copied_file": "config/host_assets/template_kits_prepared/AAAI2026_OVERLEAF_MIRROR/payload/overleaf_template_page.html",
+  "main_tex_candidates": [],
+  "style_candidates": [],
+  "bibliography_candidates": [],
+  "source_candidates": [],
+  "file_sample": null
+}

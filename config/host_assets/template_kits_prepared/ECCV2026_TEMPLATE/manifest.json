@@ -1,0 +1,26 @@
+{
+  "asset_id": "ECCV2026_TEMPLATE",
+  "status": "prepared",
+  "asset_type": "release_archive_zip",
+  "source_local_path": "config/host_assets/template_kits/ECCV2026/paper-template-Latest.zip",
+  "prepared_dir": "config/host_assets/template_kits_prepared/ECCV2026_TEMPLATE",
+  "payload_dir": "config/host_assets/template_kits_prepared/ECCV2026_TEMPLATE/payload",
+  "effective_root": "config/host_assets/template_kits_prepared/ECCV2026_TEMPLATE/payload/paper-template-Latest",
+  "zip_entry_count": 15,
+  "stripped_top_level_prefix": "paper-template-Latest",
+  "main_tex_candidates": [
+    "main.tex"
+  ],
+  "style_candidates": [
+    "eccv.sty",
+    "eccvabbrv.sty",
+    "llncs.cls"
+  ],
+  "bibliography_candidates": [
+    "splncs04.bst",
+    "main.bib"
+  ],
+  "source_candidates": [],
+  "main_tex_sample": "\\documentclass[runningheads]{llncs}\n% ---------------------------------------------------------------\n% Include basic ECCV package\n% TODO REVIEW: Insert your submission number below by replacing '*****'\n% TODO FINAL: Comment out the following line for the camera-ready version\n\\usepackage[review,year=2026,ID=*****]{eccv}\n% TODO FINAL: Un-comment the following line for the camera-ready version\n%\\usepackage{eccv}",
+  "style_sample": "% ---------------------------------------------------------------\n%\n% Formatting Package for ECCV Submissions\n%\n% initially created for ECCV 2024\n% by Stefan Roth\n%\n% based on previous ECCV templates:"
+}

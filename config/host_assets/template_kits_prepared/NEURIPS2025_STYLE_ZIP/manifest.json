@@ -1,0 +1,21 @@
+{
+  "asset_id": "NEURIPS2025_STYLE_ZIP",
+  "status": "prepared",
+  "asset_type": "official_zip",
+  "source_local_path": "config/host_assets/template_kits/NeurIPS2025/Styles.zip",
+  "prepared_dir": "config/host_assets/template_kits_prepared/NEURIPS2025_STYLE_ZIP",
+  "payload_dir": "config/host_assets/template_kits_prepared/NEURIPS2025_STYLE_ZIP/payload",
+  "effective_root": "config/host_assets/template_kits_prepared/NEURIPS2025_STYLE_ZIP/payload/Styles",
+  "zip_entry_count": 3,
+  "stripped_top_level_prefix": "Styles",
+  "main_tex_candidates": [
+    "neurips_2025.tex"
+  ],
+  "style_candidates": [
+    "neurips_2025.sty"
+  ],
+  "bibliography_candidates": [],
+  "source_candidates": [],
+  "main_tex_sample": "\\documentclass{article}\n% if you need to pass options to natbib, use, e.g.:\n%     \\PassOptionsToPackage{numbers, compress}{natbib}\n% before loading neurips_2025\n% The authors should use one of these tracks.\n% Before accepting by the NeurIPS conference, select one of the options below.\n% 0. \"default\" for submission\n \\usepackage{neurips_2025}",
+  "style_sample": "% partial rewrite of the LaTeX2e package for submissions to the\n% Conference on Neural Information Processing Systems (NeurIPS):\n%\n% - uses more LaTeX conventions\n% - line numbers at submission time replaced with aligned numbers from\n%   lineno package\n% - \\nipsfinalcopy replaced with [final] package option\n% - automatically loads times package for authors"
+}

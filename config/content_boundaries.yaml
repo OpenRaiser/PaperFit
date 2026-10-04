@@ -1,0 +1,133 @@
+# Content Boundaries Configuration for PaperFit VTO
+# Used by content_integrity_check.py to validate critical sections presence and completeness
+
+version: '1.0'
+updated_at: '2026-04-11'
+
+# Critical sections that must be present and complete in every VTO iteration
+critical_sections:
+  - label: "Abstract"
+    start_pattern: "\\begin{abstract}"
+    end_pattern: "\\end{abstract}"
+    min_sentences: 3
+    min_words: 100
+    content_type: "C5"
+    protection_level: "strict"
+    notes: "Abstract must remain完整; no sentence deletions allowed"
+
+  - label: "Conclusions"
+    start_pattern: "\\section{Conclusion}"
+    end_pattern: null  # Until next \\section or \\bibliography or \\end{document}
+    min_sentences: 2
+    min_words: 50
+    content_type: "C5"
+    protection_level: "strict"
+    notes: "Conclusions must preserve all substantive claims and future work statements"
+
+  - label: "Introduction"
+    start_pattern: "\\section{Introduction}"
+    end_pattern: null
+    min_sentences: 5
+    min_words: 150
+    content_type: "C5"
+    protection_level: "standard"
+    notes: "Introduction may undergo minor rephrasing but core contributions must remain"
+
+# Content classification rules for pre-repair boundary detection
+content_classification:
+  C0:
+    name: "排版控制"
+    examples:
+      - "\\vspace{-2mm}"
+      - "\\hspace{1em}"
+      - "\\begin{table}[htbp]"
+      - "\\includegraphics[width=\\linewidth]{fig.pdf}"
+    safe_to_modify: true
+    requires_hash: false
+
+  C1:
+    name: "元数据"
+    examples:
+      - "\\title{Paper Title}"
+      - "\\author{Author Name}"
+      - "\\keywords{keyword1, keyword2}"
+    safe_to_modify: "format_only"
+    requires_hash: false
+    notes: "Format can change (punctuation, capitalization) but content cannot"
+
+  C2:
+    name: "引用键"
+    examples:
+      - "\\cite{smith2023deep}"
+      - "\\label{fig:result}"
+      - "\\ref{tab:ablation}"
+    safe_to_modify: false
+    requires_hash: true
+    notes: "Citation keys must remain exactly as-is"
+
+  C3:
+    name: "公式与符号"
+    examples:
+      - "$\\alpha$"
+      - "\\begin{equation}..."
+      - "$x \\in \\mathbb{R}^n$"
+    safe_to_modify: false
+    requires_hash: true
+    notes: "Formula structure and variable definitions cannot change"
+
+  C4:
+    name: "数据与结果"
+    examples:
+      - "accuracy=95.2%"
+      - "p<0.001"
+      - Table cells with numerical data
+    safe_to_modify: false
+    requires_hash: true
+    notes: "Experimental data and statistical results are absolutely protected"
+
+  C5:
+    name: "学术论述"
+    examples:
+      - Full sentences in body paragraphs
+      - Substantive claims in Discussion/Conclusions
+      - Contributions statements
+    safe_to_modify: false
+    requires_hash: true
+    notes: "Core protection target - substantive academic content"
+
+  C6:
+    name: "图表标题"
+    examples:
+      - "\\caption{Performance comparison of...}"
+    safe_to_modify: "format_only"
+    requires_hash: true
+    notes: "Format can change (punctuation) but description content cannot"
+
+  C7:
+    name: "参考文献条目"
+    examples:
+      - "\\bibitem{smith2023deep}..."
+      - ".bib file entries"
+    safe_to_modify: false
+    requires_hash: true
+    notes: "Bibliography entries cannot be modified"
+
+# Violation level thresholds
+violation_thresholds:
+  level_1:
+    max_word_change_percent: 5
+    action: "log_only"
+    blocks_done: false
+    notes: "Minor changes logged but do not block DONE"
+
+  level_2:
+    max_word_change_percent: 15
+    action: "manual_review"
+    blocks_done: true
+    notes: "5-15% changes require manual confirmation before continuing"
+
+  level_3:
+    max_word_change_percent: null  # Any change >15% OR critical sentence deletion
+    action: "auto_rollback"
+    blocks_done: true
+    notes: ">15% changes or key sentence deletions trigger automatic rollback"

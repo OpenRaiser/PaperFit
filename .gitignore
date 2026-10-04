@@ -1,0 +1,154 @@
+# PaperFit .gitignore
+# 排除所有本地数据、编译产物和个人配置
+
+# ============ 运行时数据 ============
+data/state.json
+data/compile.log
+data/pages/
+data/evidence/
+data/logs/
+run/
+logs/
+output/playwright/
+output/repair_runs/
+.playwright-cli/
+
+# ============ 备份与归档 ============
+data/backups/
+data/archives/
+
+# ============ Benchmark 私有数据 ============
+# benchmarks 目录包含私有测试用例，整个目录排除
+data/benchmarks/
+
+# ============ LaTeX 编译产物 ============
+*.aux
+*.log
+*.out
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.toc
+*.lof
+*.lot
+*.nav
+*.snm
+*.synctex.gz
+*.xdv
+*.pdf
+
+# ============ macOS 系统文件 ============
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ============ IDE 与编辑器 ============
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ============ Python ============
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+venv/
+env/
+.env
+*.egg-info/
+dist/
+build/
+
+# ============ Node.js ============
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# ============ Claude Code 本地配置 ============
+.claude/settings.local.json
+.claude/memory/
+.claude/projects/
+
+# ============ 本地 Codex/PaperFit 工作区内容 ============
+# Personal host instructions and local GUI drafts should not be published.
+AGENTS.md
+apps/
+
+# Local planning/progress documents generated during harness iteration.
+docs/PAPERFIT_AGENT_V1_MAINLINE_*.md
+docs/PAPERFIT_GUI_ITERATION_PLAN.md
+docs/PAPERFIT_HARNESS_REDESIGN_PLAN_*.md
+docs/PAPERFIT_MULTI_ROUND_APPROVED_REPAIR_POLICY_*.md
+docs/PAPERFIT_READER_MUTATOR_BOUNDARY_*.md
+docs/PAPERFIT_V1_PROGRESS_VISUAL_*.md
+docs/PHASE0_BASELINE_*.md
+docs/RUNTIME_BENCHMARK_EXECUTION_STATUS_*.md
+docs/RUNTIME_BENCHMARK_EXPANSION_PLAN_*.md
+docs/commands-reference/run-agent.md
+docs/commands-reference/status-view.md
+
+# ============ 敏感信息 ============
+*.pem
+*.key
+*.crt
+.env
+.env.local
+.env.*.local
+secrets/
+credentials/
+.venv/
+internal/
+
+# ============ 临时文件 ============
+*.tmp
+*.bak
+*.temp
+*.partial_failed_*
+tmp/
+temp/
+
+# ============ 诊断报告（可能包含敏感数据）============
+diagnostic_report*.md
+page_images/page_001.png
+page_images/page_002.png
+page_images/page_003.png
+page_images/page_004.png
+page_images/page_005.png
+page_images/page_006.png
+page_images/page_007.png
+page_images/page_008.png
+page_images/page_009.png
+page_images/page_010.png
+page_images/page_011.png
+page_images/page_012.png
+page_images/page_013.png
+page_images/page_014.png
+page_images/page_015.png
+page_images/page_016.png
+page_images/page_017.png
+page_images/page_018.png
+scripts/test_content_integrity_check.py
+scripts/test_extract_crossrefs.py
+scripts/test_paperfit_command.py
+scripts/test_template_migrate.py
+scripts/test_template_migration_priority.py
+
+# VLM judge credentials (never commit real keys)
+evaluator/configs/vlm_evaluation.env
+evaluator/configs/*local*.env
+
+_tmp_*.py
+
+# Keep datasets and generated research artifacts local.
+/regression_runs/
+/experiments/
+/visualmr-reference/
+/benchmark_cases/
+/examples/
+/baseline_result/
+/results/
+*.bundle

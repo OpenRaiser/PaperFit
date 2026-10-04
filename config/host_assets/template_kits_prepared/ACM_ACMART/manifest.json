@@ -1,0 +1,28 @@
+{
+  "asset_id": "ACM_ACMART",
+  "status": "prepared",
+  "asset_type": "ctan_package_zip",
+  "source_local_path": "config/host_assets/template_kits/ACM_ACMART/acmart.zip",
+  "prepared_dir": "config/host_assets/template_kits_prepared/ACM_ACMART",
+  "payload_dir": "config/host_assets/template_kits_prepared/ACM_ACMART/payload",
+  "effective_root": "config/host_assets/template_kits_prepared/ACM_ACMART/payload/acmart",
+  "zip_entry_count": 41,
+  "stripped_top_level_prefix": "acmart",
+  "main_tex_candidates": [],
+  "style_candidates": [],
+  "bibliography_candidates": [
+    "ACM-Reference-Format.bst",
+    "acmart.bib",
+    "samples/abbrev.bib",
+    "samples/sample-base.bib",
+    "samples/software.bib"
+  ],
+  "source_candidates": [
+    "acmart.dtx",
+    "samples/acmengage.dtx",
+    "samples/samples.dtx",
+    "acmart.ins",
+    "samples/samples.ins"
+  ],
+  "source_sample": null
+}

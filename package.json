@@ -1,0 +1,60 @@
+{
+  "name": "paperfit-cli",
+  "version": "1.0.6",
+  "description": "Visual Typesetting Optimization Agent System for LaTeX papers",
+  "main": "bin/paperfit.js",
+  "bin": {
+    "paperfit": "bin/paperfit.js",
+    "paperfit-install": "scripts/install-host-global.js"
+  },
+  "scripts": {
+    "verify": "npm run validate:config && npm run check:node && npm run check:py-warnings",
+    "validate:config": ".venv/bin/python scripts/config_validator.py",
+    "check:node": "node --check bin/paperfit.js",
+    "check:py-warnings": ".venv/bin/python -W error scripts/check_python_warnings.py",
+    "postinstall": "node scripts/postinstall.js",
+    "upgrade": "bash install.sh --update --local",
+    "upgrade:registry": "bash install.sh --update"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    ".agents/",
+    "agents/",
+    "skills/",
+    "plugins/",
+    "config/",
+    ".claude/",
+    ".claude-plugin/",
+    "CLAUDE.md",
+    "README.md",
+    "LICENSE",
+    "CONTRIBUTING.md",
+    "requirements.txt",
+    "install.sh"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OpenRaiser/PaperFit.git"
+  },
+  "keywords": [
+    "latex",
+    "typesetting",
+    "visual-optimization",
+    "claude-code",
+    "agent-system"
+  ],
+  "author": "PaperFit Team",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "commander": "^11.1.0",
+    "ora": "^7.0.1"
+  },
+  "optionalDependencies": {
+    "fsevents": "^2.3.3"
+  }
+}
