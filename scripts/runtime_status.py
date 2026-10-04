@@ -432,7 +432,7 @@ def build_runtime_status(
     }
     if result_path is not None:
         try:
-            status["run_result_path"] = str(result_path.resolve().relative_to(root))
+            status["run_result_path"] = result_path.resolve().relative_to(root).as_posix()
         except ValueError:
-            status["run_result_path"] = str(result_path)
+            status["run_result_path"] = Path(result_path).as_posix()
     return status

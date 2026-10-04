@@ -40,6 +40,32 @@ def _decode_output(blob: bytes | str | None) -> str:
     return blob.decode("utf-8", errors="replace")
 
 
+def terminate_process_tree(process: subprocess.Popen) -> None:
+    """Cross-platform termination for a timed-out subprocess and its children."""
+    if os.name == "nt":
+        # os.killpg does not exist on Windows; taskkill /T walks the child tree.
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+            capture_output=True,
+        )
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (ProcessLookupError, AttributeError):
+        process.terminate()
+
+
+def kill_process_tree(process: subprocess.Popen) -> None:
+    """Force-kill variant of terminate_process_tree."""
+    if os.name == "nt":
+        terminate_process_tree(process)
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, AttributeError):
+        process.kill()
+
+
 def run_command(
     cmd: List[str],
     *,
@@ -59,17 +85,11 @@ def run_command(
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        terminate_process_tree(process)
         try:
             stdout, stderr = process.communicate(timeout=5)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            kill_process_tree(process)
             stdout, stderr = process.communicate()
 
     stdout_text = _decode_output(stdout)

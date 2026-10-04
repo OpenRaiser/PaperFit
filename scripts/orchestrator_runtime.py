@@ -555,7 +555,7 @@ class OrchestratorRuntime:
 
         run_id = task_spec.task_id or datetime.now().strftime("pf_%Y%m%d_%H%M%S")
         project_root = Path(task_spec.project_root).resolve()
-        event_log = str(Path("data") / "events" / f"{run_id}.ndjson")
+        event_log = (Path("data") / "events" / f"{run_id}.ndjson").as_posix()
         output_path = output_path or str(Path("data") / "run_result.json")
 
         cwd_before = Path.cwd()
@@ -611,7 +611,7 @@ class OrchestratorRuntime:
                 max_rounds=task_spec.max_rounds,
                 page_budget_scope=task_spec.page_budget_scope,
             )
-            self.set_artifact("task_spec", str(task_spec_path))
+            self.set_artifact("task_spec", task_spec_path.as_posix())
 
             runtime_state = VISUAL_ONLY_STATE_MACHINE.transition(runtime_state, "start_observe")
             emit_runtime_event(
@@ -740,7 +740,7 @@ class OrchestratorRuntime:
 
         run_id = task_spec.task_id or datetime.now().strftime("pf_%Y%m%d_%H%M%S")
         project_root = Path(task_spec.project_root).resolve()
-        event_log = str(Path("data") / "events" / f"{run_id}.ndjson")
+        event_log = (Path("data") / "events" / f"{run_id}.ndjson").as_posix()
         output_path = output_path or str(Path("data") / "run_result.json")
 
         cwd_before = Path.cwd()
@@ -796,7 +796,7 @@ class OrchestratorRuntime:
                 page_budget_scope=task_spec.page_budget_scope,
             )
             self._restore_retryable_post_repair_hard_guard(retryable_post_repair_hard_guard)
-            self.set_artifact("task_spec", str(task_spec_path))
+            self.set_artifact("task_spec", task_spec_path.as_posix())
 
             runtime_actions: Dict[str, Any] = {}
             round_artifact_lineage: List[Dict[str, Any]] = []

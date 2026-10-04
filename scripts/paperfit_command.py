@@ -61,6 +61,8 @@ def _decode_output(blob: bytes | str | None) -> str:
 
 
 def _run(cmd: List[str], *, cwd: Path, timeout: Optional[int] = None) -> subprocess.CompletedProcess[str]:
+    from runtime_actions import kill_process_tree, terminate_process_tree
+
     process = subprocess.Popen(
         cmd,
         cwd=str(cwd),
@@ -74,17 +76,11 @@ def _run(cmd: List[str], *, cwd: Path, timeout: Optional[int] = None) -> subproc
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        terminate_process_tree(process)
         try:
             stdout, stderr = process.communicate(timeout=5)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            kill_process_tree(process)
             stdout, stderr = process.communicate()
 
     stdout_text = _decode_output(stdout)

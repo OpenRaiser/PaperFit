@@ -32,9 +32,9 @@ def _file_entry(path: Optional[Path], project_root: Path) -> Dict[str, Any]:
     if path is None:
         return {"exists": False, "path": None}
     try:
-        display_path = str(path.resolve().relative_to(project_root.resolve()))
+        display_path = path.resolve().relative_to(project_root.resolve()).as_posix()
     except ValueError:
-        display_path = str(path)
+        display_path = path.resolve().as_posix()
     if not path.is_file():
         return {"exists": False, "path": display_path}
     stat = path.stat()

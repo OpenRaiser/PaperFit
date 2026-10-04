@@ -38,8 +38,43 @@ function packageRoot() {
 }
 
 function pythonRunner() {
-  const venvPython = path.join(packageRoot(), '.venv', 'bin', 'python');
-  return fs.existsSync(venvPython) ? venvPython : 'python3';
+  const venvRoot = path.join(packageRoot(), '.venv');
+  const candidates = [
+    path.join(venvRoot, 'bin', 'python'), // macOS / Linux venv layout
+    path.join(venvRoot, 'Scripts', 'python.exe'), // Windows venv layout
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return process.platform === 'win32' ? 'python' : 'python3';
+}
+
+const isWindows = process.platform === 'win32';
+
+function probeCommand(command) {
+  try {
+    execSync(command, { stdio: 'ignore', timeout: 5000 });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function probePython() {
+  const runner = pythonRunner();
+  const file = path.isAbsolute(runner) ? runner : isWindows ? 'python' : 'python3';
+  const result = spawnSync(file, ['--version'], { stdio: 'ignore', timeout: 5000 });
+  return result.status === 0;
+}
+
+function commandExists(command) {
+  const probe = isWindows
+    ? { file: 'where', args: [command] }
+    : { file: 'which', args: [command] };
+  const result = spawnSync(probe.file, probe.args, { stdio: 'ignore' });
+  return result.status === 0;
 }
 
 function installTargetsManifestPath() {
@@ -748,28 +783,29 @@ program
     const scriptsDir = path.join(__dirname, '..', 'scripts');
 
     // Check if Python is available
-    try {
-      execSync('python3 --version', { stdio: 'ignore' });
+    if (probePython()) {
       console.log('✅ Python 3 detected');
-    } catch (e) {
+    } else {
       console.log('❌ Python 3 not found. Please install Python 3.8+');
       process.exit(1);
     }
 
     // Check if poppler is available (for pdf2image)
-    try {
-      execSync('which pdfinfo', { stdio: 'ignore' });
+    if (commandExists('pdfinfo')) {
       console.log('✅ Poppler utilities detected');
-    } catch (e) {
-      console.log('⚠️  Poppler not found. Install with: brew install poppler');
+    } else {
+      console.log(
+        isWindows
+          ? '⚠️  Poppler not found. Install with: choco install poppler (or scoop install poppler)'
+          : '⚠️  Poppler not found. Install with: brew install poppler',
+      );
     }
 
     // Check if latexmk is available
-    try {
-      execSync('which latexmk', { stdio: 'ignore' });
+    if (commandExists('latexmk')) {
       console.log('✅ latexmk detected');
-    } catch (e) {
-      console.log('⚠️  latexmk not found. Install MacTeX or TeX Live');
+    } else {
+      console.log('⚠️  latexmk not found. Install TeX Live (or MiKTeX on Windows)');
     }
 
     console.log('\n✅ PaperFit initialized successfully!');
@@ -870,13 +906,13 @@ program
     }
 
     const checks = [
-      { name: 'Python 3', command: 'python3 --version' },
-      { name: 'pip3', command: 'pip3 --version' },
-      { name: 'latexmk', command: 'which latexmk' },
-      { name: 'pdfinfo (poppler)', command: 'which pdfinfo' },
+      { name: 'Python 3', run: () => probePython() },
+      { name: isWindows ? 'pip' : 'pip3', run: () => probeCommand(isWindows ? 'pip --version' : 'pip3 --version') },
+      { name: 'latexmk', run: () => commandExists('latexmk') },
+      { name: 'pdfinfo (poppler)', run: () => commandExists('pdfinfo') },
     ];
     if (resolvedTargets.includes('claude')) {
-      checks.push({ name: 'Claude Code CLI', command: 'claude --version' });
+      checks.push({ name: 'Claude Code CLI', run: () => probeCommand('claude --version') });
     }
     const projectRoot = resolveProjectRoot(options.project);
 
@@ -886,11 +922,10 @@ program
     console.log(`Targets: ${resolvedTargets.join(', ')}\n`);
     console.log('Dependencies');
     checks.forEach(check => {
-      try {
-        execSync(check.command, { stdio: 'ignore', timeout: 5000 });
+      if (check.run()) {
         console.log(`✅ ${check.name}`);
         passed++;
-      } catch (e) {
+      } else {
         console.log(`❌ ${check.name}`);
         failed++;
       }
@@ -1066,8 +1101,12 @@ program
 
     if (failed > 0) {
       console.log('\n💡 Install missing dependencies:');
-      console.log('   brew install poppler mactex');
-      console.log('   pip3 install -r requirements.txt');
+      if (isWindows) {
+        console.log('   choco install poppler miktex   (or: scoop install poppler; scoop install latex)');
+      } else {
+        console.log('   brew install poppler mactex');
+      }
+      console.log(`   ${isWindows ? 'pip' : 'pip3'} install -r requirements.txt`);
       console.log(`   paperfit install-global --target ${options.target} --force`);
     }
   });

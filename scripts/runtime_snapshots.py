@@ -24,10 +24,11 @@ def _sha256_file(path: Path) -> str:
 
 
 def _project_relative(project_root: Path, path: Path) -> str:
+    # 契约路径统一用正斜杠，保证 state/manifest JSON 跨平台一致。
     try:
-        return str(path.resolve().relative_to(project_root.resolve()))
+        return path.resolve().relative_to(project_root.resolve()).as_posix()
     except ValueError:
-        return str(path.resolve())
+        return path.resolve().as_posix()
 
 
 def _read_text(path: Path) -> str:
