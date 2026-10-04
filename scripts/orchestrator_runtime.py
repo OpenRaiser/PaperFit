@@ -806,6 +806,7 @@ class OrchestratorRuntime:
 
             runtime_actions: Dict[str, Any] = {}
             round_artifact_lineage: List[Dict[str, Any]] = []
+            round_metrics: List[Dict[str, Any]] = []
             repair_round_count = 0
 
             def lineage_actions(*names: str) -> Dict[str, Any]:
@@ -1066,6 +1067,14 @@ class OrchestratorRuntime:
                         break
 
                     repair_round_count += 1
+                    before_rule_summary = (state.get("rule_report") or {}).get("summary") or {}
+                    round_metrics.append(
+                        {
+                            "round": repair_round_count,
+                            "overfull_hbox_total_before": int(before_rule_summary.get("overfull_hbox_total") or 0),
+                            "defects_remaining_before": int((state.get("defect_summary") or {}).get("remaining") or 0),
+                        }
+                    )
                     repair_state = self.execute_repair_plan(
                         main_tex=task_spec.main_tex,
                         output_path="data/repair_execution_report.json",
@@ -1229,6 +1238,14 @@ class OrchestratorRuntime:
                         emit_event=emit_runtime_event,
                         runtime_actions=runtime_actions,
                     )
+                    if round_metrics:
+                        after_rule_summary = (state.get("rule_report") or {}).get("summary") or {}
+                        round_metrics[-1]["overfull_hbox_total_after"] = int(
+                            after_rule_summary.get("overfull_hbox_total") or 0
+                        )
+                        round_metrics[-1]["defects_remaining_after"] = int(
+                            (state.get("defect_summary") or {}).get("remaining") or 0
+                        )
                     runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "artifacts_observed")
                     emit_runtime_event(
                         "phase_completed",
@@ -1389,6 +1406,7 @@ class OrchestratorRuntime:
                 round_artifact_lineage=round_artifact_lineage,
                 failure=failure,
                 environment=collect_runtime_environment(),
+                round_metrics=round_metrics,
             )
             result_payload = result.to_dict()
             terminal_event = "task_completed" if status != "blocked" else "task_blocked"
