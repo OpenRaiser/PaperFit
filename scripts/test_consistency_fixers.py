@@ -108,6 +108,85 @@ class ConsistencyFixerTests(unittest.TestCase):
             )
             self.assertEqual(tex.read_text(encoding="utf-8"), tex_plain)
 
+    def test_style_policy_normalizes_table_fonts(self) -> None:
+        tex_fonts = (
+            "\\documentclass{article}\n"
+            "\\begin{document}\n"
+            "\\begin{table}[h]\n"
+            "\\scriptsize\n"
+            "\\begin{tabular}{ll}\na & b \\\\\n\\end{tabular}\n"
+            "\\end{table}\n"
+            "\\begin{table}[h]\n"
+            "\\footnotesize\n"
+            "\\begin{tabular}{ll}\nc & d \\\\\n\\end{tabular}\n"
+            "\\end{table}\n"
+            "\\begin{table}[h]\n"
+            "\\begin{tabular}{ll}\ne & f \\\\\n\\end{tabular}\n"
+            "\\end{table}\n"
+            "\\end{document}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tex = root / "main.tex"
+            tex.write_text(tex_fonts, encoding="utf-8")
+            plan = root / "plan.json"
+            plan.write_text(
+                json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "defect_family": "C1",
+                                "style_policy": {"table_font": "small"},
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report = execute_repair_plan(str(plan), str(tex), str(root / "out.json"))
+            updated = tex.read_text(encoding="utf-8")
+            # Explicit table fonts converge on the policy font...
+            self.assertNotIn("\\scriptsize", updated)
+            self.assertNotIn("\\footnotesize", updated)
+            self.assertEqual(updated.count("\\small"), 2)
+            # ...while tables without explicit sizes stay untouched.
+            self.assertIn("e & f", updated)
+            policy_changes = [
+                change
+                for change in report["consistency_report"]["changes"]
+                if change.get("defect_id") == "C_style_policy"
+            ]
+            self.assertEqual(len(policy_changes), 1)
+            self.assertEqual(policy_changes[0]["applied_edits"], 2)
+
+    def test_unsupported_style_policy_reports_unresolved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tex = root / "main.tex"
+            tex.write_text(
+                "\\documentclass{article}\n\\begin{document}\nx\n\\end{document}\n",
+                encoding="utf-8",
+            )
+            plan = root / "plan.json"
+            plan.write_text(
+                json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "defect_family": "C1",
+                                "style_policy": {"table_font": "gigantic"},
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report = execute_repair_plan(str(plan), str(tex), str(root / "out.json"))
+            self.assertIn(
+                {"defect_id": "C_style_policy", "reason": "unsupported table_font policy: gigantic"},
+                report["consistency_report"]["unresolved"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

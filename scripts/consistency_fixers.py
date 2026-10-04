@@ -30,6 +30,52 @@ _CAPTION_SETUP = r"\captionsetup{font=small,labelfont=bf,skip=6pt}"
 # 方差过大的常见来源；统一交给 captionsetup 的 skip 管理。
 _VSPACE_BEFORE_CAPTION_RE = re.compile(r"(\\vspace\{[^}]*\})\s*(\\caption)")
 
+# C 类风格策略：支持的字号档位（style_policy.table_font 取这些名字）
+_FONT_SIZE_COMMANDS = (
+    r"\tiny",
+    r"\scriptsize",
+    r"\footnotesize",
+    r"\small",
+    r"\normalsize",
+    r"\large",
+    r"\Large",
+    r"\LARGE",
+    r"\huge",
+    r"\Huge",
+)
+_FONT_COMMAND_BY_NAME = {cmd.lstrip("\\").lower(): cmd for cmd in _FONT_SIZE_COMMANDS}
+
+
+def _normalize_table_font_consistency(tex: str, policy_command: str) -> tuple[str, int]:
+    """把表格块内显式字号统一到策略字号。
+
+    只动已经显式声明字号的表格（未声明的继承模板默认，不碰），
+    修改是纯排版 token 替换，不影响内容完整性门禁。
+    """
+    changed = 0
+
+    def _reblock(match: "re.Match[str]") -> str:
+        nonlocal changed
+        block = match.group(0)
+        present = [cmd for cmd in _FONT_SIZE_COMMANDS if cmd in block]
+        if not present or set(present) == {policy_command}:
+            return block
+        updated_block = block
+        for cmd in present:
+            if cmd != policy_command:
+                updated_block = updated_block.replace(cmd, policy_command)
+        if updated_block != block:
+            changed += 1
+        return updated_block
+
+    updated = re.sub(
+        r"\\begin\{table\*?\}.*?\\end\{table\*?\}",
+        _reblock,
+        tex,
+        flags=re.DOTALL,
+    )
+    return updated, changed
+
 
 def _insert_caption_setup(tex: str) -> str:
     if r"\captionsetup" in tex or r"\usepackage{caption}" not in tex:
@@ -132,6 +178,44 @@ def fix_consistency_defects(
                         "reason": "caption_spacing_not_normalizable",
                     }
                 )
+
+    # C 类风格策略执行：候选携带 style_policy.table_font 时，
+    # 把表格内显式字号统一到策略档位。
+    table_font_policy = None
+    for item in defects:
+        policy = item.get("style_policy") if isinstance(item.get("style_policy"), dict) else {}
+        requested = str(policy.get("table_font") or "").lstrip("\\").lower()
+        if requested:
+            table_font_policy = _FONT_COMMAND_BY_NAME.get(requested)
+            if table_font_policy is None:
+                unresolved.append(
+                    {
+                        "defect_id": "C_style_policy",
+                        "reason": f"unsupported table_font policy: {requested}",
+                    }
+                )
+            break
+    if table_font_policy is not None:
+        rewritten, normalized = _normalize_table_font_consistency(updated, table_font_policy)
+        if normalized:
+            updated = rewritten
+            changes.append(
+                {
+                    "success": True,
+                    "defect_id": "C_style_policy",
+                    "action": "normalize_table_font_consistency",
+                    "before": "mixed explicit font sizes in table blocks",
+                    "after": table_font_policy,
+                    "applied_edits": normalized,
+                }
+            )
+        else:
+            unresolved.append(
+                {
+                    "defect_id": "C_style_policy",
+                    "reason": "no_table_blocks_with_explicit_font_sizes",
+                }
+            )
 
     for item in defects:
         family = str(item.get("defect_id") or item.get("defect_family") or "")

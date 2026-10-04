@@ -410,7 +410,10 @@ def _build_consistency_defects(plan: Dict[str, Any], max_candidates: int) -> Lis
         family = str(candidate.get("defect_family") or "")
         if not family.startswith("C"):
             continue
-        defects.append({"defect_id": family, "defect_family": family})
+        defect: Dict[str, Any] = {"defect_id": family, "defect_family": family}
+        if isinstance(candidate.get("style_policy"), dict):
+            defect["style_policy"] = candidate["style_policy"]
+        defects.append(defect)
         if len(defects) >= max_candidates:
             break
     return defects
