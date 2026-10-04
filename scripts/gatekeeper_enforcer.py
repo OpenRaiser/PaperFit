@@ -167,6 +167,7 @@ def _summarize_defects(state: Dict[str, Any], defects_payload: Any) -> Dict[str,
                 "page": defect.get("page"),
                 "label": defect.get("label"),
                 "description": defect.get("description"),
+                "source": defect.get("source"),
             }
         )
 
@@ -429,6 +430,24 @@ def make_decision(
         if decision != "BLOCKED":
             decision = "CONTINUE"
         reasons.append("major alignment overflow remains")
+
+    # 源码卫生（未解析 ?? / 乱码占位符）的 critical 发现必须压住 DONE，
+    # 即便 normal 模式的 C 类阈值列表为空——这类问题不是排版风格问题。
+    hygiene_criticals = sum(
+        1
+        for defect in defect_summary["open_defects"]
+        if str(defect.get("source") or "") == "source_hygiene_report"
+        and str(defect.get("severity") or "") == "critical"
+    )
+    checks["source_hygiene_critical"] = {
+        "pass": hygiene_criticals == 0,
+        "blocking_count": hygiene_criticals,
+    }
+    if hygiene_criticals > 0:
+        checks["defects"]["pass"] = False
+        if decision != "BLOCKED":
+            decision = "CONTINUE"
+        reasons.append("critical source-hygiene findings remain (unresolved references or mojibake)")
 
     for category in ("A", "B", "C", "D", "E", "SYSTEM"):
         result = _category_passes(

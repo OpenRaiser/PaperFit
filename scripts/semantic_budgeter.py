@@ -11,6 +11,7 @@ Goals:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from dataclasses import dataclass, asdict
@@ -151,9 +152,6 @@ def _extract_paragraphs(tex: str, forbidden_sections: List[str]) -> List[Paragra
     section_spans = _section_spans(tex, body_start, body_end)
     paragraphs: List[Paragraph] = []
 
-    for m in re.finditer(r"\n\s*\n", body):
-        pass
-
     start_local = 0
     splits = list(re.finditer(r"\n\s*\n", body))
     for split in splits + [None]:
@@ -289,7 +287,9 @@ def _expand_text(text: str) -> Tuple[str, List[str]]:
     stripped = text.rstrip()
     if not re.search(r"[.!?]\s*$", stripped):
         stripped += "."
-    append = EXPAND_SENTENCES[hash(stripped) % len(EXPAND_SENTENCES)]
+    # 稳定选择：hash() 受 PYTHONHASHSEED 盐化，跨进程不可复现
+    digest = hashlib.sha256(stripped.encode("utf-8")).hexdigest()
+    append = EXPAND_SENTENCES[int(digest, 16) % len(EXPAND_SENTENCES)]
     return f"{stripped} {append}\n", ["add_explanatory_sentence"]
 
 

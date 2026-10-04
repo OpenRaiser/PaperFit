@@ -1867,10 +1867,10 @@ def fix_split_table(
 \\hline
 \\endlastfoot
 """
-        # 添加表体 (去除第一行)
+        # 添加表体 (去除第一行)；split 会吃掉行尾的 \\ 分隔符，join 时必须补回
         body_lines = table_body.split('\\\\')
         if len(body_lines) > 1:
-            longtable_content += '\n'.join(body_lines[1:])
+            longtable_content += ' \\\\\n'.join(body_lines[1:])
 
         longtable_content += "\n\\end{longtable}"
 
@@ -2298,7 +2298,9 @@ def _passes_hard_content_gate(
     if structure_regression_reasons is None:
         return False, "缺少结构回退检测依赖，按 fail-closed 策略阻断写入"
 
-    structure_reasons = structure_regression_reasons(compute_content_diff(original_tex, repaired_tex))
+    # 结构回退同样在归一化文本上判定：table→longtable、tabular→tabularx
+    # 这类纯排版重构不应被计为结构回退（否则对应策略永远无法落盘）。
+    structure_reasons = structure_regression_reasons(normalized_diff)
     if structure_reasons:
         return False, "；".join(structure_reasons)
 
@@ -2311,6 +2313,20 @@ def _normalize_tex_for_integrity_gate(tex_content: str) -> str:
     compares academic content instead of placement tokens.
     """
     normalized = re.sub(r'^[ \t]*%[^\n]*(?:\n|$)', '', tex_content, flags=re.MULTILINE)
+    # B4 longtable 重构的样板归一化（必须在浮动体块重排与表格组归一之前执行）：
+    # fix_split_table 生成的 longtable 带有重复表头（\endfirsthead/\endhead 之间）
+    # 与 "Continued on next page" 页脚（\endfoot/\endlastfoot 之间），并移除了
+    # table 包装。还原为 table+tabular 等价形态，两侧才能进入相同的后续归一化。
+    normalized = re.sub(
+        r'\\endfirsthead.*?\\endlastfoot',
+        '',
+        normalized,
+        flags=re.DOTALL,
+    )
+    for boilerplate in ("\\endfirsthead", "\\endhead", "\\endfoot", "\\endlastfoot"):
+        normalized = normalized.replace(boilerplate, "")
+    normalized = normalized.replace("\\begin{longtable}", "\\begin{table}\\begin{tabular}")
+    normalized = normalized.replace("\\end{longtable}", "\\end{tabular}\\end{table}")
     normalized = _canonicalize_float_blocks_for_integrity_gate(normalized)
     normalized = _normalize_table_begins_for_integrity_gate(normalized)
     normalized = re.sub(
