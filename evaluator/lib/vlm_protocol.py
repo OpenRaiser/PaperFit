@@ -57,6 +57,41 @@ SEVERITY_ALIASES: Dict[str, str] = {
 }
 
 
+def extract_json_with_mode(raw_text: str) -> tuple[dict, str]:
+    """分级 JSON 解析：strict（直接 loads）/ rescued（fenced 或括号扫描）/ failed。
+
+    裁判合规率的免费护栏：大量 rescued/failed 意味着 normalize 的兜底
+    分在冒充真实打分，回归结论会失真。
+    """
+    import json as _json
+    import re as _re
+
+    text = (raw_text or "").strip()
+    if not text:
+        return {}, "failed"
+    try:
+        payload = _json.loads(text)
+        return (payload, "strict") if isinstance(payload, dict) else ({}, "failed")
+    except _json.JSONDecodeError:
+        pass
+    fenced = _re.search(r"```(?:json)?\s*(\{[\s\S]*\})\s*```", text)
+    if fenced:
+        try:
+            payload = _json.loads(fenced.group(1))
+            return (payload, "rescued") if isinstance(payload, dict) else ({}, "failed")
+        except _json.JSONDecodeError:
+            pass
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            payload = _json.loads(text[start : end + 1])
+            return (payload, "rescued") if isinstance(payload, dict) else ({}, "failed")
+        except _json.JSONDecodeError:
+            return {}, "failed"
+    return {}, "failed"
+
+
 V3_SCORE_FIELDS: tuple[str, ...] = (
     "defect_resolution",
     "constraint_alignment",

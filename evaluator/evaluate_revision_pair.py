@@ -32,6 +32,7 @@ from revision_pair import (  # noqa: E402
     normalize_revision_result,
 )
 from run_vlm_evaluation import _extract_json_object  # noqa: E402
+from vlm_protocol import extract_json_with_mode  # noqa: E402
 
 
 def evaluate_case(
@@ -92,10 +93,18 @@ def evaluate_case(
     )
     (case_out / f"raw_response_{pair_tag}.txt").write_text(raw_response, encoding="utf-8")
 
-    result = normalize_revision_result(
-        _extract_json_object(raw_response),
-        hard_constraints=constraints,
-    )
+    parsed, json_parse_mode = extract_json_with_mode(raw_response)
+    try:
+        result = normalize_revision_result(
+            parsed,
+            hard_constraints=constraints,
+        )
+    except Exception as exc:
+        from vlm_protocol import synthetic_v3_failure
+
+        result = synthetic_v3_failure(f"revision-pair evaluation failed: {exc}", hard_constraints=constraints)
+        result["error"] = str(exc)
+    result["json_parse_mode"] = json_parse_mode
     result["usage"] = usage
     report = {
         "comparison_type": "revision_pair",
@@ -149,10 +158,15 @@ def run_revision_evaluation(
         )
 
     winners = {"candidate": 0, "b0": 0, "tie": 0}
+    parse_modes = {"strict": 0, "rescued": 0, "failed": 0}
     for report in reports:
         winner = str((report.get("vlm") or {}).get("winner") or "")
         if winner in winners:
             winners[winner] += 1
+        mode = str((report.get("vlm") or {}).get("json_parse_mode") or "unknown")
+        if mode in parse_modes:
+            parse_modes[mode] += 1
+    total = len(reports) or 1
     summary = {
         "comparison_type": "revision_pair",
         "reference_method": reference_method,
@@ -162,6 +176,17 @@ def run_revision_evaluation(
         "candidate_wins": winners["candidate"],
         "reference_wins": winners["b0"],
         "ties": winners["tie"],
+        "json_compliance": {
+            "strict_rate": round(parse_modes["strict"] / total, 4),
+            "rescued_rate": round(parse_modes["rescued"] / total, 4),
+            "failed_rate": round(parse_modes["failed"] / total, 4),
+            "counts": parse_modes,
+            "warning": (
+                "strict rate below 0.98: fallback scores may be masquerading as judgments"
+                if parse_modes["strict"] / total < 0.98
+                else None
+            ),
+        },
         "mean_gated_v3_score": (
             sum(float((r.get("vlm") or {}).get("gated_v3_score") or 0.0) for r in reports) / len(reports)
             if reports

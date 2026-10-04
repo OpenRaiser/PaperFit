@@ -25,6 +25,7 @@ from vlm_protocol import (
     V3_SYSTEM_PROMPT,
     build_v3_rescue_user_prompt,
     build_v3_user_prompt,
+    extract_json_with_mode,
     normalize_v3_result,
     synthetic_v3_failure,
 )
@@ -378,9 +379,10 @@ def _evaluate_one(
                 user_prompt=prompt,
             )
             raw_path.write_text(raw_response, encoding="utf-8")
-            parsed = _extract_json_object(raw_response)
+            parsed, json_parse_mode = extract_json_with_mode(raw_response)
             result = normalize_v3_result(parsed, hard_constraints=constraints)
             result["evaluation_mode"] = "render_rescue_candidate_only"
+            result["json_parse_mode"] = json_parse_mode
             result["usage"] = usage
         else:
             comparison = _labeled_comparison_image(
@@ -411,8 +413,9 @@ def _evaluate_one(
                 user_prompt=prompt,
             )
             raw_path.write_text(raw_response, encoding="utf-8")
-            parsed = _extract_json_object(raw_response)
+            parsed, json_parse_mode = extract_json_with_mode(raw_response)
             result = normalize_v3_result(parsed, hard_constraints=constraints)
+            result["json_parse_mode"] = json_parse_mode
             result["usage"] = usage
     except Exception as exc:
         result = synthetic_v3_failure(f"VLM evaluation failed: {exc}", hard_constraints=constraints)
