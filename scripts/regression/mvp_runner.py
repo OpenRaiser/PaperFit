@@ -285,7 +285,11 @@ def run_mvp(
                 apply=apply,
             )
             record["candidate_status"] = run.status
-            if run.status != "not_run" and run.status != "runner_crash":
+            if run.status == "guard_rolled_back":
+                # 修复被硬门禁拦截并已回滚：源码等价 B0，工作区页图是回滚前渲染，
+                # 导出它们会失真——如实记录，不导出 OURS 侧
+                record["environment_state"] = "guard_rolled_back"
+            elif run.status != "not_run" and run.status != "runner_crash":
                 ours_export = export_ours_side(
                     run_result_dir=run.work_dir / "data" if run.work_dir else run_dir,
                     work_dir=run.work_dir,

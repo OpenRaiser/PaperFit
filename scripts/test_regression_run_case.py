@@ -118,6 +118,54 @@ class RunPaperFitCaseTest(unittest.TestCase):
             self.assertEqual(result.status, "runner_crash")
             self.assertIn("boom", result.reasons[0])
 
+    def test_guard_rollback_maps_to_dedicated_status(self):
+        payload = {
+            "status": "blocked",
+            "runtime_actions": {
+                "initial_observe": {
+                    "compile": {"success": True, "case_status": "layout_evaluable"},
+                    "render": {"success": True},
+                }
+            },
+            "failure": {"failure_type": "post_repair_hard_guard_failed", "reason": "BLOCKED"},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            b0, main = _make_b0_project(root)
+            result = run_paperfit_case(
+                b0_project=b0,
+                work_root=root / "runs",
+                case_id="case-guard",
+                paper_id="NeurIPS",
+                main_tex_relpath=main,
+                runner=_fake_runner_factory(lambda: payload),
+            )
+            self.assertEqual(result.status, "guard_rolled_back")
+
+    def test_compile_action_nested_in_initial_observe(self):
+        payload = {
+            "status": "done",
+            "runtime_actions": {
+                "initial_observe": {
+                    "compile": {"success": True, "case_status": "layout_evaluable"},
+                    "render": {"success": True},
+                }
+            },
+            "failure": None,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            b0, main = _make_b0_project(root)
+            result = run_paperfit_case(
+                b0_project=b0,
+                work_root=root / "runs",
+                case_id="case-nested",
+                paper_id="ICML",
+                main_tex_relpath=main,
+                runner=_fake_runner_factory(lambda: payload),
+            )
+            self.assertEqual(result.status, "layout_evaluable")
+
     def test_missing_output_reported(self):
         def silent_runner(project, task_path, output_path):
             return {"status": "runner_crash", "failure": {"failure_type": "paperfit_runner_exit", "reason": "returncode=1"}}

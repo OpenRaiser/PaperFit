@@ -144,13 +144,26 @@ def run_paperfit_case(
 def _derive_status(run_payload: Dict[str, Any]) -> str:
     if run_payload.get("status") == "runner_crash":
         return "runner_crash"
-    compile_action = ((run_payload.get("runtime_actions") or {}).get("compile") or {})
+    failure = run_payload.get("failure") or {}
+    failure_type = str(failure.get("failure_type") or "")
+    # 安全系统正确拦截：修复触发硬门禁并已回滚，源码等价于 B0
+    if failure_type == "post_repair_hard_guard_failed":
+        return "guard_rolled_back"
+    runtime_actions = run_payload.get("runtime_actions") or {}
+    compile_action = runtime_actions.get("compile") or {}
+    if not compile_action:
+        # typed runtime 把编译动作嵌在 initial_observe 里
+        initial_observe = runtime_actions.get("initial_observe") or {}
+        compile_action = initial_observe.get("compile") or {}
     if not compile_action.get("success"):
         case_status = str(compile_action.get("case_status") or "")
         if case_status in {"environment_ineligible", "input_incomplete", "source_compile_error"}:
             return case_status
         return "source_compile_error"
-    render_action = ((run_payload.get("runtime_actions") or {}).get("render") or {})
+    render_action = runtime_actions.get("render") or {}
+    if not render_action:
+        initial_observe = runtime_actions.get("initial_observe") or {}
+        render_action = initial_observe.get("render") or {}
     if not render_action.get("success"):
         return "input_incomplete"
     return "layout_evaluable"
