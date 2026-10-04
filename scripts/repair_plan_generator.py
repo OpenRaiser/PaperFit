@@ -532,6 +532,81 @@ def _build_semantic_home(
     return semantic_home or None
 
 
+_CAPTION_NUMBER_MAX_GAP_PX = 200
+
+
+def _caption_anchor_lookup(visual_report: Dict[str, Any]) -> Dict[int, List[Dict[str, Any]]]:
+    by_page: Dict[int, List[Dict[str, Any]]] = {}
+    for anchor in visual_report.get("caption_anchors") or []:
+        page = int(anchor.get("page") or 0)
+        by_page.setdefault(page, []).append(anchor)
+    return by_page
+
+
+def _floats_by_number(crossrefs_report: Dict[str, Any]) -> Dict[tuple[str, int], Dict[str, Any]]:
+    lookup: Dict[tuple[str, int], Dict[str, Any]] = {}
+    for flt in crossrefs_report.get("floats") or []:
+        label = str(flt.get("label") or "")
+        number = flt.get("number")
+        float_type = str(flt.get("float_type") or "")
+        if label and number is not None and float_type in {"figure", "table"}:
+            lookup[(float_type, int(number))] = flt
+    return lookup
+
+
+def _match_by_caption_number(
+    *,
+    anchors_by_page: Dict[int, List[Dict[str, Any]]],
+    floats_by_number: Dict[tuple[str, int], Dict[str, Any]],
+    kind: str,
+    page: int,
+    bbox: List[Any],
+) -> Optional[Dict[str, Any]]:
+    """用页面上 "Figure N/Table N" caption 编号直接解析源码 label。
+
+    比索引顺序匹配可靠：编号来自 PDF 实际渲染，与源码 label 的对应
+    由 crossrefs 的浮动体编号表给出。
+    """
+    if not bbox:
+        return None
+    float_type = "figure" if kind == "figure_like" else "table"
+    best_anchor = None
+    best_gap = None
+    for anchor in anchors_by_page.get(page) or []:
+        if str(anchor.get("object_kind") or "") != kind:
+            continue
+        anchor_bbox = anchor.get("rendered_bbox") or anchor.get("pdf_bbox")
+        if not anchor_bbox or len(anchor_bbox) != 4:
+            continue
+        ax0, ay0, ax1, ay1 = (float(v) for v in anchor_bbox)
+        try:
+            ox0, oy0, ox1, oy1 = (float(v) for v in bbox[:4])
+        except (TypeError, ValueError):
+            continue
+        if min(ox1, ax1) - max(ox0, ax0) <= 0:
+            continue
+        gap = min(abs(ay0 - oy1), abs(oy0 - ay1))
+        if best_gap is None or gap < best_gap:
+            best_gap = gap
+            best_anchor = anchor
+    if best_anchor is None or best_gap is None:
+        return None
+    if best_gap > _CAPTION_NUMBER_MAX_GAP_PX:
+        return None
+    matched_float = floats_by_number.get((float_type, int(best_anchor.get("caption_number") or 0)))
+    if matched_float is None:
+        return None
+    return {
+        "label": matched_float.get("label"),
+        "match_strategy": "caption_number",
+        "width_spec": matched_float.get("width_spec"),
+        "table_env": matched_float.get("table_env"),
+        "tabcolsep": matched_float.get("tabcolsep"),
+        "caption_number": best_anchor.get("caption_number"),
+        "number_source": matched_float.get("number_source"),
+    }
+
+
 def _match_priority_objects_to_labels(
     visual_report: Dict[str, Any],
     crossrefs_report: Dict[str, Any],
@@ -543,6 +618,9 @@ def _match_priority_objects_to_labels(
         kind = "figure_like" if float_type == "figure" else "table_like" if float_type == "table" else None
         if kind:
             by_kind[kind].append(flt)
+
+    anchors_by_page = _caption_anchor_lookup(visual_report)
+    floats_by_number = _floats_by_number(crossrefs_report)
 
     ordered_objects_by_kind: Dict[str, List[Dict[str, Any]]] = {"figure_like": [], "table_like": []}
     for pairing in visual_report.get("object_pairings") or []:
@@ -575,15 +653,25 @@ def _match_priority_objects_to_labels(
         for item in _priority_objects_with_pairing_fallback(visual_report):
             kind = str(item.get("object_kind") or "")
             enriched = dict(item)
-            source_floats = by_kind.get(kind) or []
-            idx = offsets.get(kind, 0)
-            if idx < len(source_floats):
-                enriched["label"] = source_floats[idx].get("label")
-                enriched["match_strategy"] = "source_order_proxy"
-                enriched["width_spec"] = source_floats[idx].get("width_spec")
-                enriched["table_env"] = source_floats[idx].get("table_env")
-                enriched["tabcolsep"] = source_floats[idx].get("tabcolsep")
-                offsets[kind] = idx + 1
+            caption_match = _match_by_caption_number(
+                anchors_by_page=anchors_by_page,
+                floats_by_number=floats_by_number,
+                kind=kind,
+                page=int(item.get("page") or 0),
+                bbox=item.get("bbox") or [],
+            )
+            if caption_match is not None:
+                enriched.update(caption_match)
+            else:
+                source_floats = by_kind.get(kind) or []
+                idx = offsets.get(kind, 0)
+                if idx < len(source_floats):
+                    enriched["label"] = source_floats[idx].get("label")
+                    enriched["match_strategy"] = "source_order_proxy"
+                    enriched["width_spec"] = source_floats[idx].get("width_spec")
+                    enriched["table_env"] = source_floats[idx].get("table_env")
+                    enriched["tabcolsep"] = source_floats[idx].get("tabcolsep")
+                    offsets[kind] = idx + 1
             matched.append(enriched)
         return matched
 
@@ -599,10 +687,30 @@ def _match_priority_objects_to_labels(
         width_spec = None
         table_env = None
         tabcolsep = None
+        caption_number = None
+        number_source = None
 
         visual_width_subtype = str(item.get("visual_width_subtype") or "")
         visual_width_ratio = item.get("object_width_ratio")
-        if kind == "figure_like" and visual_width_subtype in {"overflow_width", "underfilled_width"}:
+
+        # 编号定位优先：caption 锚点 + 浮动体编号表直接给出 label
+        caption_match = _match_by_caption_number(
+            anchors_by_page=anchors_by_page,
+            floats_by_number=floats_by_number,
+            kind=kind,
+            page=page,
+            bbox=bbox,
+        )
+        if caption_match is not None:
+            label = caption_match["label"]
+            match_strategy = caption_match["match_strategy"]
+            width_spec = caption_match.get("width_spec")
+            table_env = caption_match.get("table_env")
+            tabcolsep = caption_match.get("tabcolsep")
+            caption_number = caption_match.get("caption_number")
+            number_source = caption_match.get("number_source")
+
+        if label is None and kind == "figure_like" and visual_width_subtype in {"overflow_width", "underfilled_width"}:
             width_candidates: List[tuple[float, int, Dict[str, Any]]] = []
             for source_index, source_float in enumerate(by_kind.get(kind) or []):
                 source_label = str(source_float.get("label") or "")
@@ -678,6 +786,9 @@ def _match_priority_objects_to_labels(
             enriched["width_spec"] = width_spec
             enriched["table_env"] = table_env
             enriched["tabcolsep"] = tabcolsep
+        if caption_number is not None:
+            enriched["caption_number"] = caption_number
+            enriched["number_source"] = number_source
         matched.append(enriched)
     return matched
 
@@ -731,6 +842,8 @@ def _build_object_candidates(visual_report: Dict[str, Any], crossrefs_report: Di
                 "proposed_action": action,
                 "rationale": reason,
                 "match_strategy": item.get("match_strategy"),
+                "caption_number": item.get("caption_number"),
+                "number_source": item.get("number_source"),
                 "source_width_spec": item.get("width_spec"),
                 "source_table_env": item.get("table_env"),
                 "source_tabcolsep": item.get("tabcolsep"),

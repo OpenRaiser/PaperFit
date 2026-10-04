@@ -12,6 +12,7 @@ import argparse
 import contextlib
 import io
 import json
+import re
 import statistics
 from datetime import datetime
 from pathlib import Path
@@ -34,6 +35,9 @@ except ImportError:
 
 from cv_detector import BatchCVDetector
 
+
+# Caption block header: "Figure 3:", "Fig. 12:", "Table 4:" at block start
+_CAPTION_ANCHOR_RE = re.compile(r"^(Figure|Fig\.|Table)\s*(\d+)\b[:.]?", re.IGNORECASE)
 
 FALLBACK_SKILL_ROUTING = {
     "space-util-fixer": ["A1", "A2", "A3", "A4", "A5", "A6"],
@@ -285,6 +289,7 @@ def _extract_pymupdf_native_signals(
     rendered_sizes = _load_rendered_page_sizes(pages_path)
     findings: List[Dict[str, Any]] = []
     object_clusters: List[Dict[str, Any]] = []
+    caption_anchors: List[Dict[str, Any]] = []
     page_summaries: List[Dict[str, Any]] = []
 
     try:
@@ -306,16 +311,34 @@ def _extract_pymupdf_native_signals(
                 if not bbox:
                     continue
                 x0, y0, x1, y1 = (float(v) for v in bbox)
+                text = " ".join(
+                    str(span.get("text") or "")
+                    for line in block.get("lines", [])
+                    for span in line.get("spans", [])
+                ).strip()
+                caption_match = _CAPTION_ANCHOR_RE.match(text)
+                if caption_match:
+                    keyword = caption_match.group(1).lower()
+                    caption_anchors.append(
+                        {
+                            "page": page_index,
+                            "object_kind": "figure_like" if keyword.startswith("fig") else "table_like",
+                            "caption_number": int(caption_match.group(2)),
+                            "caption_text": text[:160],
+                            "pdf_bbox": [round(x0, 3), round(y0, 3), round(x1, 3), round(y1, 3)],
+                            "rendered_bbox": _scale_pdf_bbox(
+                                (x0, y0, x1, y1),
+                                pdf_width=page_width,
+                                pdf_height=page_height,
+                                rendered_size=rendered_size,
+                            ),
+                        }
+                    )
                 right_overflow = max(0.0, x1 - page_width)
                 left_overflow = max(0.0, -x0)
                 if right_overflow >= 0.75 or left_overflow >= 0.75:
                     side = "right" if right_overflow >= left_overflow else "left"
                     overflow_pt = max(right_overflow, left_overflow)
-                    text = " ".join(
-                        str(span.get("text") or "")
-                        for line in block.get("lines", [])
-                        for span in line.get("spans", [])
-                    ).strip()
                     findings.append(
                         {
                             "source": "pymupdf_native",
@@ -437,6 +460,7 @@ def _extract_pymupdf_native_signals(
         "page_count": len(page_summaries),
         "findings": findings,
         "object_clusters": object_clusters,
+        "caption_anchors": caption_anchors,
         "page_summaries": page_summaries,
     }
 
@@ -1053,6 +1077,7 @@ def aggregate_visual_signals(
         },
         "object_clusters": object_clusters,
         "object_pairings": object_pairings,
+        "caption_anchors": pymupdf_native.get("caption_anchors") or [],
         "priority_objects": priority_objects,
         "consistency_summary": consistency_summary,
         "cross_page_hints": cross_page_hints,
