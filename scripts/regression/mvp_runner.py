@@ -227,13 +227,18 @@ def run_mvp(
 
     compile_fn = compile_fn or real_compile_fn
     render_fn = render_fn or real_render_fn
-    pack_manifest = build_pack(
-        entries=entries,
-        pack_root=pack_root,
-        compile_fn=compile_fn,
-        render_fn=render_fn,
-        skip_injection=not inject,
-    )
+    pack_manifest_path = pack_root / "pack_manifest.json"
+    if pack_manifest_path.is_file() and len((pack_root.glob("*/*/pages"))) > 0:
+        # 已有冻结 pack：直接复用（B0 只生成一次的原则），不重新编译
+        pack_manifest = json.loads(pack_manifest_path.read_text(encoding="utf-8"))
+    else:
+        pack_manifest = build_pack(
+            entries=entries,
+            pack_root=pack_root,
+            compile_fn=compile_fn,
+            render_fn=render_fn,
+            skip_injection=not inject,
+        )
 
     case_records: List[Dict[str, Any]] = []
     b0_evaluations: List[Dict[str, Any]] = []
