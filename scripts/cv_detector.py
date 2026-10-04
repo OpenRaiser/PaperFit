@@ -437,17 +437,42 @@ class CVDefectDetector:
         dark_threshold = int(self.thresholds["overflow_dark_pixel_threshold"])
         min_pixels = int(self.thresholds["overflow_min_pixels"])
 
-        # 检测超出边界的黑色像素
+        # 检测超出边界的暗像素；先转灰度，避免 BGR 三通道把每个暗像素计 3 次
+        gray = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
         # 上边缘
-        top_overflow = np.sum(self.image[:margin_bbox[1], :, :] < dark_threshold)
+        top_overflow = int(np.sum(gray[:margin_bbox[1], :] < dark_threshold))
         # 下边缘
-        bottom_overflow = np.sum(self.image[margin_bbox[3]:, :, :] < dark_threshold)
+        bottom_overflow = int(np.sum(gray[margin_bbox[3]:, :] < dark_threshold))
         # 左边缘
-        left_overflow = np.sum(self.image[:, :margin_bbox[0], :] < dark_threshold)
+        left_overflow = int(np.sum(gray[:, :margin_bbox[0]] < dark_threshold))
         # 右边缘
-        right_overflow = np.sum(self.image[:, margin_bbox[2]:, :] < dark_threshold)
+        right_overflow = int(np.sum(gray[:, margin_bbox[2]:] < dark_threshold))
 
         detections = []
+
+        if top_overflow > min_pixels:
+            detections.append(DefectDetection(
+                defect_id="D1-top-overflow",
+                category="D",
+                severity="major",
+                page=self.page_number,
+                confidence=0.8,
+                bbox=(0, 0, w, margin_bbox[1]),
+                description=f"顶部溢出检测：{top_overflow} 像素",
+                metrics={"top_overflow_pixels": top_overflow}
+            ))
+
+        if left_overflow > min_pixels:
+            detections.append(DefectDetection(
+                defect_id="D1-left-overflow",
+                category="D",
+                severity="major",
+                page=self.page_number,
+                confidence=0.8,
+                bbox=(0, 0, margin_bbox[0], h),
+                description=f"左侧溢出检测：{left_overflow} 像素",
+                metrics={"left_overflow_pixels": left_overflow}
+            ))
 
         if right_overflow > min_pixels:
             detections.append(DefectDetection(
