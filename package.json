@@ -1,6 +1,6 @@
 {
   "name": "paperfit-cli",
-  "version": "1.0.6",
+  "version": "1.1.0",
   "description": "Visual Typesetting Optimization Agent System for LaTeX papers",
   "main": "bin/paperfit.js",
   "bin": {
