@@ -136,8 +136,9 @@ def export_ours_side(
     run_result = _load_json(run_result_dir / "run_result.json")
     if not run_result:
         return None
-    compile_action = (run_result.get("runtime_actions") or {}).get("compile") or {}
-    render_action = (run_result.get("runtime_actions") or {}).get("render") or {}
+    runtime_actions = run_result.get("runtime_actions") or {}
+    compile_action = runtime_actions.get("compile") or (runtime_actions.get("initial_observe") or {}).get("compile") or {}
+    render_action = runtime_actions.get("render") or (runtime_actions.get("initial_observe") or {}).get("render") or {}
     main_tex = work_dir / main_rel
     if not main_tex.is_file():
         return None
