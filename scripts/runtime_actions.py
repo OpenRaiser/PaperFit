@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import locale
 import os
+import platform
 import re
 import shutil
 import signal
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +19,25 @@ try:
     from diagnosis_ingest import classify_compile_case
 except ModuleNotFoundError:  # package import during unit tests
     from .diagnosis_ingest import classify_compile_case
+
+
+def collect_runtime_environment() -> Dict[str, Any]:
+    """Cheap, deterministic environment snapshot for run-result reproducibility.
+
+    Only PATH probing (shutil.which) — no tool execution — so it is safe to
+    attach to every run result.
+    """
+    return {
+        "schema_version": "1.0",
+        "captured_at": datetime.now().isoformat(),
+        "python_version": sys.version.split()[0],
+        "python_executable": sys.executable,
+        "platform": platform.platform(),
+        "toolchain": {
+            name: bool(shutil.which(name))
+            for name in ("latexmk", "pdflatex", "bibtex", "pdfinfo", "pdftotext")
+        },
+    }
 
 
 def package_root() -> Path:

@@ -19,7 +19,12 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from runtime_artifacts import collect_artifact_manifest
-from runtime_actions import compile_latex, inspect_endmatter_float_intrusion, render_pdf_pages
+from runtime_actions import (
+    collect_runtime_environment,
+    compile_latex,
+    inspect_endmatter_float_intrusion,
+    render_pdf_pages,
+)
 from runtime_approval import build_approval_object, build_candidate_approval_scope_gate
 from runtime_events import RuntimeEventWriter
 from runtime_repair_plan import (
@@ -720,6 +725,7 @@ class OrchestratorRuntime:
                     runtime_actions=runtime_actions,
                 ),
                 failure=failure,
+                environment=collect_runtime_environment(),
             )
             result_payload = result.to_dict()
             terminal_event = "task_blocked" if runtime_state == "BLOCKED" else "task_completed"
@@ -1382,6 +1388,7 @@ class OrchestratorRuntime:
                 repair_loop_policy=repair_loop_policy,
                 round_artifact_lineage=round_artifact_lineage,
                 failure=failure,
+                environment=collect_runtime_environment(),
             )
             result_payload = result.to_dict()
             terminal_event = "task_completed" if status != "blocked" else "task_blocked"

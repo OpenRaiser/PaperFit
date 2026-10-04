@@ -289,6 +289,7 @@ class RunResult:
     repair_loop_policy: Optional[Dict[str, Any]] = None
     round_artifact_lineage: List[Dict[str, Any]] = field(default_factory=list)
     failure: Optional[Dict[str, Any]] = None
+    environment: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -307,6 +308,7 @@ class RunResult:
             "round_artifact_lineage": self.round_artifact_lineage,
             "defect_summary": self.defect_summary,
             "failure": self.failure,
+            "environment": self.environment,
         }
 
 
