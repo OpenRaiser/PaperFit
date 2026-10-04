@@ -222,6 +222,20 @@ def analyze_page(
     page_index = page_index_from_name(image_path.name)
     page_image_rel = rel_path_if_under(image_path, cwd)
 
+    def _ink_ratio(gray_img: np.ndarray) -> float:
+        return float((gray_img < ink_thr).mean())
+
+    # A5 只定义在双栏版式上：中缝必须基本无墨迹，而两栏都有正文。
+    # 单栏页/标题页在正中央硬切两半只会把页面级空白误报成列内空洞。
+    band = max(4, int(w // 100))
+    gutter_band = gray[:, max(0, gx - band): min(w, gx + band)]
+    left_ink = _ink_ratio(left_gray)
+    right_ink = _ink_ratio(right_gray)
+    gutter_ink = _ink_ratio(gutter_band)
+    max_col_ink = max(left_ink, right_ink)
+    two_column_layout = max_col_ink >= 0.01 and gutter_ink <= max_col_ink * 0.5
+    layout_mode = "two_column" if two_column_layout else "single_column_or_unclear"
+
     # 估计行高：用梯度粗略估计，用于 min_gap_px
     grad = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
     row_act = np.abs(grad).mean(axis=1)
@@ -237,6 +251,11 @@ def analyze_page(
     cols_info: Dict[str, Any] = {}
     candidates: List[Dict[str, Any]] = []
 
+    # 空洞必须「上下均有正文」才算 A5：顶到栏首/栏底的空白属于
+    # A2（末页留白）/A4（栏高不齐）语义，不能混入列内空洞。
+    text_row_thresh = max(0.02, void_row_thresh * 1.5)
+    interior_margin_px = max(8, int(line_h))
+
     for name, crop in ("left", left_gray), ("right", right_gray):
         ch, cw = crop.shape[:2]
         row_ink = column_row_ink_ratio(crop, ink_thr)
@@ -249,15 +268,30 @@ def analyze_page(
             min_gap_px=min_gap_px,
             merge_gap_px=merge_gap_px,
         )
+
+        def _band_has_text(y_from: int, y_to: int) -> bool:
+            window = row_ink_s[max(0, y_from): min(ch, y_to)]
+            return bool(window.size and float(window.mean()) >= text_row_thresh)
+
+        interior_voids: List[VoidSegment] = []
+        for v in voids:
+            above_ok = _band_has_text(v.y0 - interior_margin_px, v.y0)
+            below_ok = _band_has_text(v.y1, v.y1 + interior_margin_px)
+            if above_ok and below_ok:
+                interior_voids.append(v)
+
         max_ratio = max((v.ratio_of_column for v in voids), default=0.0)
         cols_info[name] = {
             "width_px": int(cw),
             "height_px": int(ch),
             "void_segments": [asdict(v) for v in voids],
+            "interior_void_count": len(interior_voids),
             "max_void_ratio": float(round(max_ratio, 4)),
             "mean_row_ink": float(round(float(row_ink_s.mean()), 4)),
         }
-        for v in voids:
+        if not two_column_layout:
+            continue
+        for v in interior_voids:
             if v.ratio_of_column >= min_void_ratio:
                 y0f = round(v.y0 / float(max(1, ch)), 4)
                 y1f = round(v.y1 / float(max(1, ch)), 4)
@@ -281,6 +315,12 @@ def analyze_page(
         "width": int(w),
         "height": int(h),
         "split_x": int(gx),
+        "layout_mode": layout_mode,
+        "gutter_ink_ratio": float(round(gutter_ink, 4)),
+        "column_ink_ratios": {
+            "left": float(round(left_ink, 4)),
+            "right": float(round(right_ink, 4)),
+        },
         "ink_threshold": int(ink_thr),
         "estimated_line_height_px": int(line_h),
         "min_gap_px_used": int(min_gap_px),

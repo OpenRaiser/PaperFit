@@ -18,6 +18,11 @@ SOURCE_CHANGING_TASK_TYPES = {
     "template_migration",
 }
 
+# Candidates executed per bounded-apply round. The orchestrator scope gate
+# and the repair executor must use the same value, and the loop policy must
+# report it truthfully.
+DEFAULT_CANDIDATE_BATCH_LIMIT = 3
+
 
 def _task_type(task: Dict[str, Any]) -> str:
     return str(task.get("task_type") or task.get("type") or "")
@@ -135,6 +140,17 @@ def build_repair_loop_policy(
         stop_condition = "blocked"
     elif freshness_status and freshness_status != "pass":
         stop_condition = "artifact_freshness_not_pass"
+    elif (
+        plan_candidates > 0
+        and applied_count <= 0
+        and not dry_run
+        and not bool(repair_action.get("skipped"))
+        and (approval_scope_gate is None or approval_scope_gate.get("status") == "pass")
+    ):
+        # A candidate batch that produced no source change cannot make the
+        # next round more informed. Stop here instead of replaying the same
+        # no-op candidate until max_rounds is exhausted.
+        stop_condition = "no_effective_change"
     elif current_round >= max_rounds:
         stop_condition = "round_limit_reached"
 
@@ -145,6 +161,8 @@ def build_repair_loop_policy(
         next_round_reason = "approval_scope_blocked"
     elif stop_condition == "artifact_freshness_not_pass":
         next_round_reason = "artifact_freshness_not_pass"
+    elif stop_condition == "no_effective_change":
+        next_round_reason = "repair_executor_no_effective_change"
     elif dry_run:
         next_round_reason = "dry_run_source_mutation"
     elif approval.get("status") == "approval_required":
@@ -185,7 +203,7 @@ def build_repair_loop_policy(
         "task_type": task_type,
         "round_limit": max_rounds,
         "current_round": current_round,
-        "candidate_batch_limit": 0 if dry_run else 1,
+        "candidate_batch_limit": 0 if dry_run else DEFAULT_CANDIDATE_BATCH_LIMIT,
         "dry_run_source_mutation": dry_run,
         "approval_scope": approval_policy.get("approval_scope"),
         "mutation_surface": approval_policy.get("mutation_surface") or [],

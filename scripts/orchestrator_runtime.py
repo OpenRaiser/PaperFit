@@ -27,7 +27,11 @@ from runtime_repair_plan import (
     blocked_stale_repair_plan_report,
     validate_repair_plan_freshness,
 )
-from runtime_repair_loop import build_repair_loop_policy, build_round_artifact_lineage
+from runtime_repair_loop import (
+    DEFAULT_CANDIDATE_BATCH_LIMIT,
+    build_repair_loop_policy,
+    build_round_artifact_lineage,
+)
 from runtime_mutation_integrity import build_source_mutation_report
 from runtime_snapshots import create_pre_repair_snapshot, restore_snapshot
 from runtime_status import build_runtime_status
@@ -619,7 +623,7 @@ class OrchestratorRuntime:
 
             runtime_actions = self._run_visual_only_observe_actions(task_spec=task_spec, emit_event=emit_runtime_event)
             compile_result = runtime_actions.get("compile") or {}
-            if compile_result.get("timeout") and not compile_result.get("success"):
+            if self._compile_block_failure_type(compile_result) is not None:
                 state = self._mark_runtime_compile_blocked(
                     task_spec=task_spec,
                     compile_result=compile_result,
@@ -851,7 +855,7 @@ class OrchestratorRuntime:
             )
             runtime_actions["initial_observe"] = initial_observe
             compile_result = initial_observe.get("compile") or {}
-            if compile_result.get("timeout") and not compile_result.get("success"):
+            if self._compile_block_failure_type(compile_result) is not None:
                 runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "compile_blocked")
                 state = self._mark_runtime_compile_blocked(
                     task_spec=task_spec,
@@ -994,7 +998,7 @@ class OrchestratorRuntime:
                         task=task_spec.to_dict(),
                         approval=provisional_approval,
                         repair_plan=repair_plan_for_scope_gate,
-                        candidate_limit=3,
+                        candidate_limit=DEFAULT_CANDIDATE_BATCH_LIMIT,
                     )
                     if candidate_scope_gate.get("status") != "pass":
                         self._record_runtime_action(
@@ -1059,7 +1063,7 @@ class OrchestratorRuntime:
                     repair_state = self.execute_repair_plan(
                         main_tex=task_spec.main_tex,
                         output_path="data/repair_execution_report.json",
-                        max_candidates=3,
+                        max_candidates=DEFAULT_CANDIDATE_BATCH_LIMIT,
                     )
                     repair_summary = repair_state.get("repair_execution_summary") or {}
                     self._record_runtime_action(
@@ -1649,7 +1653,16 @@ class OrchestratorRuntime:
                     action_entry["returncode"] = result.get("returncode")
                 if "timeout" in result:
                     action_entry["timeout"] = bool(result.get("timeout"))
-                for key in ("failure_type", "risk_level", "requires_approval", "input_artifacts", "output_artifacts"):
+                for key in (
+                    "failure_type",
+                    "risk_level",
+                    "requires_approval",
+                    "input_artifacts",
+                    "output_artifacts",
+                    "case_status",
+                    "missing_sty",
+                    "missing_images",
+                ):
                     if result.get(key) is not None:
                         action_entry[key] = result.get(key)
             if payload.get("reason") is not None:
@@ -1722,13 +1735,56 @@ class OrchestratorRuntime:
             return {}
         return data if isinstance(data, dict) else {}
 
+    @staticmethod
+    def _compile_block_failure_type(compile_result: Dict[str, Any]) -> Optional[str]:
+        """Classify a failed compile that must block the round before observation.
+
+        Environment problems (missing LaTeX packages) and incomplete inputs
+        (missing figure assets) are not layout defects; source-level compile
+        errors keep flowing through the rule-engine diagnosis path instead.
+        """
+
+        if compile_result.get("success"):
+            return None
+        if compile_result.get("timeout"):
+            return "compile_timeout"
+        case_status = str(compile_result.get("case_status") or "")
+        if case_status in {"environment_ineligible", "input_incomplete"}:
+            return case_status
+        return None
+
     def _mark_runtime_compile_blocked(
         self,
         *,
         task_spec: TaskSpec,
         compile_result: Dict[str, Any],
     ) -> Dict[str, Any]:
-        timeout_sec = int(compile_result.get("timeout_sec") or 0)
+        failure_type = self._compile_block_failure_type(compile_result) or "compile_timeout"
+        if failure_type == "environment_ineligible":
+            missing_sty = [str(item) for item in (compile_result.get("missing_sty") or []) if str(item)]
+            detail = ", ".join(missing_sty) if missing_sty else "inspect data/logs/paperfit_compile.log"
+            next_actions = [
+                f"Install missing LaTeX packages before layout evaluation: {detail}",
+                "Environment-ineligible cases are not counted as layout repair failures",
+            ]
+            note = f"runtime-compile-environment-ineligible:{Path(task_spec.main_tex).name}"
+            defects_found = 0
+        elif failure_type == "input_incomplete":
+            missing_images = [str(item) for item in (compile_result.get("missing_images") or []) if str(item)]
+            detail = ", ".join(missing_images) if missing_images else "inspect data/logs/paperfit_compile.log"
+            next_actions = [
+                f"Provide missing paper assets before layout evaluation: {detail}",
+                "Input-incomplete cases are not counted as layout repair failures",
+            ]
+            note = f"runtime-compile-input-incomplete:{Path(task_spec.main_tex).name}"
+            defects_found = 0
+        else:
+            timeout_sec = int(compile_result.get("timeout_sec") or 0)
+            next_actions = [
+                f"Compilation exceeded {timeout_sec}s; inspect TeX macro recursion or oversized assets",
+            ]
+            note = f"runtime-compile-timeout:{Path(task_spec.main_tex).name}"
+            defects_found = 1
         self.manager.update(
             {
                 "compile_success": False,
@@ -1736,21 +1792,19 @@ class OrchestratorRuntime:
                 "status": "BLOCKED",
                 "last_gatekeeper_decision": "BLOCKED",
                 "agents_this_round": ["orchestrator-agent", "rule-engine-agent"],
-                "next_actions": [
-                    f"Compilation exceeded {timeout_sec}s; inspect TeX macro recursion or oversized assets",
-                ],
+                "next_actions": next_actions,
             }
         )
-        self.manager.update_defect_summary(resolved=0, remaining=1, initial=1)
+        self.manager.update_defect_summary(resolved=0, remaining=defects_found, initial=defects_found)
         self.manager.update_failure_tracking(
             decision="BLOCKED",
-            failure_type="compile_timeout",
+            failure_type=failure_type,
         )
         state = self.add_history_entry(
             decision="BLOCKED",
-            defects_found=1,
+            defects_found=defects_found,
             defects_resolved=0,
-            note=f"runtime-compile-timeout:{Path(task_spec.main_tex).name}",
+            note=note,
         )
         return self.manager.load() if not state else state
 

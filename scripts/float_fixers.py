@@ -20,6 +20,8 @@ from typing import List, Dict, Optional, Tuple, Any
 
 from transactional_patch import atomic_write_text
 
+from overflow_fixers import _count_top_level_table_columns
+
 try:
     from content_integrity_check import compute_content_diff, structure_regression_reasons
 except ImportError:
@@ -1539,31 +1541,38 @@ def fix_wide_float_in_double_column(
     is_figure = "fig" in float_label.lower()
     float_type = "figure" if is_figure else "table"
 
-    # 查找浮动体环境
-    pattern = r'\\begin\{' + float_type + r'\}(\[[htbp]+\])?'
-    matches = list(re.finditer(pattern, tex_content))
+    # 查找浮动体环境：label 必须落在该环境的 begin/end 跨度内，
+    # 固定字符窗口在短文档里会误选到相邻浮动体。
+    begin_pattern = re.compile(r'\\begin\{' + float_type + r'\}(\[[htbp]+\])?')
+    end_pattern = re.compile(r'\\end\{' + float_type + r'\}')
+    label_pattern = re.compile(r'\\label\{' + re.escape(float_label) + r'\}')
 
     target_match = None
-    for match in matches:
-        label_pattern = r'\\label\{' + re.escape(float_label) + r'\}'
-        after_start = match.end()
-        label_match = re.search(label_pattern, tex_content[after_start:after_start + 500])
-        if label_match:
+    closing_match = None
+    for match in begin_pattern.finditer(tex_content):
+        end_match = end_pattern.search(tex_content, match.end())
+        if not end_match:
+            break
+        if label_pattern.search(tex_content, match.start(), end_match.end()):
             target_match = match
+            closing_match = end_match
             break
 
-    if not target_match:
+    if target_match is None or closing_match is None:
         return tex_content, None
 
-    # 改为跨栏环境
+    # 改为跨栏环境：必须只改目标浮动体的 begin/end，
+    # 不能用全局 replace（否则改到全文档第一个同类环境）。
+    begin_token = f"\\begin{{{float_type}}}"
     old_env = f"\\begin{{{float_type}}}"
     new_env = f"\\begin{{{float_type}*}}"
 
-    modified_content = tex_content.replace(old_env, new_env, 1)
-    modified_content = modified_content.replace(
-        f"\\end{{{float_type}}}",
-        f"\\end{{{float_type}*}}",
-        1
+    modified_content = (
+        tex_content[: target_match.start()]
+        + new_env
+        + tex_content[target_match.start() + len(begin_token) : closing_match.start()]
+        + f"\\end{{{float_type}*}}"
+        + tex_content[closing_match.end() :]
     )
 
     return modified_content, FixResult(
@@ -1853,7 +1862,7 @@ def fix_split_table(
 {header_row} \\\\
 \\hline
 \\endhead
-\\hline \\multicolumn{{{len(column_spec.strip("{}"))}}}{{r}}{{Continued on next page}} \\\\
+\\hline \\multicolumn{{{_count_top_level_table_columns(column_spec)}}}{{r}}{{Continued on next page}} \\\\
 \\endfoot
 \\hline
 \\endlastfoot
@@ -1897,16 +1906,17 @@ def fix_split_figure(
     Returns:
         (修改后的内容，修复结果)
     """
-    # 定位 figure 环境
-    pattern = r'\\begin\{figure\}(\[[^\]]*\])?'
-    matches = list(re.finditer(pattern, tex_content))
+    # 定位 figure 环境：label 必须落在环境跨度内（与 fix_split_table 同口径）
+    begin_pattern = re.compile(r'\\begin\{figure\}(\[[^\]]*\])?')
+    end_pattern = re.compile(r'\\end\{figure\}')
+    label_pattern = re.compile(r'\\label\{' + re.escape(figure_label) + r'\}')
 
     target_match = None
-    for match in matches:
-        label_pattern = r'\\label\{' + re.escape(figure_label) + r'\}'
-        after_start = match.end()
-        label_match = re.search(label_pattern, tex_content[after_start:after_start + 500])
-        if label_match:
+    for match in begin_pattern.finditer(tex_content):
+        end_match = end_pattern.search(tex_content, match.end())
+        if not end_match:
+            break
+        if label_pattern.search(tex_content, match.start(), end_match.end()):
             target_match = match
             break
 

@@ -13,6 +13,11 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+try:
+    from diagnosis_ingest import classify_compile_case
+except ModuleNotFoundError:  # package import during unit tests
+    from .diagnosis_ingest import classify_compile_case
+
 
 def package_root() -> Path:
     return Path(__file__).resolve().parent.parent
@@ -163,6 +168,7 @@ def compile_latex(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
     fatal_error = any(pattern in combined_log for pattern in fatal_patterns)
     partial_pdf_available = bool(timed_out and pdf_path.is_file() and not fatal_error)
     success = (result.returncode == 0 and pdf_path.is_file()) or partial_pdf_available
+    case = classify_compile_case(combined_log, success=success)
     return {
         "success": success,
         "command": cmd,
@@ -171,6 +177,9 @@ def compile_latex(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
         "timeout_sec": timeout_sec,
         "partial_pdf_available": partial_pdf_available,
         "fatal_error": fatal_error,
+        "case_status": case["case_status"],
+        "missing_sty": case["missing_sty"],
+        "missing_images": case["missing_images"],
         "stdout_tail": (result.stdout or "")[-4000:],
         "stderr_tail": (result.stderr or "")[-4000:],
         "log_file": f"{main_tex.stem}.log",
@@ -275,6 +284,12 @@ def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: in
     )
     page_count = pdf_page_count(pdf_path)
     success = page_count is not None and not fatal_error
+    combined_log = "\n".join(
+        (item.get("stdout_tail") or "")
+        + ("\n" + str(item.get("stderr_tail") or "") if item.get("stderr_tail") else "")
+        for item in passes
+    )
+    case = classify_compile_case(combined_log, success=success)
     return {
         "available": True,
         "success": success,
@@ -286,6 +301,9 @@ def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: in
         "restored_good_pdf": restored_good_pdf,
         "partial_pdf_available": False,
         "fatal_error": fatal_error,
+        "case_status": case["case_status"],
+        "missing_sty": case["missing_sty"],
+        "missing_images": case["missing_images"],
         "passes": passes,
         "stdout_tail": "\n".join(str(item.get("stdout_tail") or "") for item in passes)[-4000:],
         "stderr_tail": "\n".join(str(item.get("stderr_tail") or "") for item in passes)[-4000:],

@@ -476,7 +476,11 @@ def _count_by_category(entries: List[Dict[str, Any]]) -> Dict[str, int]:
     return counts
 
 
-def _pair_object_clusters(object_clusters: List[Dict[str, Any]], caption_pair_max_gap_px: int = 120) -> List[Dict[str, Any]]:
+def _pair_object_clusters(
+    object_clusters: List[Dict[str, Any]],
+    caption_pair_max_gap_px: int = 120,
+    page_sizes: Optional[Dict[int, tuple[int, int]]] = None,
+) -> List[Dict[str, Any]]:
     by_page: Dict[int, List[Dict[str, Any]]] = {}
     for cluster in object_clusters:
         page = int(cluster.get("page") or 0)
@@ -484,7 +488,9 @@ def _pair_object_clusters(object_clusters: List[Dict[str, Any]], caption_pair_ma
 
     pairings: List[Dict[str, Any]] = []
     for page, clusters in by_page.items():
-        page_width = 1
+        # 用渲染页图的真实宽度做分母；bbox 右缘只是 PIL 不可用时的兜底。
+        rendered_size = (page_sizes or {}).get(page)
+        page_width = int(rendered_size[0]) if rendered_size and rendered_size[0] > 0 else 1
         for cluster in clusters:
             bbox = cluster.get("bbox")
             if bbox:
@@ -968,6 +974,7 @@ def aggregate_visual_signals(
     object_pairings = _pair_object_clusters(
         object_clusters,
         caption_pair_max_gap_px=int(visual_rules.get("caption_pair_max_gap_px") or 120),
+        page_sizes=_load_rendered_page_sizes(pages_path),
     )
     low_width_pairs = [
         p for p in object_pairings

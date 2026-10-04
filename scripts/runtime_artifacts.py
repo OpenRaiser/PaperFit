@@ -7,6 +7,11 @@ import hashlib
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
+try:
+    from runtime_snapshots import discover_source_files
+except ModuleNotFoundError:  # package import during unit tests
+    from .runtime_snapshots import discover_source_files
+
 
 def _resolve(project_root: Path, value: Optional[str]) -> Optional[Path]:
     if not value:
@@ -82,15 +87,32 @@ def _hash_page_set(paths: Iterable[Path], project_root: Path) -> Dict[str, Any]:
     }
 
 
+def _source_set_entry(paths: Iterable[Path], project_root: Path) -> Dict[str, Any]:
+    files = [_file_entry(path, project_root) for path in paths]
+    newest_mtime: Optional[float] = None
+    for entry in files:
+        mtime = entry.get("mtime")
+        if isinstance(mtime, (int, float)):
+            newest_mtime = mtime if newest_mtime is None else max(newest_mtime, mtime)
+    return {
+        "exists": bool(files) and all(entry.get("exists") for entry in files),
+        "count": len(files),
+        "newest_mtime": newest_mtime,
+        "files": files,
+    }
+
+
 def _freshness_checks(entries: Dict[str, Any]) -> Dict[str, Any]:
     checks: Dict[str, Dict[str, Any]] = {}
 
+    source_set = entries.get("source_set") or {}
     pdf = entries.get("pdf") or {}
     pages = entries.get("page_images") or {}
     visual = entries.get("visual_signal_report") or {}
     defect = entries.get("defect_report") or {}
     gatekeeper = entries.get("gatekeeper_decision") or {}
 
+    source_newest = source_set.get("newest_mtime")
     pdf_mtime = pdf.get("mtime")
     page_newest = pages.get("newest_mtime")
     page_oldest = pages.get("oldest_mtime")
@@ -99,6 +121,11 @@ def _freshness_checks(entries: Dict[str, Any]) -> Dict[str, Any]:
     gatekeeper_mtime = gatekeeper.get("mtime")
 
     checks["pdf_exists"] = {"pass": bool(pdf.get("exists"))}
+    checks["pdf_not_older_than_source_set"] = {
+        "pass": bool(pdf_mtime is not None and source_newest is not None and pdf_mtime >= source_newest),
+        "source_newest_mtime": source_newest,
+        "pdf_mtime": pdf_mtime,
+    }
     checks["page_images_exist"] = {
         "pass": bool(pages.get("exists")),
         "count": int(pages.get("count") or 0),
@@ -144,9 +171,15 @@ def collect_artifact_manifest(
     pdf_path = main_path.with_suffix(".pdf") if main_path is not None else None
     page_dir = _resolve(root, artifacts.get("page_images_dir"))
 
+    try:
+        source_paths = discover_source_files(root, main_tex)
+    except OSError:
+        source_paths = [main_path] if main_path is not None else []
+
     entries: Dict[str, Any] = {
         "task_spec": _file_entry(_resolve(root, artifacts.get("task_spec")), root),
         "main_tex": _file_entry(main_path, root),
+        "source_set": _source_set_entry(source_paths, root),
         "pdf": _file_entry(pdf_path, root),
         "page_images": _hash_page_set(_page_files(page_dir), root),
         "rule_report": _file_entry(_resolve(root, artifacts.get("rule_report")), root),

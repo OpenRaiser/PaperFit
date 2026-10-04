@@ -222,7 +222,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
             self.assertEqual(result["approval"]["execution"]["applied_count"], 1)
             policy = result["repair_loop_policy"]
             self.assertEqual(policy["execution_mode"], "bounded_apply")
-            self.assertEqual(policy["candidate_batch_limit"], 1)
+            self.assertEqual(policy["candidate_batch_limit"], 3)
             self.assertEqual(policy["applied_count"], 1)
             self.assertEqual(policy["stop_condition"], "done")
             self.assertFalse(policy["next_round_allowed"])

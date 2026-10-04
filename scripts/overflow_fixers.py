@@ -659,26 +659,48 @@ def fix_table_overflow(
     Returns:
         (修改后的内容，修复结果)
     """
-    # 定位表格环境
-    if table_label:
-        # 通过标签定位表格
-        pattern = r'(\\begin\{(?:table|table\*|sidewaystable)\}(?:\[[htbp]+\])?.*?)(\\begin\{tabular\})(\{[^}]+\})(.*?)(\\end\{tabular\})(.*?\\end\{(?:table|table\*|sidewaystable)\})'
-    else:
-        # 查找最近的 tabular 环境
-        pattern = r'(\\begin\{(?:table|table\*|sidewaystable)\}(?:\[[htbp]+\])?.*?)(\\begin\{tabular\})(\{[^}]+\})(.*?)(\\end\{tabular\})(.*?\\end\{(?:table|table\*|sidewaystable)\})'
+    # 定位表格环境：table+tabular 块（label 与行号在选择阶段使用）
+    pattern = r'(\\begin\{(?:table|table\*|sidewaystable)\}(?:\[[htbp]+\])?.*?)(\\begin\{tabular\})(\{[^}]+\})(.*?)(\\end\{tabular\})(.*?\\end\{(?:table|table\*|sidewaystable)\})'
 
     matches = list(re.finditer(pattern, tex_content, re.DOTALL))
 
     if not matches:
         return tex_content, None
 
-    # 如果有 line_number，找到最接近的表格
-    target_match = matches[0]
-    if line_number:
-        for match in matches:
-            if match.start() <= line_number <= match.end():
-                target_match = match
-                break
+    def _line_of(offset: int) -> int:
+        # match.start()/end() are character offsets; defects carry 1-indexed
+        # line numbers, so convert before comparing.
+        return tex_content.count("\n", 0, offset) + 1
+
+    # 有 label 时优先在携带该 label 的表格里选择
+    candidates = matches
+    if table_label:
+        labeled = [
+            match
+            for match in matches
+            if f"\\label{{{table_label}}}" in match.group(0)
+        ]
+        if labeled:
+            candidates = labeled
+
+    target_match = candidates[0]
+    if line_number is not None:
+        containing = [
+            match
+            for match in candidates
+            if _line_of(match.start()) <= line_number <= _line_of(match.end())
+        ]
+        if containing:
+            target_match = containing[0]
+        else:
+            # 溢出行不在任何候选表格内：选行距最近的表格
+            target_match = min(
+                candidates,
+                key=lambda match: min(
+                    abs(line_number - _line_of(match.start())),
+                    abs(line_number - _line_of(match.end())),
+                ),
+            )
 
     full_table = target_match.group(0)
     column_spec = target_match.group(3)
@@ -702,8 +724,11 @@ def fix_table_overflow(
         # 将 tabular 改为 tabularx，将部分列改为 X 列
         new_column_spec = convert_to_tabularx_columns(column_spec)
         begin_pattern = re.compile(r"\\begin\{tabular\}\s*" + re.escape(column_spec))
+        # 替换文本含 \linewidth / 列规格的反斜杠，必须用函数替换，
+        # 走模板替换会因非法转义（如 \l）抛 re.error。
+        begin_replacement = f"\\begin{{tabularx}}{{\\linewidth}}{new_column_spec}"
         new_table, begin_count = begin_pattern.subn(
-            f"\\begin{{tabularx}}{{\\linewidth}}{new_column_spec}",
+            lambda _match: begin_replacement,
             full_table,
             count=1,
         )
@@ -712,7 +737,7 @@ def fix_table_overflow(
 
         new_table, end_count = re.subn(
             r"\\end\{tabular\}",
-            r"\\end{tabularx}",
+            lambda _match: "\\end{tabularx}",
             new_table,
             count=1,
         )

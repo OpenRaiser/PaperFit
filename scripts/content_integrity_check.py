@@ -590,15 +590,19 @@ def cmd_pre(args):
         'semantic_hash': semantic_hash(content),
         'academic_word_count': count_words(academic),
         'sentence_count': classification['sentence_count'],
-        'content': content[:500]  # First 500 chars for reference
+        'content': content[:500],  # First 500 chars for human reference only
+        # Full baseline content: 'post' must diff against the complete range,
+        # never against the truncated reference field.
+        'full_content': content,
+        'content_length': len(content)
     }
 
     if args.output:
-        with open(args.output, 'w') as f:
-            json.dump(result, f, indent=2)
+        with open(args.output, 'w', encoding='utf-8') as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
         print(f"Pre-repair snapshot saved to {args.output}")
     else:
-        print(json.dumps(result, indent=2))
+        print(json.dumps(result, indent=2, ensure_ascii=False))
 
     return result
 
@@ -610,20 +614,34 @@ def cmd_post(args):
     line_start = int(line_range[0])
     line_end = int(line_range[1]) if len(line_range) > 1 else line_start + 50
 
-    with open(args.baseline, 'r') as f:
+    with open(args.baseline, 'r', encoding='utf-8') as f:
         baseline = json.load(f)
 
-    original_content = baseline.get('content', '')
+    full_content = baseline.get('full_content')
+    if full_content is None:
+        full_content = baseline.get('content', '')
+    # A legacy baseline only carries the truncated 500-char reference field.
+    # Word-drift levels computed against it are unreliable, so such
+    # comparisons must never trigger auto_rollback on their own.
+    baseline_truncated = 'full_content' not in baseline and len(full_content) >= 500
+    original_content = full_content
     repaired_content = get_line_range_content(file_path, line_start, line_end)
 
     diff_result = compute_content_diff(original_content, repaired_content)
     diff_result['file'] = file_path
     diff_result['line_range'] = [line_start, line_end]
     diff_result['baseline_file'] = args.baseline
+    diff_result['baseline_truncated'] = baseline_truncated
 
     # Determine action required
     violation_level = diff_result['violation']['level']
-    if violation_level >= 3:
+    if baseline_truncated:
+        diff_result['action_required'] = 'manual_review'
+        diff_result['action_note'] = (
+            'baseline lacks full_content; word-drift levels are computed against a '
+            'truncated reference and cannot support auto_rollback'
+        )
+    elif violation_level >= 3:
         diff_result['action_required'] = 'auto_rollback'
     elif violation_level >= 2:
         diff_result['action_required'] = 'manual_review'
@@ -633,11 +651,11 @@ def cmd_post(args):
         diff_result['action_required'] = 'none'
 
     if args.output:
-        with open(args.output, 'w') as f:
-            json.dump(diff_result, f, indent=2)
+        with open(args.output, 'w', encoding='utf-8') as f:
+            json.dump(diff_result, f, indent=2, ensure_ascii=False)
         print(f"Post-repair validation saved to {args.output}")
     else:
-        print(json.dumps(diff_result, indent=2))
+        print(json.dumps(diff_result, indent=2, ensure_ascii=False))
 
     return diff_result
 
@@ -669,11 +687,11 @@ def cmd_critical(args):
     result = check_critical_sections(args.tex_file, args.config)
 
     if args.output:
-        with open(args.output, 'w') as f:
-            json.dump(result, f, indent=2)
+        with open(args.output, 'w', encoding='utf-8') as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
         print(f"Critical sections check saved to {args.output}")
     else:
-        print(json.dumps(result, indent=2))
+        print(json.dumps(result, indent=2, ensure_ascii=False))
 
     return result
 
