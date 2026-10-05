@@ -354,10 +354,17 @@ def _build_overflow_defects(
     seen: set[tuple[str, str, Optional[int], str]] = set()
     saw_overflow_candidate = False
 
-    for candidate in plan.get("candidates") or []:
+    # 批次内的 D 族候选按溢出量降序处理：平局优先级下最重的溢出先进批次，
+    # 738pt 的公式溢出不能被行号靠前的 3pt 级段落溢出挤出名额
+    d_family_candidates = [
+        candidate
+        for candidate in plan.get("candidates") or []
+        if str(candidate.get("defect_family") or "") in {"D1", "D2", "D3"}
+    ]
+    d_family_candidates.sort(key=lambda c: -float(c.get("overflow_amount") or 0.0))
+
+    for candidate in d_family_candidates:
         defect_id = str(candidate.get("defect_family") or "")
-        if defect_id not in {"D1", "D2", "D3"}:
-            continue
         saw_overflow_candidate = True
 
         target = candidate.get("target") or {}

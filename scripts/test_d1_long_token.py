@@ -67,15 +67,27 @@ class FixLongTokenTest(unittest.TestCase):
 
     def test_short_token_ignored(self):
         line = "We use ResNet for evaluation."
-        result = _fix_long_token_with_breaks(TEX, line, line_number=3)
+        # 无行号 → 仅扫描日志 context：短 token 不处理
+        result = _fix_long_token_with_breaks(TEX, line, line_number=None)
         self.assertIsNone(result)
+
+    def test_source_window_finds_token_when_context_lacks_it(self):
+        # 日志 context 不含长 token，但按行号回源码窗口必须找到并修复
+        line = "We use ResNet for evaluation."
+        result = _fix_long_token_with_breaks(TEX, line, line_number=3)
+        self.assertIsNotNone(result)
+        self.assertIn("\\allowbreak", result[0])
 
     def test_command_name_not_touched(self):
         line = "\\newcommand{\\VeryLongCommandNameThatExceedsThirtyCharacters}{42}"
         tex = TEX + "\\newcommand{\\VeryLongCommandNameThatExceedsThirtyCharacters}{42}\n"
         result = _fix_long_token_with_breaks(tex, line, line_number=5)
-        # 应该拒绝（可能是命令名的一部分）
-        self.assertIsNone(result)
+        # 命令名本身绝不能被插入断点；窗口若修到正文 token 是允许的
+        if result is not None:
+            self.assertNotIn("\\allowbreak VeryLongCommandName", result[0])
+            self.assertIn("\\newcommand{\\VeryLongCommandNameThatExceedsThirtyCharacters}", result[0])
+        else:
+            self.assertNotIn("\\allowbreak VeryLongCommandName", tex)
 
     def test_already_broken_not_re_processed(self):
         line = "We use Already\\allowbreak BrokenTokenName for evaluation."

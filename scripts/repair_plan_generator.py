@@ -1605,6 +1605,9 @@ def generate_repair_plan(
             0 if _is_urgent_overflow_candidate(item) and not has_visual_b2_width_candidate else 1,
             -int(item.get("priority_score") or 0),
             -_candidate_severity_rank(str(item.get("severity") or "")),
+            
+            
+            -float(item.get("overflow_amount") or 0.0),
             int(item.get("page") or 0) if item.get("page") is not None else 10**6,
             str((item.get("target") or {}).get("label") or ""),
         )

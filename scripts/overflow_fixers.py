@@ -543,8 +543,23 @@ def _fix_long_token_with_breaks(
     在 camelCase 边界、下划线、句点、斜杠处插入 \\allowbreak，
     不用 \\texttt 包裹（那会改变字体观感——终版方案 D1-A 第 5 条）。
     """
-    # 找 ≥30 字符的连续字母数字/下划线/斜杠/句点串
-    long_tokens = re.findall(r"[A-Za-z][A-Za-z0-9_/.]{29,}", overfull_line)
+    
+    
+    
+    long_tokens: List[str] = []
+    if line_number is not None:
+        try:
+            source_lines = tex_content.splitlines()
+            # 警告行号是段落范围，token 可能比段落起始行还靠前 1-2 行（TeX 行统计
+            # 与源行有偏移），窗口从 line_number-3 起向下 14 行
+            start_idx = max(0, line_number - 3)
+            window = "\n".join(source_lines[start_idx : start_idx + 14])
+            long_tokens = re.findall(r"[A-Za-z][A-Za-z0-9_/.]{29,}", window)
+        except Exception:
+            long_tokens = []
+    if not long_tokens:
+        long_tokens = re.findall(r"[A-Za-z][A-Za-z0-9_/.]{29,}", overfull_line)
+
     if not long_tokens:
         return None
 
@@ -563,8 +578,14 @@ def _fix_long_token_with_breaks(
     # 在全文中替换（只替换第一次出现，且确认不在数学环境/命令名内）
     if f"\\{token}" in tex_content:
         return None  # 可能是命令名，不动
-    if re.search(r"\$[^$]*" + re.escape(token), tex_content[:tex_content.find(token) + 1] if token in tex_content else ""):
-        return None  # 可能在数学环境内
+    token_pos = tex_content.find(token)
+    if token_pos < 0:
+        return None
+    prefix = tex_content[:token_pos]
+    # 数学环境判定用 $ 配对奇偶：旧正则 \$[^$]*token 对"前方出现过任意 $"
+    # 一律误判成数学环境，导致正文长 token 永远修不了
+    if (prefix.count("$") - prefix.count(r"\$")) % 2 == 1:
+        return None  # 在行内数学环境内
 
     modified = tex_content.replace(token, breakable, 1)
     if modified == tex_content:
@@ -582,7 +603,11 @@ def _fix_long_token_with_breaks(
 
 
 def _insert_safe_breaks_in_token(token: str) -> str:
-    """在 camelCase 边界、下划线、句点、斜杠后插入 \\allowbreak。"""
+    """在 camelCase 边界、下划线、句点、斜杠后插入 \\allowbreak。
+
+    无自然边界的长串（如 56 连 X 的注入 token）按固定间隔补断点，
+    保证任意连续不可断片段不超过 12 字符——否则 173pt 级溢出无法回行。
+    """
     result = list(token)
     insert_positions = []
 
@@ -598,8 +623,22 @@ def _insert_safe_breaks_in_token(token: str) -> str:
         elif char in "_/." and next_char.isalnum():
             insert_positions.append(idx + 1)
 
+    # 固定间隔补断：相邻断点（含首尾）间距超过 12 的空档内，每 10 字符断一次
+    bounded = sorted(set(insert_positions))
+    interval_positions = []
+    prev_cut = 0
+    for pos in bounded:
+        while pos - prev_cut > 12:
+            prev_cut += 10
+            if prev_cut < pos:
+                interval_positions.append(prev_cut)
+        prev_cut = pos
+    while len(token) - prev_cut > 12:
+        prev_cut += 10
+        interval_positions.append(prev_cut)
+
     # 从后往前插入（避免位置偏移）
-    for pos in reversed(insert_positions):
+    for pos in reversed(sorted(set(insert_positions) | set(interval_positions))):
         result.insert(pos, r"\allowbreak ")
 
     return "".join(result)
