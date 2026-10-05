@@ -486,11 +486,26 @@ def _batch_fix_included_file_overfull(
         actions.append(f"拆分 {cite_count} 处引用串")
 
     # 1.5 把 ~\citep 替换为空格+\citep（允许 TeX 在引用前断行）
-    # ~ 是不断行空格，阻止了 TeX 在词和引用之间断行
     tilde_count = content.count("~\\citep") + content.count("~\\cite")
     if tilde_count > 0:
         content = content.replace("~\\citep", " \\citep").replace("~\\cite", " \\cite")
         actions.append(f"释放 {tilde_count} 处引用前断行点")
+
+    # 1.7 缩小过宽的 wraptable（>0.45\textwidth 的缩到 0.45）
+    # wraptable 压缩正文宽度导致周围所有段落溢出
+    wraptable_count = 0
+    for wt_match in re.finditer(r"\\begin\{wraptable\}\{[lr]\}\{([\d.]+)\\textwidth\}", content):
+        try:
+            width = float(wt_match.group(1))
+        except ValueError:
+            continue
+        if width > 0.45:
+            old_spec = wt_match.group(0)
+            new_spec = old_spec.replace(f"{width}\\textwidth", "0.45\\textwidth")
+            content = content.replace(old_spec, new_spec, 1)
+            wraptable_count += 1
+    if wraptable_count > 0:
+        actions.append(f"缩小 {wraptable_count} 处过宽 wraptable 至 0.45\\textwidth")
 
     # 2. 对整个正文区域应用 \\sloppy
     begin_doc = content.find("\\begin{document}")
