@@ -831,7 +831,24 @@ def execute_repair_plan(
     tex_path = Path(main_tex)
     original_tex = tex_path.read_text(encoding="utf-8") if tex_path.is_file() else ""
     if _plan_uses_conflict_batch(plan):
-        batched_plan = {"candidates": _select_conflict_batch(plan, max_candidates=max_candidates)}
+        
+        
+        actionable_plan = {"candidates": _actionable_candidates(plan), **{k: v for k, v in plan.items() if k != "candidates"}}
+        catastrophic_overflow = _has_catastrophic_overflow_candidates(actionable_plan)
+        if catastrophic_overflow:
+            batched_plan = {
+                "candidates": [
+                    c
+                    for c in sorted(
+                        (c for c in actionable_plan["candidates"] if str(c.get("defect_family") or "") in {"D1", "D2", "D3"}),
+                        key=lambda c: -float(c.get("overflow_amount") or 0.0),
+                    )
+                ][:max_candidates]
+            }
+            selection_reason = "catastrophic_d_overflow_preempts_conflict_batch"
+        else:
+            batched_plan = {"candidates": _select_conflict_batch(plan, max_candidates=max_candidates)}
+            selection_reason = "nonconflicting_batch"
         float_defects = _build_float_defects(batched_plan, max_candidates=max_candidates)
         overflow_defects = _build_overflow_defects(
             batched_plan,
@@ -841,7 +858,6 @@ def execute_repair_plan(
         space_defects = _build_space_util_defects(batched_plan, max_candidates=max_candidates, column_type=column_type)
         consistency_defects = _build_consistency_defects(batched_plan, max_candidates=max_candidates)
         urgent_overflow_first = False
-        selection_reason = "nonconflicting_batch"
         execution_plan = batched_plan
     else:
         actionable_plan = {"candidates": _actionable_candidates(plan), **{k: v for k, v in plan.items() if k != "candidates"}}
