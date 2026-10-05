@@ -42,7 +42,7 @@ def git_head(root: Path) -> Optional[str]:
             ["git", "rev-parse", "HEAD"],
             cwd=str(root),
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired):

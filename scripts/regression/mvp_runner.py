@@ -407,6 +407,13 @@ def _run_vlm_revision_pairs(
     model = os.environ.get("BASELINE_VLM_MODEL_NAME", "")
 
     try:
+        # evaluator/ 在项目根下，需要加入 sys.path
+        evaluator_dir = REPO_ROOT / "evaluator"
+        evaluator_lib = evaluator_dir / "lib"
+        for path_entry in (str(evaluator_dir), str(evaluator_lib)):
+            if path_entry not in sys.path:
+                sys.path.insert(0, path_entry)
+
         from evaluate_revision_pair import run_revision_evaluation
         from vlm_evaluator import OpenAICompatibleVisionJudgeClient, VLMAbsoluteConfig
 

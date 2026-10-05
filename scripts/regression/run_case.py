@@ -74,7 +74,7 @@ def default_paperfit_runner(
             [python_exe, str(orchestrator), "run-task", str(task_path), "--output", str(output_path)],
             cwd=str(project),
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=1800,
         )
         if output_path.is_file():

@@ -194,7 +194,7 @@ def pdf_page_count(pdf: Path) -> Optional[int]:
         r = subprocess.run(
             ["pdfinfo", str(pdf)],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=60,
         )
         if r.returncode != 0:

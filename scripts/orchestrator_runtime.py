@@ -1073,9 +1073,11 @@ class OrchestratorRuntime:
                     before_visual = self._load_optional_json(
                         Path.cwd() / str((state.get("artifacts") or {}).get("visual_signal_report") or "data/visual_signal_report.json")
                     )
+                    before_pages = int(((before_visual or {}).get("summary") or {}).get("pages_analyzed") or 0)
                     round_metrics.append(
                         {
                             "round": repair_round_count,
+                            "page_count_before": before_pages if before_pages > 0 else None,
                             "overfull_hbox_total_before": int(before_rule_summary.get("overfull_hbox_total") or 0),
                             "defects_remaining_before": int((state.get("defect_summary") or {}).get("remaining") or 0),
                             "visual_findings_before": len((before_visual or {}).get("findings") or []),
@@ -1346,9 +1348,14 @@ class OrchestratorRuntime:
                         from regression.round_acceptance import RoundEvidence, evaluate_round_acceptance
 
                         latest = round_metrics[-1]
+                        # 从编译/渲染产物取真实页数（不用视觉 finding 数代替）
+                        visual_report = self._load_optional_json(
+                            Path.cwd() / str((state.get("artifacts") or {}).get("visual_signal_report") or "data/visual_signal_report.json")
+                        )
+                        actual_pages = int(((visual_report or {}).get("summary") or {}).get("pages_analyzed") or 0)
                         acceptance_evidence = RoundEvidence(
-                            page_count_before=latest.get("visual_findings_before"),
-                            page_count_after=latest.get("visual_findings_after"),
+                            page_count_before=latest.get("page_count_before"),
+                            page_count_after=actual_pages if actual_pages > 0 else latest.get("page_count_after"),
                             target_pages=task_spec.target_pages,
                             overfull_before=latest.get("overfull_hbox_total_before"),
                             overfull_after=latest.get("overfull_hbox_total_after"),
