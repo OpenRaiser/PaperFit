@@ -19,6 +19,8 @@ from orchestrator_runtime import OrchestratorRuntime  # noqa: E402
 from runtime_types import TaskSpec  # noqa: E402
 
 
+
+
 class RuntimeSourceChangingTest(unittest.TestCase):
     def test_full_vto_runtime_creates_snapshot_and_runs_one_repair_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -203,7 +205,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                     return_value={"available": True, "hard_failures": []},
                 ),
                 mock.patch.object(OrchestratorRuntime, "_run_round_core", fake_core),
-                mock.patch.object(OrchestratorRuntime, "execute_repair_plan", fake_execute),
+                mock.patch.object(OrchestratorRuntime, "execute_repair_plan_phased", fake_execute),
             ):
                 result = OrchestratorRuntime(state_path=str(root / "data" / "state.json")).run_task(
                     task_spec=spec,
@@ -415,7 +417,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                     side_effect=hard_guard_reports,
                 ),
                 mock.patch.object(OrchestratorRuntime, "_run_round_core", fake_core),
-                mock.patch.object(OrchestratorRuntime, "execute_repair_plan", fake_execute),
+                mock.patch.object(OrchestratorRuntime, "execute_repair_plan_phased", fake_execute),
             ):
                 result = OrchestratorRuntime(state_path=str(root / "data" / "state.json")).run_task(
                     task_spec=spec,
@@ -744,7 +746,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                     return_value={"available": True, "hard_failures": []},
                 ),
                 mock.patch.object(OrchestratorRuntime, "_run_round_core", fake_core),
-                mock.patch.object(OrchestratorRuntime, "execute_repair_plan", fake_execute),
+                mock.patch.object(OrchestratorRuntime, "execute_repair_plan_phased", fake_execute),
             ):
                 result = OrchestratorRuntime(state_path=str(root / "data" / "state.json")).run_task(
                     task_spec=spec,
@@ -937,7 +939,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                     return_value={"available": True, "hard_failures": []},
                 ),
                 mock.patch.object(OrchestratorRuntime, "_run_round_core", fake_core),
-                mock.patch.object(OrchestratorRuntime, "execute_repair_plan", fake_execute),
+                mock.patch.object(OrchestratorRuntime, "execute_repair_plan_phased", fake_execute),
             ):
                 result = OrchestratorRuntime(state_path=str(root / "data" / "state.json")).run_task(
                     task_spec=spec,

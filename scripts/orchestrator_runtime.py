@@ -485,6 +485,69 @@ class OrchestratorRuntime:
             self.manager.ingest_repair_execution_report(output_path)
         return self.manager.load()
 
+    def execute_repair_plan_phased(
+        self,
+        main_tex: str,
+        output_path: str = "data/repair_execution_report.json",
+        max_candidates: int = 3,
+    ) -> Dict[str, Any]:
+        "分组批处理 + 原子接受。"
+        self.manager.load()
+        repair_plan_path = ((self.manager.get("artifacts") or {}).get("repair_plan")) or "data/repair_plan.json"
+        task_config = self.manager.get("task") or {}
+        freshness = self._validate_repair_plan_before_execution(
+            repair_plan_path=repair_plan_path,
+            main_tex=main_tex,
+        )
+        if not freshness.get("fresh"):
+            report = blocked_stale_repair_plan_report(
+                repair_plan_path=repair_plan_path,
+                main_tex=main_tex,
+                freshness=freshness,
+            )
+            out_path = Path(output_path)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            self.manager.ingest_repair_execution_report(output_path)
+            self.set_next_actions(["Regenerate repair plan before applying source mutations"])
+            return self.manager.load()
+        try:
+            from phased_repair import execute_phased_repair
+
+            summary = execute_phased_repair(
+                project_root=Path.cwd(),
+                repair_plan_path=Path.cwd() / repair_plan_path,
+                main_tex=main_tex,
+                column_type=task_config.get("column_type"),
+                target_pages=task_config.get("target_pages"),
+                max_local_batch=6,
+                max_layout_candidates=max(3, max_candidates),
+                max_global_candidates=1,
+                report_path=Path.cwd() / "data" / "phased_repair_report.json",
+            )
+            out_path = Path.cwd() / output_path
+            out_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            self.manager.ingest_repair_execution_report(output_path)
+            return self.manager.load()
+        except Exception as phased_exc:
+            self._record_runtime_action(
+                "phased_repair_fallback",
+                {
+                    "success": False,
+                    "error": f"{type(phased_exc).__name__}: {phased_exc}",
+                    "fallback": "single_batch_repair_plan_executor",
+                },
+                phase="repair",
+                state="REPAIRING",
+                emit_event=None,
+                runtime_actions={},
+            )
+            return self.execute_repair_plan(
+                main_tex=main_tex,
+                output_path=output_path,
+                max_candidates=max_candidates,
+            )
+
     def _validate_repair_plan_before_execution(
         self,
         *,
@@ -1091,11 +1154,21 @@ class OrchestratorRuntime:
                     before_pages = int(((before_visual or {}).get("summary") or {}).get("pages_analyzed") or 0)
                     before_structural = self._round_structural_counts(state)
                     before_undefined = self._round_undefined_ref_counts(state)
+                    before_severe = self._severe_overfull_counts(state)
+                    before_pt = float(before_rule_summary.get("total_overflow_pt") or 0.0)
                     round_metrics.append(
                         {
                             "round": repair_round_count,
                             "page_count_before": before_pages if before_pages > 0 else None,
+                            "target_pages": task_spec.target_pages,
+                            "page_gap_before": (
+                                abs(before_pages - task_spec.target_pages)
+                                if before_pages > 0 and task_spec.target_pages is not None
+                                else None
+                            ),
                             "overfull_hbox_total_before": int(before_rule_summary.get("overfull_hbox_total") or 0),
+                            "severe_overfull_before": before_severe,
+                            "total_overflow_pt_before": before_pt,
                             "defects_remaining_before": int((state.get("defect_summary") or {}).get("remaining") or 0),
                             "visual_findings_before": len((before_visual or {}).get("findings") or []),
                             "figures_before": before_structural["figures"],
@@ -1104,9 +1177,10 @@ class OrchestratorRuntime:
                             "refs_before": before_structural["refs"],
                             "undefined_refs_before": before_undefined["undefined_refs"],
                             "undefined_citations_before": before_undefined["undefined_citations"],
+                            "object_counts_before": before_structural,
                         }
                     )
-                    repair_state = self.execute_repair_plan(
+                    repair_state = self.execute_repair_plan_phased(
                         main_tex=task_spec.main_tex,
                         output_path="data/repair_execution_report.json",
                         max_candidates=DEFAULT_CANDIDATE_BATCH_LIMIT,
@@ -1364,12 +1438,25 @@ class OrchestratorRuntime:
                         actual_pages = int(((visual_report or {}).get("summary") or {}).get("pages_analyzed") or 0)
                         after_structural = self._round_structural_counts(state)
                         after_undefined = self._round_undefined_ref_counts(state)
+                        after_severe = self._severe_overfull_counts(state)
+                        after_rule_summary = (state.get("rule_report") or {}).get("summary") or {}
                         latest["figures_after"] = after_structural["figures"]
                         latest["tables_after"] = after_structural["tables"]
                         latest["labels_after"] = after_structural["labels"]
                         latest["refs_after"] = after_structural["refs"]
                         latest["undefined_refs_after"] = after_undefined["undefined_refs"]
                         latest["undefined_citations_after"] = after_undefined["undefined_citations"]
+                        latest["object_counts_after"] = after_structural
+                        latest["severe_overfull_after"] = after_severe
+                        latest["total_overflow_pt_after"] = float(after_rule_summary.get("total_overflow_pt") or 0.0)
+                        latest["page_gap_after"] = (
+                            abs(actual_pages - task_spec.target_pages)
+                            if actual_pages > 0 and task_spec.target_pages is not None
+                            else None
+                        )
+                        phased_summary = state.get("repair_execution_summary") or {}
+                        latest["accepted_candidates"] = int(phased_summary.get("accepted_count") or 0)
+                        latest["rejected_candidates"] = int(phased_summary.get("rejected_count") or 0)
                         acceptance_evidence = RoundEvidence(
                             page_count_before=latest.get("page_count_before"),
                             # 页数证据缺失时传 None：验收函数 fail-closed，绝不回退旧值放行
@@ -1377,6 +1464,8 @@ class OrchestratorRuntime:
                             target_pages=task_spec.target_pages,
                             overfull_before=latest.get("overfull_hbox_total_before"),
                             overfull_after=latest.get("overfull_hbox_total_after"),
+                            severe_overfull_before=latest.get("severe_overfull_before"),
+                            severe_overfull_after=latest.get("severe_overfull_after"),
                             figures_before=latest.get("figures_before") or 0,
                             figures_after=latest.get("figures_after") or 0,
                             tables_before=latest.get("tables_before") or 0,
@@ -1396,6 +1485,7 @@ class OrchestratorRuntime:
                         )
                         acceptance = evaluate_round_acceptance(acceptance_evidence)
                         if not acceptance.accepted and acceptance.rollback_required:
+                            round_metrics[-1]["rollback_reason"] = "; ".join(acceptance.reasons)[:300]
                             rollback_result = self._rollback_after_quality_regression(
                                 project_root=project_root,
                                 rollback_target=str(snapshot.get("rollback_target") or ""),
@@ -2517,6 +2607,18 @@ class OrchestratorRuntime:
             "undefined_refs": int(summary.get("undefined_references") or 0),
             "undefined_citations": int(summary.get("citation_issues") or 0),
         }
+
+    def _severe_overfull_counts(self, state: Dict[str, Any]) -> Optional[int]:
+        "≥100pt 的严重溢出计数（ 单独门禁）。"
+        rule_report = state.get("rule_report") or {}
+        warnings = rule_report.get("overfull_hbox") or []
+        if not warnings:
+            total = int((rule_report.get("summary") or {}).get("overfull_hbox_total") or 0)
+            return None if total else 0
+        try:
+            return sum(1 for w in warnings if float(w.get("overflow_pt") or 0.0) >= 100.0)
+        except (TypeError, ValueError):
+            return None
 
     def _has_pending_float_priority_candidates(self, state: Optional[Dict[str, Any]] = None) -> bool:
         current_state = state or self.manager.load()

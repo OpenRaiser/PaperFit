@@ -1364,7 +1364,16 @@ def _build_log_candidates(
     if int(summary.get("overfull_hbox_total") or 0) > 0:
         detailed_candidates = 0
         textheight_boost_applied = False
-        for warning in rule_report.get("overfull_hbox") or []:
+        
+        overflow_by_index: Dict[int, Any] = {}
+        try:
+            from overflow_objects import build_overflow_objects, index_by_warning
+
+            objs = build_overflow_objects(rule_report, Path.cwd(), "main.tex")
+            overflow_by_index = index_by_warning(objs)
+        except Exception:
+            overflow_by_index = {}
+        for warning_idx, warning in enumerate(rule_report.get("overfull_hbox") or []):
             subtype = str(warning.get("subtype") or "paragraph")
             overflow_pt = float(warning.get("overflow_pt") or 0.0)
             lines = str(warning.get("lines") or "").strip() or None
@@ -1382,31 +1391,43 @@ def _build_log_candidates(
                 except Exception:
                     pass
 
-            candidates.append(
-                {
-                    "candidate_type": "log_warning",
-                    "page": None,
-                    "target": {
-                        "scope": "table_overflow" if subtype == "alignment" else "overflow",
-                    },
-                    "defect_family": "D1",
-                    "priority_score": 99 if is_textheight_cascade else min(95, 80 + int(max(overflow_pt, 0.0) // 5)),
-                    "severity": "critical" if is_textheight_cascade else str(warning.get("severity") or "major"),
-                    "proposed_action": "remove_preamble_textheight_shrink" if is_textheight_cascade else "repair_overfull_boxes",
-                    "rationale": (
-                        f"overfull_hbox subtype={subtype}, "
-                        f"overflow_pt={overflow_pt:.2f}, "
-                        f"lines={lines or 'unknown'}"
-                        + (", preamble_textheight_shrink_cascade" if is_textheight_cascade else "")
-                    ),
-                    "description": str(warning.get("context") or "").strip(),
-                    "overflow_amount": overflow_pt,
-                    "line_number": line_number,
-                    "lines": lines,
-                    "subtype": subtype,
-                    "evidence_sources": ["rule_report"],
-                }
-            )
+            overflow_obj = overflow_by_index.get(warning_idx)
+            candidate = {
+                "candidate_type": "log_warning",
+                "page": None,
+                "target": {
+                    "scope": "table_overflow" if subtype == "alignment" else "overflow",
+                },
+                "defect_family": "D1",
+                "priority_score": 99 if is_textheight_cascade else min(95, 80 + int(max(overflow_pt, 0.0) // 5)),
+                "severity": "critical" if is_textheight_cascade else str(warning.get("severity") or "major"),
+                "proposed_action": "remove_preamble_textheight_shrink" if is_textheight_cascade else "repair_overfull_boxes",
+                "rationale": (
+                    f"overfull_hbox subtype={subtype}, "
+                    f"overflow_pt={overflow_pt:.2f}, "
+                    f"lines={lines or 'unknown'}"
+                    + (", preamble_textheight_shrink_cascade" if is_textheight_cascade else "")
+                ),
+                "description": str(warning.get("context") or "").strip(),
+                "overflow_amount": overflow_pt,
+                "line_number": line_number,
+                "lines": lines,
+                "subtype": subtype,
+                "evidence_sources": ["rule_report"],
+            }
+            if overflow_obj is not None:
+                
+                candidate.update(
+                    {
+                        "overflow_id": overflow_obj.overflow_id,
+                        "token_type": overflow_obj.token_type,
+                        "token_text": overflow_obj.token_text,
+                        "overflow_zone": overflow_obj.zone,
+                        "severity_score": overflow_obj.severity_score,
+                        "source_anchor": overflow_obj.source_anchor,
+                    }
+                )
+            candidates.append(candidate)
             detailed_candidates += 1
 
         if detailed_candidates == 0:
@@ -1424,6 +1445,25 @@ def _build_log_candidates(
                 }
             )
     return candidates
+
+
+def _promotion_dedupe_key(
+    family: str,
+    label: Any,
+    page: Any,
+    anchor: Any,
+) -> tuple:
+    "去重键 = family + source_file + source_line + object_label + page。"
+    first_anchor = anchor[0] if isinstance(anchor, list) and anchor else {}
+    if not isinstance(first_anchor, dict):
+        first_anchor = {}
+    return (
+        family,
+        str(first_anchor.get("file") or ""),
+        str(first_anchor.get("start_line") or ""),
+        str(label if label is not None else ""),
+        str(page if page is not None else ""),
+    )
 
 
 def _promote_visual_action_plan(visual_signal_report: str) -> List[Dict[str, Any]]:
@@ -1456,7 +1496,7 @@ def _promote_visual_action_plan(visual_signal_report: str) -> List[Dict[str, Any
         severity = str(entry.get("severity") or "minor")
         confidence = float(entry.get("confidence") or 0.5)
 
-        dedupe_key = (family, str(label if label is not None else finding_id))
+        dedupe_key = _promotion_dedupe_key(family, label, page, anchor)
         if not family or dedupe_key in seen_keys:
             continue
         if family_counts.get(family, 0) >= 3:
@@ -1635,6 +1675,11 @@ def generate_repair_plan(
             "source_anchor_candidates": len([c for c in candidates if c["candidate_type"] == "source_anchor"]),
             "semantic_band_candidates": len([c for c in candidates if c["candidate_type"] == "semantic_band"]),
             "global_candidates": len([c for c in candidates if c["candidate_type"] == "global"]),
+            "visual_plan_candidates": len(visual_plan_candidates),
+            "phased_action_classes": {
+                cls: len([c for c in candidates if c.get("action_class") == cls])
+                for cls in ("local_safe", "layout_sensitive", "global_sensitive")
+            },
             "b2_width_findings": b2_width_findings,
             "b2_width_candidates": b2_width_candidates,
             "b2_width_targetable_candidates": b2_width_targetable_candidates,

@@ -21,6 +21,9 @@ class RoundEvidence:
     # Overfull（归因后的可见计数，不是 raw）
     overfull_before: Optional[int] = None
     overfull_after: Optional[int] = None
+    # 严重溢出（≥100pt）单独门禁：1pt 噪声容忍，灾难级不容增加
+    severe_overfull_before: Optional[int] = None
+    severe_overfull_after: Optional[int] = None
 
     # 保护对象计数（不能减少）
     figures_before: int = 0
@@ -94,6 +97,13 @@ def evaluate_round_acceptance(evidence: RoundEvidence) -> AcceptanceDecision:
         if evidence.overfull_after > evidence.overfull_before:
             reasons.append(
                 f"overfull increased: {evidence.overfull_before} -> {evidence.overfull_after}"
+            )
+
+    
+    if evidence.severe_overfull_before is not None and evidence.severe_overfull_after is not None:
+        if evidence.severe_overfull_after > evidence.severe_overfull_before:
+            reasons.append(
+                f"severe overfull increased: {evidence.severe_overfull_before} -> {evidence.severe_overfull_after}"
             )
 
     # 3. 保护对象不能减少

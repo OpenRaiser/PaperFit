@@ -184,6 +184,13 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
         cmd.append("-halt-on-error")
     cmd.append(main_tex.name)
     pdf_path = project_root / f"{main_tex.stem}.pdf"
+    # P2：编译前保存 baseline PDF。编译失败时恢复——绝不删除唯一修前 PDF，
+    # 评估器要能读到修前状态
+    baseline_pdf = project_root / "data" / f"baseline_{main_tex.stem}.pdf"
+    had_baseline = pdf_path.is_file()
+    if had_baseline:
+        baseline_pdf.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(pdf_path, baseline_pdf)
     clean_main_build_artifacts(project_root, main_tex=main_tex)
     try:
         pdf_path.unlink()
@@ -191,6 +198,10 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
         pass
 
     result = run_command(cmd, cwd=project_root, timeout=timeout_sec)
+    restored_baseline = False
+    if not pdf_path.is_file() and had_baseline and baseline_pdf.is_file():
+        shutil.copy2(baseline_pdf, pdf_path)
+        restored_baseline = True
     compile_log = project_root / "data" / "logs" / "paperfit_compile.log"
     _mkdir_for_file(compile_log)
     compile_log.write_text(
@@ -216,6 +227,8 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
     return {
         "success": success,
         "tolerant": tolerant,
+        "restored_baseline_pdf": restored_baseline,
+        "baseline_pdf": str(baseline_pdf) if had_baseline else None,
         "command": cmd,
         "returncode": result.returncode,
         "timeout": timed_out,

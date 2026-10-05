@@ -1742,6 +1742,31 @@ def _handle_paperfit_request(
     )
 
 
+def _source_changing_exit_code(report: Dict[str, Any], project_root: Path, main_tex: Path) -> int:
+    """P2：不把退出码 0 当作修复成功。
+
+    done → 0；编译失败/阻断 → 2；其余状态只有在存在可读 PDF 证据时才 0，
+    没有新 PDF 一律非零（评估器要能读到修前状态，宿主要能感知失败）。
+    """
+    status = str(report.get("status") or "").lower()
+    if status == "done":
+        return 0
+    layout = report.get("layout_completion") or {}
+    if str(layout.get("status") or "").lower() == "done":
+        return 0
+    if status in {"blocked", "failed", "runner_crash", "compile_failed"}:
+        return 2
+    runtime_actions = report.get("runtime_actions") or {}
+    compile_action = runtime_actions.get("compile") or (runtime_actions.get("initial_observe") or {}).get("compile") or {}
+    pdf_path = compile_action.get("pdf_path")
+    if pdf_path and Path(pdf_path).is_file():
+        return 0
+    fallback_pdf = project_root / main_tex.with_suffix(".pdf").name
+    if fallback_pdf.is_file():
+        return 0
+    return 2
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Executable PaperFit command driver")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1927,6 +1952,9 @@ def main() -> None:
         raise SystemExit(f"unsupported command: {args.command}")
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
+
+    if args.command in {"fix-layout", "fix", "migrate-template"}:
+        raise SystemExit(_source_changing_exit_code(report, project_root, main_tex))
 
 
 if __name__ == "__main__":

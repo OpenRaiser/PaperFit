@@ -458,7 +458,10 @@ class CheckVisualRuntimeTest(unittest.TestCase):
                 mock.patch.object(paperfit_command, "_migrate_template") as legacy_migrator,
                 mock.patch("builtins.print"),
             ):
-                paperfit_command.main()
+                # P2 契约：源码改动型命令现在用退出码报告"无新 PDF"，dry-run 期望 SystemExit
+                with self.assertRaises(SystemExit) as exit_ctx:
+                    paperfit_command.main()
+                self.assertIn(exit_ctx.exception.code, (0, 2))
 
             self.assertFalse(legacy_migrator.called)
             self.assertEqual(typed_runner.call_args.args[0], root.resolve())
