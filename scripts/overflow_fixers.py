@@ -230,6 +230,78 @@ def _find_paragraph_span_by_text(
     return None
 
 
+def _fix_long_token_with_breaks(
+    tex_content: str,
+    overfull_line: str,
+    line_number: Optional[int] = None,
+) -> Optional[Tuple[str, FixResult]]:
+    """D1-A：为不可断长 token（≥30 字符标识符）添加安全断点。
+
+    在 camelCase 边界、下划线、句点、斜杠处插入 \\allowbreak，
+    不用 \\texttt 包裹（那会改变字体观感——终版方案 D1-A 第 5 条）。
+    """
+    # 找 ≥30 字符的连续字母数字/下划线/斜杠/句点串
+    long_tokens = re.findall(r"[A-Za-z][A-Za-z0-9_/.]{29,}", overfull_line)
+    if not long_tokens:
+        return None
+
+    # 取最长的
+    token = max(long_tokens, key=len)
+
+    # 已经有 \allowbreak 的不重复处理
+    if "\\allowbreak" in overfull_line:
+        return None
+
+    # 在安全边界插入 \allowbreak
+    breakable = _insert_safe_breaks_in_token(token)
+    if breakable == token:
+        return None  # 没有可断点
+
+    # 在全文中替换（只替换第一次出现，且确认不在数学环境/命令名内）
+    if f"\\{token}" in tex_content:
+        return None  # 可能是命令名，不动
+    if re.search(r"\$[^$]*" + re.escape(token), tex_content[:tex_content.find(token) + 1] if token in tex_content else ""):
+        return None  # 可能在数学环境内
+
+    modified = tex_content.replace(token, breakable, 1)
+    if modified == tex_content:
+        return None
+
+    return modified, FixResult(
+        defect_id="D1",
+        object_name="段落文本",
+        action=f"为长标识符 '{token[:20]}...' ({len(token)} 字符) 添加安全断点",
+        before=token[:60] + "..." if len(token) > 60 else token,
+        after=breakable[:60] + "..." if len(breakable) > 60 else breakable,
+        line_number=line_number,
+        success=True,
+    )
+
+
+def _insert_safe_breaks_in_token(token: str) -> str:
+    """在 camelCase 边界、下划线、句点、斜杠后插入 \\allowbreak。"""
+    result = list(token)
+    insert_positions = []
+
+    for idx in range(1, len(token) - 1):
+        char = token[idx]
+        prev = token[idx - 1]
+        next_char = token[idx + 1]
+
+        # camelCase 边界：小写→大写
+        if prev.islower() and char.isupper():
+            insert_positions.append(idx)
+        # 下划线/句点/斜杠后
+        elif char in "_/." and next_char.isalnum():
+            insert_positions.append(idx + 1)
+
+    # 从后往前插入（避免位置偏移）
+    for pos in reversed(insert_positions):
+        result.insert(pos, r"\allowbreak ")
+
+    return "".join(result)
+
+
 def _wrap_paragraph_with_emergencystretch(
     tex_content: str,
     paragraph_span: Tuple[int, int],
@@ -487,7 +559,13 @@ def fix_paragraph_overflow(
     if _line_is_within_table_like_env(tex_content, line_number):
         return tex_content, None
 
-    # 策略 1: 为长单词添加断词点
+    # 策略 0 (D1-A): 不可断长 token（≥30 字符标识符）→ 语义安全断点
+    # 优先于盲断词：camelCase/下划线/斜杠边界比每 4-5 字母的 \- 更精准
+    long_token_result = _fix_long_token_with_breaks(tex_content, overfull_line, line_number)
+    if long_token_result is not None:
+        return long_token_result
+
+    # 策略 1: 为长单词添加断词点（适合 12-29 字符的普通长词）
     # 查找长度 > 10 的单词 (可能是复合词或长学术术语)
     long_words = re.findall(r'\b[a-zA-Z]{10,}\b', overfull_line)
 
