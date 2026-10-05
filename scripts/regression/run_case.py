@@ -40,6 +40,9 @@ def build_task_spec(
     main_tex_relpath: str,
     max_rounds: int = 2,
     apply: bool = True,
+    target_pages: Optional[int] = None,
+    template: Optional[str] = None,
+    column_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     return {
         "schema_version": "1.0",
@@ -47,8 +50,8 @@ def build_task_spec(
         "task_id": None,
         "project_root": str(project_root.resolve()),
         "main_tex": main_tex_relpath,
-        "template": None,
-        "target_pages": None,
+        "template": template,
+        "target_pages": target_pages,
         "page_budget_scope": None,
         "page_dir": "data/pages",
         "log_file": None,
@@ -101,6 +104,9 @@ def run_paperfit_case(
     runner: Optional[PaperFitRunner] = None,
     max_rounds: int = 2,
     apply: bool = True,
+    target_pages: Optional[int] = None,
+    template: Optional[str] = None,
+    column_type: Optional[str] = None,
 ) -> CaseRunResult:
     result = CaseRunResult(case_id=case_id, paper_id=paper_id, status="not_run")
     work_dir = work_root / paper_id / case_id / "ours_project"
@@ -116,6 +122,9 @@ def run_paperfit_case(
         main_tex_relpath=main_tex_relpath,
         max_rounds=max_rounds,
         apply=apply,
+        target_pages=target_pages,
+        template=template,
+        column_type=column_type,
     )
     data_dir = work_dir / "data"
     data_dir.mkdir(exist_ok=True)

@@ -285,6 +285,11 @@ def run_mvp(
                 runner=paperfit_runner,
                 max_rounds=max_rounds,
                 apply=apply,
+                
+                
+                target_pages=benchmark.get("target_pages"),
+                template=entry.get("venue_id"),
+                column_type=benchmark.get("column_type"),
             )
             record["candidate_status"] = run.status
             if run.status == "guard_rolled_back":

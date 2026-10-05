@@ -132,6 +132,15 @@ class BaselinePdfProtectionTest(unittest.TestCase):
             self.assertEqual(pdf.read_bytes(), b"%PDF-baseline")  # 修前 PDF 没被删
 
 
+    def test_page_shrink_without_target_rejected_when_large(self):
+        "ICLR 回归：无页数预算时，单候选造成 12→10 页的大幅缩水必须拒绝"
+        accepted, reason = gate_decision(_evidence(12), _evidence(10), target_pages=None)
+        self.assertFalse(accepted)
+        self.assertIn("page swing too large", reason)
+        accepted, _ = gate_decision(_evidence(12), _evidence(11), target_pages=None)
+        self.assertTrue(accepted)
+
+
 class FixLayoutExitCodeTest(unittest.TestCase):
     def _report(self, status, pdf_path=None):
         runtime_actions = {}

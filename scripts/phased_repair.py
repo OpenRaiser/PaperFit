@@ -192,6 +192,7 @@ def gate_decision(
     if after.page_count is None:
         return False, "compile_or_render_failed: no readable PDF (fail-closed)"
     if before.page_count is not None:
+        page_delta = after.page_count - before.page_count
         if target_pages is not None:
             gap_before = abs(before.page_count - target_pages)
             gap_after = abs(after.page_count - target_pages)
@@ -200,10 +201,17 @@ def gate_decision(
             # 超页预算时，带垂直代价的动作必须证明页数没有增加
             if vertical_cost and before.page_count > target_pages and after.page_count > before.page_count:
                 return False, f"vertical-cost action grew pages while over budget: {before.page_count} -> {after.page_count}"
-        elif strict_page_gap and after.page_count > before.page_count:
+        elif strict_page_gap and page_delta > 0:
             return False, f"page count grew without a target budget: {before.page_count} -> {after.page_count}"
-        elif after.page_count > before.page_count:
+        elif page_delta > 0:
             return False, f"page count grew: {before.page_count} -> {after.page_count}"
+        elif abs(page_delta) >= 2:
+            
+            
+            return False, (
+                f"page swing too large without a target budget: {before.page_count} -> {after.page_count} "
+                f"(delta {page_delta:+d}); needs target_pages to adjudicate"
+            )
     if after.severe_overfull > before.severe_overfull:
         return False, f"severe overfull increased: {before.severe_overfull} -> {after.severe_overfull}"
     for name, before_count in before.protected.items():

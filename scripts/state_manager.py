@@ -611,6 +611,11 @@ class StateManager:
             "schema_version": str(data.get("schema_version") or "1.0"),
             "status": data.get("status"),
             "applied_count": int(data.get("applied_count") or 0),
+            # phased 原子接受的逐候选计数（round_metrics 消费）
+            "accepted_count": int(data.get("accepted_count") or 0),
+            "rejected_count": int(data.get("rejected_count") or 0),
+            "rolled_back_count": int(data.get("rolled_back_count") or 0),
+            "candidate_outcomes": data.get("candidate_outcomes") or [],
             "selected_candidates": selected,
             "b2_width_selected_candidates": data.get("b2_width_selected_candidates"),
             "updated_at": datetime.now().isoformat(),

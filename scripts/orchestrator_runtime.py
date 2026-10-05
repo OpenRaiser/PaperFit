@@ -1449,6 +1449,7 @@ class OrchestratorRuntime:
                         latest["object_counts_after"] = after_structural
                         latest["severe_overfull_after"] = after_severe
                         latest["total_overflow_pt_after"] = float(after_rule_summary.get("total_overflow_pt") or 0.0)
+                        latest["page_count_after"] = actual_pages if actual_pages > 0 else None
                         latest["page_gap_after"] = (
                             abs(actual_pages - task_spec.target_pages)
                             if actual_pages > 0 and task_spec.target_pages is not None
