@@ -37,11 +37,16 @@ ARTIFACT_FIELDS = (
     "semantic_patch_report",
     "gatekeeper_decision",
     "visual_signal_report",
+    "visual_action_plan",
     "defect_report",
     "repair_plan",
     "repair_execution_report",
     "rollback_report",
     "source_mutation_report",
+    "source_hygiene_report",
+    "crossrefs_report",
+    "rule_report",
+    "task_spec",
 )
 DEFECT_SUMMARY_FIELDS = ("initial_total", "resolved", "remaining")
 CONTENT_INTEGRITY_FIELDS = (
