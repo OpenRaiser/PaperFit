@@ -453,6 +453,64 @@ def _apply_sloppy_to_paragraph(
     )
 
 
+def _batch_fix_included_file_overfull(
+    included_path: Path,
+    line_numbers: List[int],
+    max_overflow: float,
+) -> Optional[Tuple[str, FixResult]]:
+    """对一个子文件里的多个溢出行一次性全部修复。
+
+    策略：对整个文件范围应用 \\sloppy（一次修完比逐段修更高效且更一致），
+    加上引用串拆分。
+    """
+    try:
+        content = included_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    original = content
+    actions = []
+
+    # 1. 拆分文件里所有 ≥3 key 的引用串
+    cite_count = 0
+    for match in _CITE_CLUSTER_RE.finditer(content):
+        keys = match.group(2).split(",")
+        if len(keys) < 3:
+            continue
+        mid = (len(keys) + 1) // 2
+        cmd = match.group(1).rstrip("{")
+        replacement = f"{cmd}{{{','.join(keys[:mid])}}} {cmd}{{{','.join(keys[mid:])}}}"
+        content = content.replace(match.group(0), replacement, 1)
+        cite_count += 1
+    if cite_count > 0:
+        actions.append(f"拆分 {cite_count} 处引用串")
+
+    # 2. 对整个正文区域应用 \\sloppy
+    begin_doc = content.find("\\begin{document}")
+    if begin_doc < 0:
+        begin_doc = 0
+    if "\\sloppy" not in content:
+        insert_pos = content.find("\n", begin_doc) + 1
+        if insert_pos > 0:
+            content = content[:insert_pos] + "\\sloppy\n" + content[insert_pos:]
+            actions.append("全文 \\sloppy 模式")
+
+    if content == original:
+        return None
+
+    from transactional_patch import atomic_write_text
+    atomic_write_text(included_path, content)
+    return str(included_path), FixResult(
+        defect_id="D1",
+        object_name=f"{included_path.name} 批量溢出修复",
+        action=f"批量修复 {included_path.name} 的 {len(line_numbers)} 处溢出：{'；'.join(actions)}",
+        before=f"({len(line_numbers)} overfull paragraphs at lines {line_numbers[:5]})",
+        after=f"({'; '.join(actions)})",
+        line_number=line_numbers[0] if line_numbers else None,
+        success=True,
+    )
+
+
 def _fix_long_token_with_breaks(
     tex_content: str,
     overfull_line: str,
@@ -1329,21 +1387,25 @@ def fix_overflow_defects(
         new_content = tex_content
         fix_result = None
 
-        # 多文件检查：如果行号映射到 \input 的子文件，在子文件上修复
+        # 多文件批量修复：同一子文件的多个溢出一次性全修
         if defect_id == "D1" and line_number is not None and multi_file_map:
             included_path = multi_file_map.get(line_number)
             if included_path is not None and included_path.is_file():
-                included_result = _fix_overfull_in_included_file(
+                # 收集同一子文件的所有 D1 行号
+                all_lines_for_file = [
+                    ln for ln, fp in multi_file_map.items() if fp == included_path
+                ]
+                batch_result = _batch_fix_included_file_overfull(
                     included_path,
-                    line_number=line_number,
-                    overflow_amount=overflow_amount,
-                    description=defect.get("description", ""),
+                    all_lines_for_file,
+                    overflow_amount,
                 )
-                if included_result is not None:
-                    file_path_str, included_fix = included_result
-                    changes.append(included_fix)
+                if batch_result is not None:
+                    file_path_str, batch_fix = batch_result
+                    changes.append(batch_fix)
                     modified_files.add(file_path_str)
-                    continue  # 跳过后续 D1 路径（已在子文件上修复）
+                    # 跳过同文件的其他 D1 候选（已批量修复）
+                    continue
 
         if defect_id == "D1":
             # 判断是段落溢出还是表格溢出
