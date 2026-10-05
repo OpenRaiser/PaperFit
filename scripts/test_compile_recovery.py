@@ -95,6 +95,58 @@ class ApplyRecoveryTest(unittest.TestCase):
             self.assertIn("\\ref{fig:a_b}", _read(root))
 
 
+
+
+class OrphanBeginEnvTest(unittest.TestCase):
+    "Regression checks."
+
+    TEX = (
+        "\\documentclass{article}\n\\begin{document}\n"
+        "text before\n"
+        "%   \\resizebox{1.21\\textwidth}{!}{%\n"
+        "\\begin{tabular}{lccccc}\n"
+        "%     \\toprule\n"
+        "%   \\end{tabular}\n"
+        "}\n"
+        "\\begin{figure}[tbp]\nx\\end{figure}\n"
+        "\\end{document}\n"
+    )
+    LOG = "! LaTeX Error: \\begin{tabular} on input line 5 ended by \\end{document}."
+
+    def test_orphan_commented_with_stray_brace(self):
+        from compile_recovery import fix_orphan_begin_env
+
+        fixed, changes = fix_orphan_begin_env(self.TEX, self.LOG)
+        self.assertEqual(changes, ["orphan-begin-tabular@5"])
+        self.assertIn("% [paperfit-recovery] orphan begin commented", fixed)
+        self.assertIn("% [paperfit-recovery] stray brace commented", fixed)
+        # 注释原文保留，figure 完整
+        self.assertIn("%   \\end{tabular}", fixed)
+        self.assertIn("\\begin{figure}[tbp]", fixed)
+
+    def test_line_drift_tolerated(self):
+        from compile_recovery import fix_orphan_begin_env
+
+        # 日志行号 11（±10 漂移内）仍能命中第 5 行的孤儿
+        log = "! LaTeX Error: \\begin{tabular} on input line 11 ended by \\end{document}."
+        fixed, changes = fix_orphan_begin_env(self.TEX, log)
+        self.assertEqual(changes, ["orphan-begin-tabular@5"])
+
+    def test_active_content_blocks_fix(self):
+        from compile_recovery import fix_orphan_begin_env
+
+        tex = self.TEX.replace("%     \\toprule\n", "    Model & X active \\\\\n")
+        fixed, changes = fix_orphan_begin_env(tex, self.LOG)
+        self.assertEqual(changes, [])
+        self.assertEqual(fixed, tex)
+
+    def test_no_log_evidence_no_fix(self):
+        from compile_recovery import fix_orphan_begin_env
+
+        fixed, changes = fix_orphan_begin_env(self.TEX, "unrelated log")
+        self.assertEqual(changes, [])
+
+
 class _FakeCompile:
     """按脚本演进的假编译器：第 1 次失败，应用修复后第 2 次成功（或按剧本失败）。"""
 

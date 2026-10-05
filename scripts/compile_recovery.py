@@ -189,6 +189,62 @@ def fix_missing_end_env_at_error(tex: str, log_text: str) -> Tuple[str, List[str
     return tex, changes
 
 
+_ORPHAN_BEGIN_LOG_RE = re.compile(
+    r"\\begin\{([a-zA-Z]+\*?)\} on input line (\d+) ended by \\end\{document\}"
+)
+
+
+def _active_part(line: str) -> str:
+    """去掉注释部分后的活代码（不处理 % 转义 \\% 的边角，恢复场景足够）。"""
+    stripped = line.lstrip()
+    if stripped.startswith("%"):
+        return ""
+    return line.split("%", 1)[0].strip()
+
+
+def fix_orphan_begin_env(tex: str, log_text: str) -> Tuple[str, List[str]]:
+    "孤儿 \\begin{env}：配对的 \\end 被注释、区域无活内容 → 注释掉孤儿行和孤立 }。"
+    changes: List[str] = []
+    log = log_text or ""
+    if not _ORPHAN_BEGIN_LOG_RE.search(log):
+        return tex, changes
+    lines = tex.splitlines(keepends=True)
+    for match in _ORPHAN_BEGIN_LOG_RE.finditer(log):
+        env, reported = match.group(1), int(match.group(2))
+        begin_tag = f"\\begin{{{env}}}"
+        # 行号可能有漂移（前序修复移动了行）：在报告行 ±10 内找实际含活 begin 的行
+        idx = None
+        for offset in range(-10, 11):
+            probe = reported - 1 + offset
+            if 0 <= probe < len(lines) and begin_tag in _active_part(lines[probe]):
+                idx = probe
+                break
+        if idx is None:
+            continue
+        # 扫描到下一个活跃的环境边界（任何 \begin{...}/\end{...}）为止：
+        # 孤儿领地在下一个环境开始处结束，边界本身不算"活内容"
+        stray_brace_lines: List[int] = []
+        has_active_content = False
+        j = idx + 1
+        while j < len(lines):
+            active = _active_part(lines[j])
+            if "\\begin{" in active or "\\end{" in active:
+                break
+            if active and active not in ("}", "{"):
+                has_active_content = True
+                break
+            if active == "}":
+                stray_brace_lines.append(j)
+            j += 1
+        if has_active_content:
+            continue  # 区域有活内容：不敢动，交给 human_review
+        lines[idx] = "% [paperfit-recovery] orphan begin commented: " + lines[idx]
+        for brace_line in stray_brace_lines:
+            lines[brace_line] = "% [paperfit-recovery] stray brace commented: " + lines[brace_line]
+        changes.append(f"orphan-begin-{env}@{idx + 1}")
+    return "".join(lines), changes
+
+
 STRATEGY_ORDER = (
     "junk_before_documentclass",
     "missing_end_document",
@@ -242,6 +298,9 @@ def apply_deterministic_recovery(
         tex, inserted = fix_missing_package_for_command(tex, log_text)
         if inserted:
             actions.append(RecoveryAction("missing_package_for_command", rel, ";".join(inserted)))
+        tex, orphans = fix_orphan_begin_env(tex, log_text)
+        if orphans:
+            actions.append(RecoveryAction("orphan_begin_env", rel, ",".join(orphans)))
         tex, ends = fix_missing_end_env_at_error(tex, log_text)
         if ends:
             actions.append(RecoveryAction("missing_end_env_at_error", rel, ",".join(ends)))
