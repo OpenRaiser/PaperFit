@@ -115,6 +115,19 @@ def _no_improvement_streak(round_metrics: List[Dict[str, Any]] | None) -> int:
     return streak
 
 
+def _round_quality_regressed(metrics: Dict[str, Any]) -> bool:
+    """M4：本轮修复是否让质量变差（overfull 增多或视觉缺陷增多）。"""
+    overfull_before = _as_int(metrics.get("overfull_hbox_total_before"), -1)
+    overfull_after = _as_int(metrics.get("overfull_hbox_total_after"), -1)
+    visual_before = _as_int(metrics.get("visual_findings_before"), -1)
+    visual_after = _as_int(metrics.get("visual_findings_after"), -1)
+    if overfull_before >= 0 and overfull_after > overfull_before:
+        return True
+    if visual_before >= 0 and visual_after > visual_before:
+        return True
+    return False
+
+
 def build_repair_loop_policy(
     *,
     task: Dict[str, Any],
@@ -190,6 +203,14 @@ def build_repair_loop_policy(
     elif int(rollback_streak) >= 2:
         # 连续两轮回滚：停止自动修复，交给宿主 Agent
         stop_condition = "consecutive_rollbacks"
+    elif (
+        not dry_run
+        and round_metrics
+        and isinstance(round_metrics[-1], dict)
+        and _round_quality_regressed(round_metrics[-1])
+    ):
+        # M4：本轮修复让质量变差（overfull/视觉缺陷增多）→ 建议回滚
+        stop_condition = "quality_regressed"
     elif not dry_run and _no_improvement_streak(round_metrics) >= 2:
         # 连续两轮无质量改善：直到稳定模式的止损
         stop_condition = "no_improvement_streak"
@@ -209,6 +230,8 @@ def build_repair_loop_policy(
         next_round_reason = "two_consecutive_rollbacks_hand_off_to_host"
     elif stop_condition == "no_improvement_streak":
         next_round_reason = "two_rounds_without_quality_improvement"
+    elif stop_condition == "quality_regressed":
+        next_round_reason = "round_quality_regression_suggest_rollback"
     elif dry_run:
         next_round_reason = "dry_run_source_mutation"
     elif approval.get("status") == "approval_required":

@@ -280,6 +280,7 @@ def make_decision(
     defects_payload: Dict[str, Any],
     strict_mode: bool,
     semantic_report_path: Path | None,
+    vlm_gated_score: float | None = None,
 ) -> Dict[str, Any]:
     rules = (_load_layout_rules().get("gatekeeper") or DEFAULT_GATEKEEPER_RULES)
     checks: Dict[str, Dict[str, Any]] = {}
@@ -465,6 +466,23 @@ def make_decision(
 
     if checks["defects"]["pass"]:
         checks["defects"]["pass"] = alignment_blockers == 0
+
+    # M4：VLM 分数降级门（可选，只降不升——方案第十五节：VLM 不适合单独决定
+    # 编译成功或内容完整，但低分可以阻止不合格的 DONE）
+    if vlm_gated_score is not None and decision == "DONE":
+        VLM_SCORE_THRESHOLD = 3.0  # 5 分制
+        score_pass = float(vlm_gated_score) >= VLM_SCORE_THRESHOLD
+        checks["vlm_gated_score"] = {
+            "pass": score_pass,
+            "value": float(vlm_gated_score),
+            "threshold": VLM_SCORE_THRESHOLD,
+        }
+        if not score_pass:
+            decision = "CONTINUE"
+            reasons.append(
+                f"VLM gated score {vlm_gated_score:.2f} below threshold {VLM_SCORE_THRESHOLD}; "
+                "visual quality not sufficient for DONE"
+            )
 
     return {
         "gatekeeper": "quality-gatekeeper-enforcer",

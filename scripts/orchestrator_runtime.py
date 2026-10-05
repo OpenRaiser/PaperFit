@@ -1070,11 +1070,15 @@ class OrchestratorRuntime:
 
                     repair_round_count += 1
                     before_rule_summary = (state.get("rule_report") or {}).get("summary") or {}
+                    before_visual = self._load_optional_json(
+                        Path.cwd() / str((state.get("artifacts") or {}).get("visual_signal_report") or "data/visual_signal_report.json")
+                    )
                     round_metrics.append(
                         {
                             "round": repair_round_count,
                             "overfull_hbox_total_before": int(before_rule_summary.get("overfull_hbox_total") or 0),
                             "defects_remaining_before": int((state.get("defect_summary") or {}).get("remaining") or 0),
+                            "visual_findings_before": len((before_visual or {}).get("findings") or []),
                         }
                     )
                     repair_state = self.execute_repair_plan(
@@ -1254,6 +1258,11 @@ class OrchestratorRuntime:
                         round_metrics[-1]["defects_remaining_after"] = int(
                             (state.get("defect_summary") or {}).get("remaining") or 0
                         )
+                        # M4：视觉缺陷计数也进轮报，让 RoundReport 能回答"视觉变好了吗"
+                        visual_after = self._load_optional_json(
+                            Path.cwd() / str((state.get("artifacts") or {}).get("visual_signal_report") or "data/visual_signal_report.json")
+                        )
+                        round_metrics[-1]["visual_findings_after"] = len((visual_after or {}).get("findings") or [])
                     runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "artifacts_observed")
                     emit_runtime_event(
                         "phase_completed",
