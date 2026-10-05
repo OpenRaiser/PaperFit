@@ -125,5 +125,96 @@ class VisualPlanPromotionTest(unittest.TestCase):
             self.assertTrue(any(c.get("finding_id") == "vf-001" for c in visual_plan_candidates))
 
 
+class SameFamilyMultiPromotionTest(unittest.TestCase):
+    "Regression checks."
+
+    def _plan_with_two_b2(self, second_anchor_status="resolved"):
+        return {
+            "schema_version": "1.0",
+            "summary": {"total_entries": 2},
+            "entries": [
+                {
+                    "finding_id": "vf-101",
+                    "family": "B2",
+                    "defect_type": "overflow_width",
+                    "severity": "major",
+                    "page": 3,
+                    "label": "fig:wide-a",
+                    "source_anchors": [{"file": "main.tex", "start_line": 42}],
+                    "anchor_status": "resolved",
+                    "confidence": 0.9,
+                    "status": "executable",
+                },
+                {
+                    "finding_id": "vf-102",
+                    "family": "B2",
+                    "defect_type": "overflow_width",
+                    "severity": "major",
+                    "page": 7,
+                    "label": "fig:wide-b",
+                    "source_anchors": [{"file": "main.tex", "start_line": 88}],
+                    "anchor_status": second_anchor_status,
+                    "confidence": 0.8,
+                    "status": "executable",
+                },
+            ],
+        }
+
+    def test_two_same_family_both_promoted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data = Path(tmpdir) / "data"
+            data.mkdir(parents=True)
+            (data / "visual_action_plan.json").write_text(json.dumps(self._plan_with_two_b2()), encoding="utf-8")
+            candidates = _promote_visual_action_plan(str(data / "visual_signal_report.json"))
+            finding_ids = sorted(c.get("finding_id") for c in candidates)
+            self.assertEqual(finding_ids, ["vf-101", "vf-102"])
+
+    def test_unresolved_anchor_not_promoted(self):
+        # 锚点未解析的第二个条目被明确排除（记录在计划文件里，不静默）
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data = Path(tmpdir) / "data"
+            data.mkdir(parents=True)
+            plan = self._plan_with_two_b2(second_anchor_status="unresolved")
+            (data / "visual_action_plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            candidates = _promote_visual_action_plan(str(data / "visual_signal_report.json"))
+            self.assertEqual([c.get("finding_id") for c in candidates], ["vf-101"])
+
+    def test_multi_anchor_ambiguity_not_promoted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data = Path(tmpdir) / "data"
+            data.mkdir(parents=True)
+            plan = self._plan_with_two_b2()
+            plan["entries"][1]["source_anchors"] = [
+                {"file": "main.tex", "start_line": 88},
+                {"file": "main.tex", "start_line": 120},
+            ]
+            (data / "visual_action_plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            candidates = _promote_visual_action_plan(str(data / "visual_signal_report.json"))
+            self.assertEqual([c.get("finding_id") for c in candidates], ["vf-101"])
+
+    def test_family_cap_three(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data = Path(tmpdir) / "data"
+            data.mkdir(parents=True)
+            plan = self._plan_with_two_b2()
+            for i in range(3, 6):
+                plan["entries"].append(
+                    {
+                        "finding_id": f"vf-10{i}",
+                        "family": "B2",
+                        "severity": "minor",
+                        "page": i,
+                        "label": f"fig:wide-{i}",
+                        "source_anchors": [{"file": "main.tex", "start_line": 10 * i}],
+                        "anchor_status": "resolved",
+                        "confidence": 0.7,
+                        "status": "executable",
+                    }
+                )
+            (data / "visual_action_plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            candidates = _promote_visual_action_plan(str(data / "visual_signal_report.json"))
+            self.assertEqual(len(candidates), 3)  # 每族上限 3
+
+
 if __name__ == "__main__":
     unittest.main()
