@@ -327,21 +327,15 @@ def _fix_overfull_in_included_file(
     overflow_amount: float,
     description: str,
 ) -> Optional[Tuple[str, FixResult]]:
-    """在子文件里执行 D1 段落溢出修复（emergencystretch + 断词 + 长 token）。"""
+    """在子文件里执行 D1 段落溢出修复。策略链：长token → 引用拆分 → sloppy → stretch。"""
     try:
         content = included_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
 
-    # 根据溢出量选择更强的 stretch（ICLR 的 30pt 溢出 1em 不够）
-    if overflow_amount > 20:
-        stretch = "3em"
-    elif overflow_amount > 10:
-        stretch = "2em"
-    else:
-        stretch = "1em"
+    stretch = "3em" if overflow_amount > 20 else ("2em" if overflow_amount > 10 else "1em")
 
-    # 先试 D1-A 长 token
+    # 策略 1: D1-A 长 token
     long_token_result = _fix_long_token_with_breaks(content, description, line_number)
     if long_token_result is not None:
         modified, fix = long_token_result
@@ -350,7 +344,21 @@ def _fix_overfull_in_included_file(
         fix.object_name = f"{included_path.name} 长 token"
         return str(included_path), fix
 
-    # 直接用按溢出量分级的 stretch（不走 fix_paragraph_overflow 因为它固定 1em）
+    # 策略 2: 引用串拆分——\citep{a,b,c,d} → \citep{a,b} \citep{c,d}
+    citation_result = _split_citation_clusters(content, line_number)
+    if citation_result is not None:
+        from transactional_patch import atomic_write_text
+        atomic_write_text(included_path, citation_result[0])
+        return str(included_path), citation_result[1]
+
+    # 策略 3: \sloppy 段落——允许 TeX 更宽松的断行
+    sloppy_result = _apply_sloppy_to_paragraph(content, line_number)
+    if sloppy_result is not None:
+        from transactional_patch import atomic_write_text
+        atomic_write_text(included_path, sloppy_result[0])
+        return str(included_path), sloppy_result[1]
+
+    # 策略 4: 分级 emergencystretch
     paragraph_span = _find_paragraph_span_by_line_number(content, line_number)
     if paragraph_span is None:
         paragraph_span = _find_paragraph_span_by_text(content, description)
@@ -368,21 +376,81 @@ def _fix_overfull_in_included_file(
                 line_number=line_number,
                 success=True,
             )
-
-    # 兜底：再试 fix_paragraph_overflow
-    result = fix_paragraph_overflow(
-        content,
-        overfull_line=description,
-        overflow_amount=overflow_amount,
-        line_number=line_number,
-    )
-    if result is not None and result[1] is not None and result[1].success:
-        modified_content, fix = result
-        from transactional_patch import atomic_write_text
-        atomic_write_text(included_path, modified_content)
-        fix.object_name = f"{included_path.name} 段落"
-        return str(included_path), fix
     return None
+
+
+# 多 key 引用串：\citep{a,b,c,d} 或 \cite{a,b,c,d}
+_CITE_CLUSTER_RE = re.compile(r"(\\cite[pt]?\{)([A-Za-z0-9_\-]+(?:,[A-Za-z0-9_\-]+){2,})(\})")
+
+
+def _split_citation_clusters(
+    content: str,
+    line_number: Optional[int] = None,
+) -> Optional[Tuple[str, FixResult]]:
+    """拆分长引用串允许 TeX 在两个 \\citep 之间断行。
+
+    \\citep{a,b,c,d} → \\citep{a,b} \\citep{c,d}
+    语义不变（引用同一组论文），只是允许断行。
+    """
+    lines = content.splitlines(keepends=True)
+    # 目标行号附近 ±2 行
+    search_start = max(0, (line_number or 1) - 3)
+    search_end = min(len(lines), (line_number or len(lines)) + 2)
+
+    for idx in range(search_start, search_end):
+        line = lines[idx]
+        match = _CITE_CLUSTER_RE.search(line)
+        if not match:
+            continue
+        keys = match.group(2).split(",")
+        if len(keys) < 3:
+            continue
+        # 拆成两半
+        mid = (len(keys) + 1) // 2
+        first_half = ",".join(keys[:mid])
+        second_half = ",".join(keys[mid:])
+        cmd = match.group(1).rstrip("{")  # \citep or \cite or \citet
+        replacement = f"{cmd}{{{first_half}}} {cmd}{{{second_half}}}"
+        new_line = line[:match.start()] + replacement + line[match.end():]
+        lines[idx] = new_line
+        modified = "".join(lines)
+        return modified, FixResult(
+            defect_id="D1",
+            object_name=f"引用串拆分",
+            action=f"拆分 {cmd}{{{match.group(2)[:30]}...}} 为两个引用以允许断行",
+            before=f"{cmd}{{{match.group(2)[:40]}}}",
+            after=replacement[:60],
+            line_number=line_number,
+            success=True,
+        )
+    return None
+
+
+def _apply_sloppy_to_paragraph(
+    content: str,
+    line_number: Optional[int] = None,
+) -> Optional[Tuple[str, FixResult]]:
+    """对指定段落应用 \\sloppy 模式（允许更宽松的断行和间距）。"""
+    paragraph_span = _find_paragraph_span_by_line_number(content, line_number)
+    if paragraph_span is None:
+        paragraph_span = _find_paragraph_span_by_text(content, "")
+    if paragraph_span is None:
+        return None
+    start, end = paragraph_span
+    paragraph = content[start:end]
+    if r"\sloppy" in paragraph:
+        return None  # 已有 sloppy
+    wrapped = f"{{\\sloppy\n{paragraph.rstrip()}\n}}"
+    modified = content[:start] + wrapped + content[end:]
+    return modified, FixResult(
+        defect_id="D1",
+        object_name="段落 sloppy 模式",
+        action=f"对 L{line_number} 段落应用 \\sloppy（tolerance=9999, emergencystretch=3em）",
+        before=f"(original paragraph)",
+        after=f"{{\\sloppy ...}}",
+        line_number=line_number,
+        success=True,
+    )
 
 
 def _fix_long_token_with_breaks(
