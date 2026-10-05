@@ -1868,7 +1868,9 @@ class OrchestratorRuntime:
         project_root = Path.cwd()
         main_tex = project_root / task_spec.main_tex
         runtime_actions: Dict[str, Any] = {}
-        compile_result = compile_latex(project_root, main_tex=main_tex)
+        # 与 B0 冻结口径对齐：数据集源码可带可恢复编译错误，PDF 可读即进入流程。
+        # 我们的修改是否搞坏编译由轮前/轮后证据对比与内容门禁裁决，不靠 -halt-on-error。
+        compile_result = compile_latex(project_root, main_tex=main_tex, tolerant=True)
         self._record_runtime_action(
             "compile",
             compile_result,
