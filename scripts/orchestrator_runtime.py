@@ -1069,6 +1069,21 @@ class OrchestratorRuntime:
                         break
 
                     repair_round_count += 1
+                    
+                    
+                    snapshot = create_pre_repair_snapshot(
+                        project_root=project_root,
+                        main_tex=task_spec.main_tex,
+                    )
+                    self.manager.update(
+                        {
+                            "pre_repair_snapshot": snapshot,
+                            "content_integrity": {
+                                "validation_status": "snapshot_created",
+                                "rollback_target": snapshot.get("rollback_target"),
+                            },
+                        }
+                    )
                     before_rule_summary = (state.get("rule_report") or {}).get("summary") or {}
                     before_visual = self._load_optional_json(
                         Path.cwd() / str((state.get("artifacts") or {}).get("visual_signal_report") or "data/visual_signal_report.json")
