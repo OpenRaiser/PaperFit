@@ -2110,6 +2110,16 @@ class OrchestratorRuntime:
             )
             if visual_report:
                 self.manager.ingest_visual_signal_report(visual_signal_output)
+
+                # 统一诊断协议：先生成动作计划（修复计划要消费它）
+                action_plan_output = "data/visual_action_plan.json"
+                action_plan = build_visual_action_plan(
+                    visual_report=visual_report,
+                    crossrefs_report=crossrefs_report,
+                )
+                write_visual_action_plan(action_plan, Path(action_plan_output))
+                self.set_artifact("visual_action_plan", action_plan_output)
+
                 repair_plan = self._run_repair_plan_generator(
                     visual_signal_report=visual_signal_output,
                     output_path=repair_plan_output,
@@ -2152,15 +2162,6 @@ class OrchestratorRuntime:
                         repair_plan_path=repair_plan_output,
                     )
                     self.manager.ingest_repair_plan(repair_plan_output)
-
-                # 统一诊断协议：每条 finding/hint 都进入动作计划，禁止静默丢弃
-                action_plan_output = "data/visual_action_plan.json"
-                action_plan = build_visual_action_plan(
-                    visual_report=visual_report,
-                    crossrefs_report=crossrefs_report,
-                )
-                write_visual_action_plan(action_plan, Path(action_plan_output))
-                self.set_artifact("visual_action_plan", action_plan_output)
 
         defect_report = self._run_defect_report_builder(
             rule_report_output=rule_report_output,

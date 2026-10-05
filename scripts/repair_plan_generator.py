@@ -1426,6 +1426,86 @@ def _build_log_candidates(
     return candidates
 
 
+def _promote_visual_action_plan(visual_signal_report: str) -> List[Dict[str, Any]]:
+    "从 visual_action_plan.json 提升 executable 条目为修复候选。"
+    plan_path = Path(visual_signal_report).parent / "visual_action_plan.json"
+    if not plan_path.is_file():
+        return []
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    candidates: List[Dict[str, Any]] = []
+    seen_families: set[str] = set()
+    for entry in plan.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("status") or "") != "executable":
+            continue
+
+        finding_id = str(entry.get("finding_id") or "")
+        family = str(entry.get("family") or "")
+        label = entry.get("label")
+        page = entry.get("page")
+        anchor = entry.get("source_anchors") or []
+        has_anchor = bool(anchor)
+        severity = str(entry.get("severity") or "minor")
+        confidence = float(entry.get("confidence") or 0.5)
+
+        if not family or family in seen_families:
+            continue
+        if not has_anchor and severity in {"major", "critical"}:
+            continue  # 无锚点的高严重度不自动执行
+
+        # 按家族映射到 proposed_action
+        action_map = {
+            "A1": "apply_looseness", "A2": "compress_trailing_whitespace",
+            "A3": "reduce_page_count", "A4": "balance_final_columns",
+            "A5": "reflow_column_void", "A6": "review_density_shift",
+            "B1": "normalize_float_position_near_reference",
+            "B2": "adjust_float_width", "B3": "decluster_float_sequence",
+            "B4": "convert_to_longtable", "B5": "decluster_float_sequence",
+            "C1": "remove_resizebox_around_tabular",
+            "C3": "normalize_caption_setup", "C4": "normalize_caption_spacing",
+            "D1": "repair_overfull_boxes", "D2": "split_display_formula",
+            "D3": "wrap_url_breaking",
+        }
+        proposed_action = action_map.get(family)
+        if proposed_action is None:
+            continue
+
+        priority = int(80 * confidence)
+        if severity == "critical":
+            priority += 15
+        elif severity == "major":
+            priority += 10
+
+        candidates.append({
+            "candidate_type": "visual_plan",
+            "page": page,
+            "target": {
+                "label": label,
+                "object_kind": entry.get("object_type"),
+                "bbox": entry.get("bbox"),
+            },
+            "defect_family": family,
+            "priority_score": priority,
+            "severity": severity,
+            "proposed_action": proposed_action,
+            "rationale": f"visual_action_plan[{finding_id}]: {entry.get('defect_type', family)}",
+            "description": str(entry.get("evidence") or [""])[0:1][0] if entry.get("evidence") else "",
+            "finding_id": finding_id,
+            "anchor_status": entry.get("anchor_status"),
+            "visual_confidence": confidence,
+            "match_strategy": "visual_action_plan",
+            "evidence_sources": ["visual_action_plan"],
+        })
+        seen_families.add(family)  # 每个家族只提升一个（避免重复）
+
+    return candidates
+
+
 def _build_diagnosis_candidates(diagnosis_report: Optional[str]) -> List[Dict[str, Any]]:
     if not diagnosis_report:
         return []
@@ -1486,6 +1566,9 @@ def generate_repair_plan(
         main_tex_content=main_tex_content,
     )
 
+    
+    visual_plan_candidates = _promote_visual_action_plan(visual_signal_report)
+
     candidates = (
         object_candidates
         + tail_float_candidates
@@ -1497,6 +1580,7 @@ def generate_repair_plan(
         + consistency_candidates
         + diagnosis_candidates
         + log_candidates
+        + visual_plan_candidates
     )
     candidates = annotate_repair_candidates(candidates)
     has_visual_b2_width_candidate = _has_visual_b2_width_candidate(candidates)
