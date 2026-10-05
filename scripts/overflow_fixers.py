@@ -230,6 +230,73 @@ def _find_paragraph_span_by_text(
     return None
 
 
+def _line_is_preamble_textheight_shrink(tex_content: str, line_number: Optional[int]) -> bool:
+    """检测行号是否在导言区且附近有 \\addtolength{\\textheight}{-...}。"""
+    if line_number is None or line_number < 1:
+        return False
+    begin_doc = tex_content.find("\\begin{document}")
+    if begin_doc < 0:
+        return False
+    # 行号必须在 \\begin{document} 之前
+    lines_before_doc = tex_content[:begin_doc].count("\n") + 1
+    if line_number > lines_before_doc:
+        return False
+    # 附近 5 行内有负向 textheight 修改
+    lines = tex_content.splitlines()
+    context = "\n".join(lines[max(0, line_number - 6):line_number + 5])
+    return bool(re.search(r"\\addtolength\s*\{\s*\\textheight\s*\}\s*\{\s*-", context))
+
+
+def _remove_preamble_textheight_shrink(
+    tex_content: str, line_number: Optional[int]
+) -> Tuple[str, Optional[FixResult]]:
+    """移除导言区导致全文溢出的负向 textheight 修改（含扰动标记块）。"""
+    if not _line_is_preamble_textheight_shrink(tex_content, line_number):
+        return tex_content, None
+
+    # 优先移除带 DISTURBANCE 标记的完整块
+    tagged = re.compile(
+        r"\n?[ \t]*%[^\n]*DISTURBANCE:E2[^\n]*:BEGIN[^\n]*\n"
+        r"[ \t]*\\addtolength\s*\{\s*\\textheight\s*\}\s*\{\s*-[^}]+\}[^\n]*\n"
+        r"[ \t]*%[^\n]*DISTURBANCE:E2[^\n]*:END[^\n]*\n?",
+        re.IGNORECASE,
+    )
+    match = tagged.search(tex_content)
+    if match:
+        removed = match.group(0)
+        modified = tex_content[:match.start()] + tex_content[match.end():]
+        return modified, FixResult(
+            defect_id="D1→A3",
+            object_name="导言区 textheight 缩小",
+            action="移除导言区的负向 textheight 修改（含扰动标记块）",
+            before=removed.strip()[:80],
+            after="(removed)",
+            line_number=line_number,
+            success=True,
+        )
+
+    # 兜底：移除孤立负向 textheight 行
+    standalone = re.compile(
+        r"^([ \t]*\\addtolength\s*\{\s*\\textheight\s*\}\s*\{\s*-[^}]+\}[ \t]*)$",
+        re.MULTILINE,
+    )
+    match = standalone.search(tex_content)
+    if match and match.start() < tex_content.find("\\begin{document}", 0):
+        removed_line = match.group(0)
+        modified = tex_content[:match.start()] + tex_content[match.end():]
+        return modified, FixResult(
+            defect_id="D1→A3",
+            object_name="导言区 textheight 缩小",
+            action="移除导言区的负向 textheight 修改",
+            before=removed_line.strip(),
+            after="(removed)",
+            line_number=line_number,
+            success=True,
+        )
+
+    return tex_content, None
+
+
 def _fix_long_token_with_breaks(
     tex_content: str,
     overfull_line: str,
@@ -1110,6 +1177,14 @@ def fix_overflow_defects(
                     table_label=object_name if object_name.startswith("tab:") else None,
                     line_number=line_number,
                 )
+            elif _line_is_preamble_textheight_shrink(tex_content, line_number):
+                
+                
+                new_content, fix_result = _remove_preamble_textheight_shrink(
+                    tex_content, line_number
+                )
+                if fix_result is not None:
+                    fix_result.defect_id = "D1→A3"
             elif _line_is_within_display_math(tex_content, line_number):
                 new_content, fix_result = fix_equation_overflow(
                     tex_content,
