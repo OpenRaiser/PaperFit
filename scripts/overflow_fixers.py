@@ -1002,6 +1002,22 @@ def _tighten_table_block_layout(block: str) -> Tuple[str, List[str]]:
     column_count = _count_top_level_table_columns(column_spec)
     updated = block
 
+    # \resizebox{1.19\textwidth}{!} 之类的过宽缩放是表格溢出的直接原因；
+    # resizebox 内换 tabularx 不起作用（外层已强制总宽），必须先钳制缩放系数
+    over_scale = re.search(
+        r"\\resizebox\{\s*([0-9]*\.?[0-9]+)\s*\\(textwidth|linewidth|columnwidth)\s*\}",
+        updated,
+    )
+    if over_scale:
+        factor = float(over_scale.group(1))
+        if factor > 1.0:
+            updated = (
+                updated[: over_scale.start()]
+                + f"\\resizebox{{\\{over_scale.group(2)}}}"
+                + updated[over_scale.end() :]
+            )
+            actions.append(f"clamped resizebox scale {factor} to 1.0")
+
     if column_count >= 6 and r"\begin{table*}" not in updated:
         updated = re.sub(r"\\begin\{table\}(?:\[[^\]]*\])?", r"\\begin{table*}[t]", updated, count=1)
         updated = updated.replace(r"\end{table}", r"\end{table*}", 1)

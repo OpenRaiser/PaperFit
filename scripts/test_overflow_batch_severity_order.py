@@ -14,6 +14,7 @@ from repair_plan_executor import (  # noqa: E402
 from overflow_fixers import (  # noqa: E402
     _fix_long_token_with_breaks,
     _insert_safe_breaks_in_token,
+    fix_table_overflow,
 )
 
 
@@ -142,6 +143,32 @@ class TestCatastrophicOverflowPreemption(unittest.TestCase):
         self.assertEqual([d["defect_id"] for d in single], ["A2"])
         double = _build_space_util_defects(plan, max_candidates=3, column_type="double")
         self.assertEqual([d["defect_id"] for d in double], ["A4", "A2"])
+
+
+class TestResizeboxClamp(unittest.TestCase):
+    "Regression checks."
+
+    TEX = (
+        "\\documentclass{article}\n\\begin{document}\n"
+        "\\begin{table}[h]\n\\centering\n"
+        "\\resizebox{1.19\\textwidth}{!}{%\n"
+        "\\begin{tabular}{cc}\n\\toprule\nA & B \\\\\n\\bottomrule\n\\end{tabular}}\n"
+        "\\caption{x}\\label{tab:x}\n\\end{table}\n"
+        "\\end{document}\n"
+    )
+
+    def test_overscaled_resizebox_clamped(self):
+        modified, fix = fix_table_overflow(self.TEX, line_number=6)
+        self.assertIsNotNone(fix)
+        self.assertIn("clamped resizebox scale 1.19", fix.action)
+        self.assertIn("\\resizebox{\\textwidth}", modified)
+        self.assertNotIn("1.19", modified)
+
+    def test_normal_scale_untouched(self):
+        tex = self.TEX.replace("1.19\\textwidth", "\\textwidth")
+        modified, fix = fix_table_overflow(tex, line_number=6)
+        if fix is not None:
+            self.assertNotIn("clamped", fix.action)
 
 
 if __name__ == "__main__":
