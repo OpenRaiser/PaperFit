@@ -18,9 +18,11 @@ from typing import List, Dict, Optional, Tuple, Any
 
 try:
     from content_integrity_check import compute_content_diff, structure_regression_reasons
+    from math_safe_breaking import split_safe_additive_terms, verify_split_preserves_tokens
 except ImportError:
     compute_content_diff = None
     structure_regression_reasons = None
+    from math_safe_breaking import split_safe_additive_terms, verify_split_preserves_tokens
 
 from transactional_patch import atomic_write_text
 
@@ -329,39 +331,17 @@ def _choose_equation_break(rhs: str) -> Optional[Tuple[str, str]]:
 
 
 def _split_top_level_additive_terms(rhs: str) -> List[str]:
-    terms: List[str] = []
-    brace_depth = 0
-    term_start = 0
-    idx = 0
-    while idx < len(rhs):
-        char = rhs[idx]
-        if char == "{":
-            brace_depth += 1
-        elif char == "}":
-            brace_depth = max(0, brace_depth - 1)
-        elif (
-            brace_depth == 0
-            and char in {"+", "-"}
-            and idx > 0
-            and rhs[idx - 1].isspace()
-            and idx + 1 < len(rhs)
-            and rhs[idx + 1].isspace()
-        ):
-            term = rhs[term_start:idx].strip()
-            if term:
-                terms.append(term)
-            term_start = idx
-        idx += 1
-
-    final_term = rhs[term_start:].strip()
-    if final_term:
-        terms.append(final_term)
-    return terms
+    """M3 token-aware 安全切分：委托 math_safe_breaking，不在保护区间内断行。"""
+    return split_safe_additive_terms(rhs)
 
 
 def _rewrite_equation_to_aligned_terms(lhs: str, rhs: str) -> Optional[str]:
     terms = _split_top_level_additive_terms(rhs)
     if len(terms) < 3:
+        return None
+
+    # M3 token 验证：切分后数学 token 序列必须与原始一致
+    if not verify_split_preserves_tokens(rhs, terms):
         return None
 
     lines = [
