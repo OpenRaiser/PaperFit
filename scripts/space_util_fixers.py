@@ -430,7 +430,7 @@ def fix_trailing_whitespace(
     Returns:
         (修改后的内容，修复结果)
     """
-    if whitespace_ratio < 0.2:
+    if whitespace_ratio is None or whitespace_ratio < 0.2:
         # 空白比例在可接受范围内
         return tex_content, None
 

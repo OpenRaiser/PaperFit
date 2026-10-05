@@ -1481,6 +1481,16 @@ def _promote_visual_action_plan(visual_signal_report: str) -> List[Dict[str, Any
         elif severity == "major":
             priority += 10
 
+        # 为 fixer 提供必要字段（A2 需要 whitespace_ratio 等）
+        extra_fields: Dict[str, Any] = {}
+        if family == "A2":
+            extra_fields["whitespace_ratio"] = 0.3  # 默认值：末页有可见空白
+            extra_fields["current_pages"] = page or 0
+        elif family == "A3":
+            extra_fields["current_pages"] = page or 0
+        elif family == "A4":
+            extra_fields["height_difference"] = 0.15  # 默认值
+
         candidates.append({
             "candidate_type": "visual_plan",
             "page": page,
@@ -1500,6 +1510,7 @@ def _promote_visual_action_plan(visual_signal_report: str) -> List[Dict[str, Any
             "visual_confidence": confidence,
             "match_strategy": "visual_action_plan",
             "evidence_sources": ["visual_action_plan"],
+            **extra_fields,
         })
         seen_families.add(family)  # 每个家族只提升一个（避免重复）
 
