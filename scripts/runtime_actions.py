@@ -170,20 +170,19 @@ def pdf_page_count(pdf_path: Path) -> Optional[int]:
     return None
 
 
-def compile_latex(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
+def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False) -> Dict[str, Any]:
+    """tolerant=True：B0 冻结专用——数据集源码可能带可恢复编译错误（如双重斜杠），
+    只要产出了可读 PDF 就算成功。修复环编译保持严格（fail loud）。"""
     timeout_sec = int(os.environ.get("PAPERFIT_COMPILE_TIMEOUT_SEC", "240"))
     if os.environ.get("PAPERFIT_BOUNDED_COMPILE") == "1":
         bounded = compile_latex_bounded(project_root, main_tex=main_tex, timeout_sec=timeout_sec)
         if bounded.get("available"):
             return bounded
 
-    cmd = [
-        "latexmk",
-        "-pdf",
-        "-interaction=nonstopmode",
-        "-halt-on-error",
-        main_tex.name,
-    ]
+    cmd = ["latexmk", "-pdf", "-interaction=nonstopmode"]
+    if not tolerant:
+        cmd.append("-halt-on-error")
+    cmd.append(main_tex.name)
     pdf_path = project_root / f"{main_tex.stem}.pdf"
     clean_main_build_artifacts(project_root, main_tex=main_tex)
     try:
@@ -208,10 +207,15 @@ def compile_latex(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
     ]
     fatal_error = any(pattern in combined_log for pattern in fatal_patterns)
     partial_pdf_available = bool(timed_out and pdf_path.is_file() and not fatal_error)
-    success = (result.returncode == 0 and pdf_path.is_file()) or partial_pdf_available
+    if tolerant:
+        # 容错口径：PDF 可读即成功（错误记录在案但不挡冻结）
+        success = pdf_path.is_file() and (pdf_page_count(pdf_path) or 0) > 0
+    else:
+        success = (result.returncode == 0 and pdf_path.is_file()) or partial_pdf_available
     case = classify_compile_case(combined_log, success=success)
     return {
         "success": success,
+        "tolerant": tolerant,
         "command": cmd,
         "returncode": result.returncode,
         "timeout": timed_out,

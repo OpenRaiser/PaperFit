@@ -58,6 +58,36 @@ def extract_archive(archive: Path, dest: Path) -> Path:
     return dest
 
 
+_ECCV_CLASS_GUARD = (
+    "\\PackageError{eccv}{Package only meant to be used with document class `llncs'}"
+    "{Change document class to `llncs'.}"
+)
+_ECCV_CLASS_GUARD_RELAXED = (
+    "\\PackageWarningNoLine{eccv}"
+    "{class check relaxed by PaperFit pack compat; document class kept as authors shipped}"
+)
+
+
+def apply_compat_fixes(work_dir: Path) -> List[str]:
+    """打包期环境兼容：作者源码形态与编译环境冲突的最小修复，逐项返回名称。
+
+    eccv_sty_class_check_relaxed：数据集里有 article+eccv.sty 的 arXiv 原始投稿形态，
+    自带 sty 在 \\begin{document} 处硬性断言 llncs 类。只把错误降为警告——
+    不改文档类、不改任何版式参数（改成 llncs 会整体重排，违背"冻结 B0"原则）。
+    """
+    fixes: List[str] = []
+    sty = work_dir / "eccv.sty"
+    if sty.is_file():
+        try:
+            text = sty.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        if _ECCV_CLASS_GUARD in text:
+            sty.write_text(text.replace(_ECCV_CLASS_GUARD, _ECCV_CLASS_GUARD_RELAXED), encoding="utf-8")
+            fixes.append("eccv_sty_class_check_relaxed")
+    return fixes
+
+
 def find_main_tex(project_root: Path) -> Optional[Path]:
     """选择含 \\documentclass 且行数最多的 .tex（平铺与一层子目录都查）。"""
     candidates: List[Path] = []
@@ -165,6 +195,12 @@ def build_case(
         shutil.copytree(project_root, work_dir)
         (work_dir / main_tex.relative_to(project_root)).write_text(perturbed_tex, encoding="utf-8")
         source_manifest["perturbed_main_tex_sha256"] = _sha256_text(perturbed_tex)
+
+    # 环境兼容层：只处理"作者源码形态 vs 本机宏包"的冲突，不动任何版式参数，
+    # 每项修复都记录进 manifest（可审计、可复现）
+    compat_fixes = apply_compat_fixes(work_dir)
+    if compat_fixes:
+        source_manifest["compat_fixes"] = compat_fixes
 
     compile_report = compile_fn(work_dir)
     _write_json(case_dir / "compile.json", compile_report)

@@ -75,7 +75,8 @@ def real_compile_fn(project_root: Path) -> Dict[str, Any]:
     main_tex = find_main_tex(project_root)
     if main_tex is None:
         return {"success": False, "reason": "main_tex_not_found"}
-    return compile_latex(project_root, main_tex=main_tex)
+    # B0 冻结用容错口径：数据集源码允许带可恢复错误，PDF 可读即成功
+    return compile_latex(project_root, main_tex=main_tex, tolerant=True)
 
 
 def real_render_fn(project_root: Path, pages_dir: Path) -> Dict[str, Any]:
@@ -557,9 +558,10 @@ def main() -> int:
     parser.add_argument("--max-rounds", type=int, default=2)
     parser.add_argument("--dry-run", action="store_true", help="PaperFit 只诊断不写回（默认 apply）")
     parser.add_argument(
-        "--no-inject",
+        "--inject",
         action="store_true",
-        help="数据集已是扰动 B0（paperfit-data 即如此）：跳过二次注入，原样冻结",
+        help="对未扰动源码执行二次注入。默认跳过：paperfit-data 的 raw 源码本身已是扰动 B0"
+        "（含 DISTURBANCE 标记），二次注入会叠加扰动并打断 4/10 案例的编译（实测教训）",
     )
     args = parser.parse_args()
 
@@ -569,7 +571,7 @@ def main() -> int:
         case_count=args.cases,
         max_rounds=args.max_rounds,
         apply=not args.dry_run,
-        inject=not args.no_inject,
+        inject=args.inject,
     )
     print(json.dumps({key: value for key, value in result.items() if key != "report"}, ensure_ascii=False, indent=2))
     print(f"report: {result['run_dir']}/reports/regression_report.md")

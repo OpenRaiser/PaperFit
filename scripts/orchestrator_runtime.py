@@ -2153,6 +2153,44 @@ class OrchestratorRuntime:
                 runtime_actions=runtime_actions,
             )
             if visual_report:
+                # 论文核心设计（vision-in-the-loop）：page-image 证据层由 VLM 补充。
+                # CV 启发式看不出浮动体堆叠观感、表格压扁、跨页失衡等二维缺陷；
+                # VLM finding 带 caption_number 时锚点解析可定位到源码行。
+                try:
+                    from vlm_diagnosis import merge_vlm_findings, run_vlm_diagnosis, vlm_diagnosis_configured
+
+                    if vlm_diagnosis_configured():
+                        vlm_findings, vlm_diag_report = run_vlm_diagnosis(
+                            Path(page_dir),
+                            template_name=str(template or "unknown"),
+                            column_type=column_type,
+                        )
+                        merged = merge_vlm_findings(Path(visual_signal_output), vlm_findings, vlm_diag_report)
+                        if merged:
+                            visual_report = self._load_optional_json(Path(visual_signal_output))
+                            self._record_runtime_action(
+                                "vlm_diagnosis",
+                                {
+                                    "success": True,
+                                    "input_artifacts": {"page_dir": page_dir},
+                                    "output_artifacts": {"visual_signal_report": visual_signal_output},
+                                    "findings_added": merged,
+                                    "error": vlm_diag_report.get("error"),
+                                },
+                                phase="diagnose",
+                                state="DIAGNOSING",
+                                emit_event=emit_event,
+                                runtime_actions=runtime_actions,
+                            )
+                except Exception as vlm_exc:  # VLM 诊断失败绝不阻断主管线
+                    self._record_runtime_action(
+                        "vlm_diagnosis",
+                        {"success": False, "error": f"{type(vlm_exc).__name__}: {vlm_exc}"},
+                        phase="diagnose",
+                        state="DIAGNOSING",
+                        emit_event=emit_event,
+                        runtime_actions=runtime_actions,
+                    )
                 self.manager.ingest_visual_signal_report(visual_signal_output)
 
                 # 统一诊断协议：先生成动作计划（修复计划要消费它）
