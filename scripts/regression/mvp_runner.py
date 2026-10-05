@@ -143,6 +143,24 @@ def export_ours_side(
     main_tex = work_dir / main_rel
     if not main_tex.is_file():
         return None
+    
+    
+    
+    canonical_compile = None
+    try:
+        canonical_compile = compile_latex(work_dir, main_tex=main_tex, tolerant=True)
+    except Exception:
+        canonical_compile = None
+    if canonical_compile and canonical_compile.get("success"):
+        # 页图随规范编译重渲染，避免导出中间态页面
+        try:
+            render_pdf_pages(work_dir, pdf_path=work_dir / f"{main_tex.stem}.pdf", output_dir="data/pages")
+        except Exception:
+            pass
+    compile_report = {
+        "success": bool((canonical_compile or {}).get("success") or compile_action.get("success")),
+        "tex_log_path": str(work_dir / f"{main_tex.stem}.log"),
+    }
     return export_case_inputs(
         project_root=work_dir,
         output_root=method_root,
@@ -153,10 +171,7 @@ def export_ours_side(
         pages_dir=work_dir / "data" / "pages",
         main_tex=main_tex,
         pdf_path=work_dir / f"{main_tex.stem}.pdf",
-        compile_report={
-            "success": bool(compile_action.get("success")),
-            "tex_log_path": str(work_dir / f"{main_tex.stem}.log"),
-        },
+        compile_report=compile_report,
         render_report={"success": bool(render_action.get("success"))},
         case_status=case_status,
     )

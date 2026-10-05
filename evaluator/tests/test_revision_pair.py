@@ -52,7 +52,8 @@ class RevisionPromptTest(unittest.TestCase):
         swapped = build_revision_user_prompt(**PROMPT_KWARGS, swap_order=True)
         self.assertIn("- LEFT montage: candidate version v2.", swapped)
         self.assertIn("- RIGHT montage: reference version v1.", swapped)
-        self.assertIn("compile_success: True", swapped)
+        self.assertIn("compile_success=True", swapped)  # 对称块的新键值格式
+        self.assertIn("Reference: page_budget_hit=", swapped)  # 硬约束对称展示
 
     def test_system_prompt_is_not_the_b0_protocol(self) -> None:
         self.assertIn("two revisions", REVISION_SYSTEM_PROMPT)

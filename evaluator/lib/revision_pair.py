@@ -72,11 +72,15 @@ def build_revision_user_prompt(
     candidate_render_success: bool | None,
     candidate_page_budget_hit: bool | None,
     candidate_undefined_ref_count: int | None,
+    reference_page_budget_hit: bool | None = None,
+    reference_undefined_ref_count: int | None = None,
     swap_order: bool = False,
 ) -> str:
     target_pages_text = "unknown" if target_pages is None else str(target_pages)
     reference_pages_text = "unknown" if reference_page_count is None else str(reference_page_count)
     candidate_pages_text = "unknown" if candidate_page_count is None else str(candidate_page_count)
+    if reference_page_budget_hit is None and target_pages is not None and reference_page_count is not None:
+        reference_page_budget_hit = reference_page_count <= target_pages
     if swap_order:
         layout_lines = (
             f"- LEFT montage: candidate version {candidate_method}.\n"
@@ -103,11 +107,12 @@ Case context:
 - Reference rendered pages: {reference_pages_text}
 - Candidate rendered pages: {candidate_pages_text}
 
-Candidate hard-constraint metadata (applies to the candidate version on whichever side it appears):
-- compile_success: {candidate_compile_success}
-- render_success: {candidate_render_success}
-- page_budget_hit: {candidate_page_budget_hit}
-- undefined_ref_count: {candidate_undefined_ref_count}
+Hard-constraint metadata, presented SYMMETRICALLY for both sides.
+Apply budget and reference checks to BOTH versions equally: a page-budget or
+undefined-reference problem only differentiates the sides if ONE has it and the
+other does not.
+- Reference: page_budget_hit={reference_page_budget_hit}, undefined_ref_count={reference_undefined_ref_count}
+- Candidate: compile_success={candidate_compile_success}, render_success={candidate_render_success}, page_budget_hit={candidate_page_budget_hit}, undefined_ref_count={candidate_undefined_ref_count}
 
 Respond with a single JSON object using exactly these keys:
 - reference_defects, candidate_defects: lists of visible layout defects (same defect vocabulary as V3).
