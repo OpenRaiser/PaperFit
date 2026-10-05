@@ -314,13 +314,23 @@ def run_mvp(
         case_records.append(record)
 
     vlm_configured = _vlm_configured()
+    paired_scores: List[Dict[str, Any]] = []
+
+    # VLM 配置时真正执行 revision pair 评测
+    if vlm_configured:
+        paired_scores = _run_vlm_revision_pairs(
+            methods_root=methods_root,
+            run_dir=run_dir,
+            case_records=case_records,
+        )
+
     report = build_regression_report(
         reference_version="B0(perturbed)",
         candidate_version="OURS(paperfit HEAD)",
         safety_v1=_aggregate_safety(b0_evaluations),
         safety_v2=_aggregate_safety(ours_evaluations),
         case_records=case_records,
-        paired_scores=[] if not vlm_configured else [],
+        paired_scores=paired_scores,
         absolute_vs_b0=None,
         manifest_compatible=True,
     )
@@ -359,6 +369,109 @@ def _vlm_configured() -> bool:
     import os
 
     return bool(os.environ.get("BASELINE_VLM_API_URL") and os.environ.get("BASELINE_VLM_API_KEY") and os.environ.get("BASELINE_VLM_MODEL_NAME"))
+
+
+def _run_vlm_revision_pairs(
+    *,
+    methods_root: Path,
+    run_dir: Path,
+    case_records: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """VLM 配置时真正执行 revision pair 评测（正常+换位双序）。"""
+    import os
+
+    b0_root = methods_root / "B0"
+    ours_root = methods_root / "OURS"
+    if not b0_root.is_dir() or not ours_root.is_dir():
+        return []
+
+    # 找两侧都有渲染页的 case
+    common_cases = []
+    for venue in sorted(b0_root.iterdir()):
+        if not venue.is_dir():
+            continue
+        for case_dir in sorted(venue.iterdir()):
+            if not case_dir.is_dir():
+                continue
+            b0_pages = case_dir / "pages"
+            ours_pages = ours_root / venue.name / case_dir.name / "pages"
+            if b0_pages.is_dir() and any(b0_pages.glob("page_*.png")) and ours_pages.is_dir() and any(ours_pages.glob("page_*.png")):
+                common_cases.append(f"{venue.name}/{case_dir.name}")
+
+    if not common_cases:
+        return []
+
+    paired: List[Dict[str, Any]] = []
+    api_url = os.environ.get("BASELINE_VLM_API_URL", "")
+    api_key = os.environ.get("BASELINE_VLM_API_KEY", "")
+    model = os.environ.get("BASELINE_VLM_MODEL_NAME", "")
+
+    try:
+        from evaluate_revision_pair import run_revision_evaluation
+        from vlm_evaluator import OpenAICompatibleVisionJudgeClient, VLMAbsoluteConfig
+
+        config = VLMAbsoluteConfig(
+            api_url=api_url,
+            api_key=api_key,
+            model_name=model,
+            timeout_sec=240,
+            protocol_version="v3",
+            mode="stitched",
+        )
+        client = OpenAICompatibleVisionJudgeClient(config)
+
+        # 正常顺序
+        normal_summary = run_revision_evaluation(
+            client=client,
+            reference_root=b0_root,
+            candidate_root=ours_root,
+            reference_method="B0",
+            candidate_method="OURS",
+            output_dir=run_dir / "vlm",
+            case_ids=common_cases,
+            case_root=None,
+            max_image_dim=1800,
+            swap_order=False,
+        )
+
+        # 换位顺序
+        swapped_summary = run_revision_evaluation(
+            client=client,
+            reference_root=b0_root,
+            candidate_root=ours_root,
+            reference_method="B0",
+            candidate_method="OURS",
+            output_dir=run_dir / "vlm",
+            case_ids=common_cases,
+            case_root=None,
+            max_image_dim=1800,
+            swap_order=True,
+        )
+
+        # 对账双序结果
+        from pair_symmetry import reconcile_pair_runs
+
+        normal_by_case = {r.get("case_id"): r for r in normal_summary.get("reports", [])}
+        swapped_by_case = {r.get("case_id"): r for r in swapped_summary.get("reports", [])}
+
+        for case_id in common_cases:
+            n = normal_by_case.get(case_id, {})
+            s = swapped_by_case.get(case_id, {})
+            reconciled = reconcile_pair_runs(n, s)
+            paper_id = case_id.split("/")[0]
+            paired.append({
+                "paper_id": paper_id,
+                "case_id": case_id,
+                "delta": float(((n.get("vlm") or {}).get("gated_v3_score") or 0)) - 3.0,
+                "reconciled": reconciled.get("winner"),
+                "agreement": reconciled.get("agreement"),
+            })
+
+        print(f"VLM revision pairs: {len(paired)} cases evaluated")
+    except Exception as exc:
+        print(f"VLM evaluation failed: {exc}", file=sys.stderr)
+
+    return paired
 
 
 def main() -> int:

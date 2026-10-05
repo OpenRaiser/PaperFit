@@ -1340,6 +1340,35 @@ class OrchestratorRuntime:
                             )
                             state = rollback_result
                         break
+
+                    
+                    if round_metrics:
+                        from regression.round_acceptance import RoundEvidence, evaluate_round_acceptance
+
+                        latest = round_metrics[-1]
+                        acceptance_evidence = RoundEvidence(
+                            page_count_before=latest.get("visual_findings_before"),
+                            page_count_after=latest.get("visual_findings_after"),
+                            target_pages=task_spec.target_pages,
+                            overfull_before=latest.get("overfull_hbox_total_before"),
+                            overfull_after=latest.get("overfull_hbox_total_after"),
+                            content_integrity_pass=bool(
+                                ((state.get("content_integrity") or {}).get("validation_status") or "").startswith("mutation")
+                                or (state.get("content_integrity") or {}).get("validation_status") == "snapshot_created"
+                            ),
+                        )
+                        acceptance = evaluate_round_acceptance(acceptance_evidence)
+                        if not acceptance.accepted and acceptance.rollback_required:
+                            rollback_result = self._rollback_after_quality_regression(
+                                project_root=project_root,
+                                rollback_target=str(snapshot.get("rollback_target") or ""),
+                                round_number=repair_round_count,
+                                round_metrics=round_metrics,
+                                emit_event=emit_runtime_event,
+                                runtime_actions=runtime_actions,
+                            )
+                            state = rollback_result
+                            break
                     emit_runtime_event(
                         "phase_completed",
                         phase="repair_loop",
@@ -2504,7 +2533,7 @@ class OrchestratorRuntime:
             "--output",
             output_path,
         ]
-        completed = subprocess.run(cmd, check=False, cwd=Path.cwd(), capture_output=True, text=True)
+        completed = subprocess.run(cmd, check=False, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace")
 
         report_path = Path(output_path)
         if not report_path.is_file():
@@ -2543,7 +2572,7 @@ class OrchestratorRuntime:
             cmd.extend(["--semantic-report", semantic_report])
         if bool(((state.get("task") or {}).get("strict_mode"))):
             cmd.append("--strict")
-        subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True)
+        subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace")
         self.manager.ingest_gatekeeper_decision(output_path)
         return self.manager.load()
 
@@ -2574,7 +2603,7 @@ class OrchestratorRuntime:
         if pdf_path:
             cmd.extend(["--pdf", str(pdf_path)])
         try:
-            subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True)
+            subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace")
         except subprocess.CalledProcessError:
             return {}
         return json.loads(Path(output_path).read_text(encoding="utf-8"))
@@ -2605,7 +2634,7 @@ class OrchestratorRuntime:
         if diagnosis_report.is_file():
             cmd.extend(["--diagnosis-report", str(diagnosis_report)])
         try:
-            subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True)
+            subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace")
         except subprocess.CalledProcessError:
             return {}
         return json.loads(Path(output_path).read_text(encoding="utf-8"))
@@ -2630,7 +2659,7 @@ class OrchestratorRuntime:
             cmd.extend(["--visual-signal-report", visual_signal_output])
         if hygiene_report_output:
             cmd.extend(["--hygiene-report", hygiene_report_output])
-        subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True)
+        subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace")
         return json.loads(Path(output_path).read_text(encoding="utf-8"))
 
     def _run_source_hygiene_check(self, main_tex: str, output_path: str) -> Dict[str, Any]:
@@ -2642,7 +2671,7 @@ class OrchestratorRuntime:
             "--output",
             output_path,
         ]
-        subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True)
+        subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace")
         return json.loads(Path(output_path).read_text(encoding="utf-8"))
 
     def _run_repair_plan_executor(
@@ -2669,7 +2698,7 @@ class OrchestratorRuntime:
             cmd.extend(["--column-type", column_type])
         if target_pages is not None:
             cmd.extend(["--target-pages", str(target_pages)])
-        result = subprocess.run(cmd, check=False, cwd=Path.cwd(), capture_output=True, text=True)
+        result = subprocess.run(cmd, check=False, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace")
         output_file = Path(output_path)
         if output_file.is_file():
             return json.loads(output_file.read_text(encoding="utf-8"))
@@ -2698,7 +2727,7 @@ class OrchestratorRuntime:
             "--output",
             output_path,
         ]
-        subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True)
+        subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace")
         return json.loads(Path(output_path).read_text(encoding="utf-8"))
 
 

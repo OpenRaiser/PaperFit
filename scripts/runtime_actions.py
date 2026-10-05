@@ -67,7 +67,7 @@ def terminate_process_tree(process: subprocess.Popen) -> None:
         # os.killpg does not exist on Windows; taskkill /T walks the child tree.
         subprocess.run(
             ["taskkill", "/F", "/T", "/PID", str(process.pid)],
-            capture_output=True,
+            capture_output=True, encoding="utf-8", errors="replace",
         )
         return
     try:
