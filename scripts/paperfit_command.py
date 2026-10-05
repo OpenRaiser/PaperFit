@@ -1396,6 +1396,7 @@ def _run_typed_source_changing(
     run_result_output_path: str = "data/run_result_fix_layout_typed.json",
     report_output_path: str = "data/fix_layout_typed_report.json",
     report_mode: str = "typed_fix_layout",
+    round_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     dry_run = _typed_fix_layout_dry_run(apply_source_mutation=apply_source_mutation)
     task_spec = TaskSpec(
@@ -1414,9 +1415,11 @@ def _run_typed_source_changing(
         dry_run_source_mutation=dry_run,
         rollback_policy="required",
         max_rounds=max_rounds or 1,
+        round_mode=round_mode,
         user_request=user_request,
         required_phases=["observe", "diagnose", "repair", "verify"],
     )
+    task_spec.validate()
     _write_json(project_root / "data" / "task.json", task_spec.to_dict())
     runtime = OrchestratorRuntime(state_path=str(project_root / "data" / "state.json"))
     run_result = runtime.run_task(task_spec=task_spec, output_path=run_result_output_path)
@@ -1750,6 +1753,12 @@ def main() -> None:
     common.add_argument("--page-budget", default="main_body", choices=["main_body", "with_refs", "with_appendix"])
     common.add_argument("--strict", action="store_true")
     common.add_argument("--max-rounds", type=int, default=None)
+    common.add_argument(
+        "--round-mode",
+        default=None,
+        choices=["safe", "fix-layout", "until-stable"],
+        help="多轮模式预设（safe=1/fix-layout=2/until-stable=5+双止损），优先于 --max-rounds",
+    )
     common.add_argument("--save-as", default=None)
     common.add_argument(
         "--apply",
@@ -1833,6 +1842,7 @@ def main() -> None:
                 max_rounds=effective_max_rounds,
                 user_request="fix-layout",
                 apply_source_mutation=args.apply,
+                round_mode=args.round_mode,
             )
         else:
             report = _run_fix_layout(

@@ -85,6 +85,36 @@ def build_round_artifact_lineage(
     ]
 
 
+def _round_improved(metrics: Dict[str, Any]) -> Optional[bool]:
+    """一轮是否真实改善：overfull 或剩余缺陷任一下降即为改善。无指标返回 None。"""
+    overfull_before = _as_int(metrics.get("overfull_hbox_total_before"), -1)
+    overfull_after = _as_int(metrics.get("overfull_hbox_total_after"), -1)
+    defects_before = _as_int(metrics.get("defects_remaining_before"), -1)
+    defects_after = _as_int(metrics.get("defects_remaining_after"), -1)
+    if overfull_before < 0 or overfull_after < 0:
+        if defects_before < 0 or defects_after < 0:
+            return None
+    improved = False
+    if overfull_before >= 0 and overfull_after >= 0 and overfull_after < overfull_before:
+        improved = True
+    if defects_before >= 0 and defects_after >= 0 and defects_after < defects_before:
+        improved = True
+    return improved
+
+
+def _no_improvement_streak(round_metrics: List[Dict[str, Any]] | None) -> int:
+    """末尾连续"无改善"的轮数（缺 before/after 的轮不计）。"""
+    streak = 0
+    for metrics in reversed(round_metrics or []):
+        improved = _round_improved(metrics) if isinstance(metrics, dict) else None
+        if improved is None:
+            continue
+        if improved:
+            break
+        streak += 1
+    return streak
+
+
 def build_repair_loop_policy(
     *,
     task: Dict[str, Any],
@@ -95,8 +125,14 @@ def build_repair_loop_policy(
     status: str,
     gatekeeper_decision: str,
     round_artifact_lineage: List[Dict[str, Any]] | None = None,
+    round_metrics: List[Dict[str, Any]] | None = None,
+    rollback_streak: int = 0,
 ) -> Dict[str, Any] | None:
-    """Build the V1 source-changing loop policy and next-round readiness."""
+    """Build the V1 source-changing loop policy and next-round readiness.
+
+    M2 双止损（docs/REGRESSION_DESIGN.md 第七节）：连续两轮无质量改善、
+    连续两轮回滚都停止自动修复并交给宿主 Agent。
+    """
 
     task_type = _task_type(task)
     if task_type not in SOURCE_CHANGING_TASK_TYPES:
@@ -151,6 +187,12 @@ def build_repair_loop_policy(
         # next round more informed. Stop here instead of replaying the same
         # no-op candidate until max_rounds is exhausted.
         stop_condition = "no_effective_change"
+    elif int(rollback_streak) >= 2:
+        # 连续两轮回滚：停止自动修复，交给宿主 Agent
+        stop_condition = "consecutive_rollbacks"
+    elif not dry_run and _no_improvement_streak(round_metrics) >= 2:
+        # 连续两轮无质量改善：直到稳定模式的止损
+        stop_condition = "no_improvement_streak"
     elif current_round >= max_rounds:
         stop_condition = "round_limit_reached"
 
@@ -163,6 +205,10 @@ def build_repair_loop_policy(
         next_round_reason = "artifact_freshness_not_pass"
     elif stop_condition == "no_effective_change":
         next_round_reason = "repair_executor_no_effective_change"
+    elif stop_condition == "consecutive_rollbacks":
+        next_round_reason = "two_consecutive_rollbacks_hand_off_to_host"
+    elif stop_condition == "no_improvement_streak":
+        next_round_reason = "two_rounds_without_quality_improvement"
     elif dry_run:
         next_round_reason = "dry_run_source_mutation"
     elif approval.get("status") == "approval_required":

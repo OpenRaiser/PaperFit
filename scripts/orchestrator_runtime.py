@@ -808,6 +808,7 @@ class OrchestratorRuntime:
             runtime_actions: Dict[str, Any] = {}
             round_artifact_lineage: List[Dict[str, Any]] = []
             round_metrics: List[Dict[str, Any]] = []
+            rollback_streak = 0
             repair_round_count = 0
 
             def lineage_actions(*names: str) -> Dict[str, Any]:
@@ -1082,6 +1083,12 @@ class OrchestratorRuntime:
                         max_candidates=DEFAULT_CANDIDATE_BATCH_LIMIT,
                     )
                     repair_summary = repair_state.get("repair_execution_summary") or {}
+                    # M2 双止损的回滚计数：执行器结构回滚或本轮零有效修改都算"回滚轮"，
+                    # 成功应用则清零；hard-guard 回滚路径在下方单独 break
+                    if str(repair_summary.get("status") or "") == "failed" or int(repair_summary.get("applied_count") or 0) == 0:
+                        rollback_streak += 1
+                    else:
+                        rollback_streak = 0
                     self._record_runtime_action(
                         "repair_plan_executor",
                         {
@@ -1308,6 +1315,8 @@ class OrchestratorRuntime:
                         status=current_status,
                         gatekeeper_decision=current_decision,
                         round_artifact_lineage=round_artifact_lineage,
+                        round_metrics=round_metrics,
+                        rollback_streak=rollback_streak,
                     )
                     if not (current_policy or {}).get("next_round_allowed"):
                         break
@@ -1389,6 +1398,8 @@ class OrchestratorRuntime:
                 status=status,
                 gatekeeper_decision=decision,
                 round_artifact_lineage=round_artifact_lineage,
+                round_metrics=round_metrics,
+                rollback_streak=rollback_streak,
             )
 
             result = RunResult(

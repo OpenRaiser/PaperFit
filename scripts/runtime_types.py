@@ -27,6 +27,14 @@ SOURCE_CHANGING_TASK_TYPES = {
     "template_migration",
 }
 
+# M2 多轮模式预设（docs/REGRESSION_DESIGN.md 终版方案第七节）：
+# safe=单轮保守；fix-layout=默认两轮；until-stable=最多五轮+双止损
+ROUND_MODE_PRESETS = {
+    "safe": 1,
+    "fix-layout": 2,
+    "until-stable": 5,
+}
+
 
 def _as_bool(value: Any, default: bool = False) -> bool:
     if value is None:
@@ -186,6 +194,7 @@ class TaskSpec:
     rollback_policy: Optional[str] = None
     strict_mode: bool = False
     max_rounds: int = 1
+    round_mode: Optional[str] = None
     user_request: Optional[str] = None
     required_phases: List[str] = field(default_factory=list)
 
@@ -224,6 +233,7 @@ class TaskSpec:
             rollback_policy=payload.get("rollback_policy"),
             strict_mode=_as_bool(payload.get("strict_mode"), False),
             max_rounds=int(payload.get("max_rounds") or 1),
+            round_mode=payload.get("round_mode"),
             user_request=payload.get("user_request"),
             required_phases=[str(item) for item in required_phases],
         )
@@ -237,6 +247,13 @@ class TaskSpec:
             raise ValueError("TaskSpec.main_tex must be non-empty")
         if self.max_rounds < 1:
             raise ValueError("TaskSpec.max_rounds must be >= 1")
+        if self.round_mode is not None:
+            if self.round_mode not in ROUND_MODE_PRESETS:
+                raise ValueError(
+                    f"TaskSpec.round_mode must be one of {sorted(ROUND_MODE_PRESETS)}, got {self.round_mode!r}"
+                )
+            # 模式预设胜出：round_mode 决定 max_rounds（safe=1/fix-layout=2/until-stable=5）
+            self.max_rounds = ROUND_MODE_PRESETS[self.round_mode]
         if self.task_type == "visual_only" and self.allow_source_mutation:
             raise ValueError("visual_only tasks cannot allow source mutation")
         if self.task_type in SOURCE_CHANGING_TASK_TYPES:
@@ -266,6 +283,7 @@ class TaskSpec:
             "rollback_policy": self.rollback_policy,
             "strict_mode": self.strict_mode,
             "max_rounds": self.max_rounds,
+            "round_mode": self.round_mode,
             "user_request": self.user_request,
             "required_phases": self.required_phases,
         }

@@ -186,6 +186,7 @@ function addWorkflowOptions(command, { includeSaveAs = false } = {}) {
     .option('--page-budget <scope>', '页数口径: main_body | with_refs | with_appendix')
     .option('--strict', '严格模式')
     .option('--max-rounds <n>', '最大轮次')
+    .option('--round-mode <mode>', '多轮模式: safe(1轮) | fix-layout(2轮) | until-stable(5轮+双止损)')
     .option('--apply', '允许 source-changing typed runtime 执行源码写回；默认只 dry-run');
   if (includeSaveAs) {
     command.option('--save-as <dir>', '另存为目录');
