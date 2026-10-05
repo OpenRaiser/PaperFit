@@ -350,21 +350,7 @@ def _fix_overfull_in_included_file(
         fix.object_name = f"{included_path.name} 长 token"
         return str(included_path), fix
 
-    # 再试段落修复（用更强的 stretch）
-    result = fix_paragraph_overflow(
-        content,
-        overfull_line=description,
-        overflow_amount=overflow_amount,
-        line_number=line_number,
-    )
-    if result is not None and result[1] is not None and result[1].success:
-        modified_content, fix = result
-        from transactional_patch import atomic_write_text
-        atomic_write_text(included_path, modified_content)
-        fix.object_name = f"{included_path.name} 段落"
-        return str(included_path), fix
-
-    # 最后：直接给段落包更强的 stretch
+    # 直接用按溢出量分级的 stretch（不走 fix_paragraph_overflow 因为它固定 1em）
     paragraph_span = _find_paragraph_span_by_line_number(content, line_number)
     if paragraph_span is None:
         paragraph_span = _find_paragraph_span_by_text(content, description)
@@ -382,6 +368,20 @@ def _fix_overfull_in_included_file(
                 line_number=line_number,
                 success=True,
             )
+
+    # 兜底：再试 fix_paragraph_overflow
+    result = fix_paragraph_overflow(
+        content,
+        overfull_line=description,
+        overflow_amount=overflow_amount,
+        line_number=line_number,
+    )
+    if result is not None and result[1] is not None and result[1].success:
+        modified_content, fix = result
+        from transactional_patch import atomic_write_text
+        atomic_write_text(included_path, modified_content)
+        fix.object_name = f"{included_path.name} 段落"
+        return str(included_path), fix
     return None
 
 
