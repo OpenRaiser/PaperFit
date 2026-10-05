@@ -6,7 +6,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from repair_plan_executor import _build_overflow_defects  # noqa: E402
+from repair_plan_executor import (  # noqa: E402
+    _build_overflow_defects,
+    _build_space_util_defects,
+    _has_catastrophic_overflow_candidates,
+)
 from overflow_fixers import (  # noqa: E402
     _fix_long_token_with_breaks,
     _insert_safe_breaks_in_token,
@@ -114,6 +118,30 @@ class TestLongTokenFixes(unittest.TestCase):
         tex = "open math $x + PerturbationStressToken" + "X" * 40 + "\n"
         result = _fix_long_token_with_breaks(tex, "in paragraph", line_number=1)
         self.assertIsNone(result)
+
+
+class TestCatastrophicOverflowPreemption(unittest.TestCase):
+    "Regression checks."
+
+    def test_catastrophic_detected(self):
+        plan = {"candidates": [{"defect_family": "D1", "overflow_amount": 100.0}]}
+        self.assertTrue(_has_catastrophic_overflow_candidates(plan))
+
+    def test_below_threshold_not_catastrophic(self):
+        plan = {"candidates": [{"defect_family": "D1", "overflow_amount": 99.9}]}
+        self.assertFalse(_has_catastrophic_overflow_candidates(plan))
+
+    def test_a4_skipped_for_single_column(self):
+        plan = {
+            "candidates": [
+                {"defect_family": "A4", "target": {"scope": "last_page"}, "height_difference": 0.2},
+                {"defect_family": "A2", "target": {"scope": "tail_whitespace"}, "whitespace_ratio": 0.4},
+            ]
+        }
+        single = _build_space_util_defects(plan, max_candidates=3, column_type="single")
+        self.assertEqual([d["defect_id"] for d in single], ["A2"])
+        double = _build_space_util_defects(plan, max_candidates=3, column_type="double")
+        self.assertEqual([d["defect_id"] for d in double], ["A4", "A2"])
 
 
 if __name__ == "__main__":

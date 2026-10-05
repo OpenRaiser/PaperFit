@@ -428,13 +428,21 @@ def _build_consistency_defects(plan: Dict[str, Any], max_candidates: int) -> Lis
     return defects
 
 
-def _build_space_util_defects(plan: Dict[str, Any], max_candidates: int) -> List[Dict[str, Any]]:
+def _build_space_util_defects(
+    plan: Dict[str, Any],
+    max_candidates: int,
+    column_type: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     defects: List[Dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
+    # A4（双栏末页不齐）在单栏模板上必然被 fixer 拒绝，选进去就是浪费批次席位
+    is_double_column = str(column_type or "").lower() == "double"
 
     for candidate in plan.get("candidates") or []:
         defect_id = str(candidate.get("defect_family") or "")
         if not defect_id.startswith("A") or defect_id == "A/C":
+            continue
+        if defect_id == "A4" and not is_double_column:
             continue
         target = candidate.get("target") or {}
         object_name = str(target.get("label") or target.get("scope") or defect_id)
@@ -562,6 +570,16 @@ def _has_urgent_overflow_candidates(plan: Dict[str, Any]) -> bool:
         overflow_amount = float(candidate.get("overflow_amount") or 0.0)
         priority_score = int(candidate.get("priority_score") or 0)
         if priority_score >= 90 or overflow_amount >= 5.0:
+            return True
+    return False
+
+
+def _has_catastrophic_overflow_candidates(plan: Dict[str, Any]) -> bool:
+    "≥100pt 的溢出是灾难级（内容冲出页面），优先级高于视觉 B2 宽度微调。"
+    for candidate in plan.get("candidates") or []:
+        if str(candidate.get("defect_family") or "") not in {"D1", "D2", "D3"}:
+            continue
+        if float(candidate.get("overflow_amount") or 0.0) >= 100.0:
             return True
     return False
 
@@ -820,14 +838,17 @@ def execute_repair_plan(
             main_tex=main_tex,
             max_candidates=max_candidates,
         )
-        space_defects = _build_space_util_defects(batched_plan, max_candidates=max_candidates)
+        space_defects = _build_space_util_defects(batched_plan, max_candidates=max_candidates, column_type=column_type)
         consistency_defects = _build_consistency_defects(batched_plan, max_candidates=max_candidates)
         urgent_overflow_first = False
         selection_reason = "nonconflicting_batch"
         execution_plan = batched_plan
     else:
         actionable_plan = {"candidates": _actionable_candidates(plan), **{k: v for k, v in plan.items() if k != "candidates"}}
-        urgent_overflow_first = _has_urgent_overflow_candidates(actionable_plan) and not _has_visual_b2_width_candidates(actionable_plan)
+        catastrophic_overflow = _has_catastrophic_overflow_candidates(actionable_plan)
+        urgent_overflow_first = (
+            _has_urgent_overflow_candidates(actionable_plan) and not _has_visual_b2_width_candidates(actionable_plan)
+        ) or catastrophic_overflow
         if urgent_overflow_first:
             overflow_defects = _build_overflow_defects(
                 actionable_plan,
@@ -845,12 +866,17 @@ def execute_repair_plan(
         space_defects = [] if (float_defects or overflow_defects) else _build_space_util_defects(
             actionable_plan,
             max_candidates=max_candidates,
+            column_type=column_type,
         )
         consistency_defects = _build_consistency_defects(actionable_plan, max_candidates=max_candidates)
         selection_reason = (
-            "urgent_d_overflow_without_visual_b2_width_candidate"
-            if urgent_overflow_first
-            else "default_float_first_order"
+            "catastrophic_d_overflow_preempts_visual_b2_width"
+            if catastrophic_overflow
+            else (
+                "urgent_d_overflow_without_visual_b2_width_candidate"
+                if urgent_overflow_first
+                else "default_float_first_order"
+            )
         )
         execution_plan = actionable_plan
 
