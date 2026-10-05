@@ -297,6 +297,94 @@ def _remove_preamble_textheight_shrink(
     return tex_content, None
 
 
+def _resolve_overfull_files(project_root: Path, main_tex_name: str) -> Dict[int, Path]:
+    """解析日志，把 overfull 行号映射到实际源文件。
+
+    返回 {line_number: actual_file_path}。不在映射里的行号属于 main.tex。
+    """
+    try:
+        from multi_file_overfull import find_file_in_project, resolve_overfull_to_source
+        log_path = project_root / f"{Path(main_tex_name).stem}.log"
+        if not log_path.is_file():
+            return {}
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+        resolutions = resolve_overfull_to_source(log_text, project_root, main_tex_name)
+        mapping: Dict[int, Path] = {}
+        for r in resolutions:
+            if r["file"] == main_tex_name:
+                continue  # main.tex 本身的溢出不需要映射
+            actual = find_file_in_project(project_root, r["file"])
+            if actual is not None:
+                mapping[r["line_start"]] = actual
+        return mapping
+    except Exception:
+        return {}
+
+
+def _fix_overfull_in_included_file(
+    included_path: Path,
+    line_number: int,
+    overflow_amount: float,
+    description: str,
+) -> Optional[Tuple[str, FixResult]]:
+    """在子文件里执行 D1 段落溢出修复（emergencystretch + 断词 + 长 token）。"""
+    try:
+        content = included_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    # 根据溢出量选择更强的 stretch（ICLR 的 30pt 溢出 1em 不够）
+    if overflow_amount > 20:
+        stretch = "3em"
+    elif overflow_amount > 10:
+        stretch = "2em"
+    else:
+        stretch = "1em"
+
+    # 先试 D1-A 长 token
+    long_token_result = _fix_long_token_with_breaks(content, description, line_number)
+    if long_token_result is not None:
+        modified, fix = long_token_result
+        from transactional_patch import atomic_write_text
+        atomic_write_text(included_path, modified)
+        fix.object_name = f"{included_path.name} 长 token"
+        return str(included_path), fix
+
+    # 再试段落修复（用更强的 stretch）
+    result = fix_paragraph_overflow(
+        content,
+        overfull_line=description,
+        overflow_amount=overflow_amount,
+        line_number=line_number,
+    )
+    if result is not None and result[1] is not None and result[1].success:
+        modified_content, fix = result
+        from transactional_patch import atomic_write_text
+        atomic_write_text(included_path, modified_content)
+        fix.object_name = f"{included_path.name} 段落"
+        return str(included_path), fix
+
+    # 最后：直接给段落包更强的 stretch
+    paragraph_span = _find_paragraph_span_by_line_number(content, line_number)
+    if paragraph_span is None:
+        paragraph_span = _find_paragraph_span_by_text(content, description)
+    if paragraph_span is not None:
+        modified = _wrap_paragraph_with_emergencystretch(content, paragraph_span, stretch=stretch)
+        if modified != content:
+            from transactional_patch import atomic_write_text
+            atomic_write_text(included_path, modified)
+            return str(included_path), FixResult(
+                defect_id="D1",
+                object_name=f"{included_path.name} 段落",
+                action=f"在子文件 {included_path.name} L{line_number} 段落添加 \\emergencystretch={stretch}",
+                before=f"(original paragraph at L{line_number})",
+                after=f"{{\\emergencystretch={stretch} ...}}",
+                line_number=line_number,
+                success=True,
+            )
+    return None
+
+
 def _fix_long_token_with_breaks(
     tex_content: str,
     overfull_line: str,
@@ -1155,6 +1243,10 @@ def fix_overflow_defects(
         )
     original_tex_content = tex_content
 
+    # 多文件解析：确定 D1 溢出实际发生在哪个 \input 的子文件
+    # LaTeX 日志的行号属于最近打开的子文件，不是 main.tex
+    multi_file_map = _resolve_overfull_files(tex_path.parent, tex_path.name)
+
     modified_files = set()
     changes = []
     unresolved = []
@@ -1168,6 +1260,22 @@ def fix_overflow_defects(
 
         new_content = tex_content
         fix_result = None
+
+        # 多文件检查：如果行号映射到 \input 的子文件，在子文件上修复
+        if defect_id == "D1" and line_number is not None and multi_file_map:
+            included_path = multi_file_map.get(line_number)
+            if included_path is not None and included_path.is_file():
+                included_result = _fix_overfull_in_included_file(
+                    included_path,
+                    line_number=line_number,
+                    overflow_amount=overflow_amount,
+                    description=defect.get("description", ""),
+                )
+                if included_result is not None:
+                    file_path_str, included_fix = included_result
+                    changes.append(included_fix)
+                    modified_files.add(file_path_str)
+                    continue  # 跳过后续 D1 路径（已在子文件上修复）
 
         if defect_id == "D1":
             # 判断是段落溢出还是表格溢出
