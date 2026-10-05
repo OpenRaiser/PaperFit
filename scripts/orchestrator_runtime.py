@@ -1329,26 +1329,12 @@ class OrchestratorRuntime:
                         round_metrics=round_metrics,
                         rollback_streak=rollback_streak,
                     )
-                    if not (current_policy or {}).get("next_round_allowed"):
-                        
-                        if (current_policy or {}).get("stop_condition") == "quality_regressed":
-                            rollback_result = self._rollback_after_quality_regression(
-                                project_root=project_root,
-                                rollback_target=str(snapshot.get("rollback_target") or ""),
-                                round_number=repair_round_count,
-                                round_metrics=round_metrics,
-                                emit_event=emit_runtime_event,
-                                runtime_actions=runtime_actions,
-                            )
-                            state = rollback_result
-                        break
-
+                    
                     
                     if round_metrics:
                         from regression.round_acceptance import RoundEvidence, evaluate_round_acceptance
 
                         latest = round_metrics[-1]
-                        # 从编译/渲染产物取真实页数（不用视觉 finding 数代替）
                         visual_report = self._load_optional_json(
                             Path.cwd() / str((state.get("artifacts") or {}).get("visual_signal_report") or "data/visual_signal_report.json")
                         )
@@ -1376,6 +1362,21 @@ class OrchestratorRuntime:
                             )
                             state = rollback_result
                             break
+
+                    # 验收通过后才检查是否允许下一轮
+                    if not (current_policy or {}).get("next_round_allowed"):
+                        
+                        if (current_policy or {}).get("stop_condition") == "quality_regressed":
+                            rollback_result = self._rollback_after_quality_regression(
+                                project_root=project_root,
+                                rollback_target=str(snapshot.get("rollback_target") or ""),
+                                round_number=repair_round_count,
+                                round_metrics=round_metrics,
+                                emit_event=emit_runtime_event,
+                                runtime_actions=runtime_actions,
+                            )
+                            state = rollback_result
+                        break
                     emit_runtime_event(
                         "phase_completed",
                         phase="repair_loop",

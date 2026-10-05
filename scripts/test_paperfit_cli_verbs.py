@@ -18,7 +18,7 @@ def _run_cli(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
         ["node", str(CLI), *args],
         cwd=str(cwd),
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         timeout=120,
     )
 

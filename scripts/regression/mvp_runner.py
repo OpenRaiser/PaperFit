@@ -323,7 +323,6 @@ def run_mvp(
             run_dir=run_dir,
             case_records=case_records,
         )
-
     report = build_regression_report(
         reference_version="B0(perturbed)",
         candidate_version="OURS(paperfit HEAD)",
@@ -377,7 +376,7 @@ def _run_vlm_revision_pairs(
     run_dir: Path,
     case_records: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """VLM 配置时真正执行 revision pair 评测（正常+换位双序）。"""
+    """VLM 配置时真正执行 revision pair 评测（正常+换位双序），结果回写 case_records。"""
     import os
 
     b0_root = methods_root / "B0"
@@ -385,7 +384,6 @@ def _run_vlm_revision_pairs(
     if not b0_root.is_dir() or not ours_root.is_dir():
         return []
 
-    # 找两侧都有渲染页的 case
     common_cases = []
     for venue in sorted(b0_root.iterdir()):
         if not venue.is_dir():
@@ -406,8 +404,10 @@ def _run_vlm_revision_pairs(
     api_key = os.environ.get("BASELINE_VLM_API_KEY", "")
     model = os.environ.get("BASELINE_VLM_MODEL_NAME", "")
 
+    # case_records 索引，用于回写 VLM 结果
+    records_by_case = {r.get("case_id"): r for r in case_records}
+
     try:
-        # evaluator/ 在项目根下，需要加入 sys.path
         evaluator_dir = REPO_ROOT / "evaluator"
         evaluator_lib = evaluator_dir / "lib"
         for path_entry in (str(evaluator_dir), str(evaluator_lib)):
@@ -427,7 +427,6 @@ def _run_vlm_revision_pairs(
         )
         client = OpenAICompatibleVisionJudgeClient(config)
 
-        # 正常顺序
         normal_summary = run_revision_evaluation(
             client=client,
             reference_root=b0_root,
@@ -441,7 +440,6 @@ def _run_vlm_revision_pairs(
             swap_order=False,
         )
 
-        # 换位顺序
         swapped_summary = run_revision_evaluation(
             client=client,
             reference_root=b0_root,
@@ -455,7 +453,6 @@ def _run_vlm_revision_pairs(
             swap_order=True,
         )
 
-        # 对账双序结果
         from pair_symmetry import reconcile_pair_runs
 
         normal_by_case = {r.get("case_id"): r for r in normal_summary.get("reports", [])}
@@ -466,13 +463,38 @@ def _run_vlm_revision_pairs(
             s = swapped_by_case.get(case_id, {})
             reconciled = reconcile_pair_runs(n, s)
             paper_id = case_id.split("/")[0]
-            paired.append({
+
+            # 真实 gated score（不是 -3.0 常数）
+            normal_gated = float(((n.get("vlm") or {}).get("gated_v3_score") or 0))
+            entry = {
                 "paper_id": paper_id,
                 "case_id": case_id,
-                "delta": float(((n.get("vlm") or {}).get("gated_v3_score") or 0)) - 3.0,
+                "gated_score_normal": normal_gated,
+                "gated_score_swapped": float(((s.get("vlm") or {}).get("gated_v3_score") or 0)),
                 "reconciled": reconciled.get("winner"),
                 "agreement": reconciled.get("agreement"),
-            })
+            }
+            paired.append(entry)
+
+            # 回写 case_records 使报告 win_counts 正确
+            record = records_by_case.get(case_id)
+            if record is not None:
+                record["vlm"] = {
+                    "reconciled": reconciled.get("winner"),
+                    "agreement": reconciled.get("agreement"),
+                    "gated_score": normal_gated,
+                    "repair_score_normal": ((n.get("vlm") or {}).get("repair_score")),
+                    "repair_score_swapped": ((s.get("vlm") or {}).get("repair_score")),
+                }
+
+        # paired_scores 的 delta 用两序均值（排除 uncertain）
+        for entry in paired:
+            if entry.get("agreement") == "agree":
+                entry["delta"] = (
+                    entry["gated_score_normal"] + entry["gated_score_swapped"]
+                ) / 2 - 3.0  # 相对中立值的偏移（B0 vs OURS 模式）
+            else:
+                entry["delta"] = 0.0  # uncertain 不进入 CI
 
         print(f"VLM revision pairs: {len(paired)} cases evaluated")
     except Exception as exc:
