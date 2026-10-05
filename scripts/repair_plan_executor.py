@@ -372,18 +372,20 @@ def _build_overflow_defects(
             continue
         seen.add(dedupe_key)
 
-        defects.append(
-            {
-                "defect_id": defect_id,
-                "object": object_name,
-                "page": candidate.get("page") or 0,
-                "line_number": line_number,
-                "description": description,
-                "overflow_amount": candidate.get("overflow_amount") or 0,
-                "url": candidate.get("url"),
-                "subtype": candidate.get("subtype"),
-            }
-        )
+        defect_entry: Dict[str, Any] = {
+            "defect_id": defect_id,
+            "object": object_name,
+            "page": candidate.get("page") or 0,
+            "line_number": line_number,
+            "description": description,
+            "overflow_amount": candidate.get("overflow_amount") or 0,
+            "url": candidate.get("url"),
+            "subtype": candidate.get("subtype"),
+        }
+        # 透传 proposed_action 让 executor 的路由能识别 textheight 移除等特殊动作
+        if candidate.get("proposed_action"):
+            defect_entry["proposed_action"] = candidate["proposed_action"]
+        defects.append(defect_entry)
         if len(defects) >= max_candidates:
             break
 

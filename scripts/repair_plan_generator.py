@@ -1337,6 +1337,7 @@ def _build_log_candidates(
     rule_report: Dict[str, Any],
     visual_report: Optional[Dict[str, Any]] = None,
     target_pages: Optional[int] = None,
+    main_tex_content: str = "",
 ) -> List[Dict[str, Any]]:
     summary = rule_report.get("summary") or {}
     visual_report = visual_report or {}
@@ -1362,11 +1363,25 @@ def _build_log_candidates(
         )
     if int(summary.get("overfull_hbox_total") or 0) > 0:
         detailed_candidates = 0
+        textheight_boost_applied = False
         for warning in rule_report.get("overfull_hbox") or []:
             subtype = str(warning.get("subtype") or "paragraph")
             overflow_pt = float(warning.get("overflow_pt") or 0.0)
             lines = str(warning.get("lines") or "").strip() or None
             line_number = int(lines.split("--", 1)[0]) if lines else None
+
+            
+            
+            is_textheight_cascade = False
+            if line_number is not None and not textheight_boost_applied and main_tex_content:
+                try:
+                    from overflow_fixers import _line_is_preamble_textheight_shrink
+                    if _line_is_preamble_textheight_shrink(main_tex_content, line_number):
+                        is_textheight_cascade = True
+                        textheight_boost_applied = True
+                except Exception:
+                    pass
+
             candidates.append(
                 {
                     "candidate_type": "log_warning",
@@ -1375,13 +1390,14 @@ def _build_log_candidates(
                         "scope": "table_overflow" if subtype == "alignment" else "overflow",
                     },
                     "defect_family": "D1",
-                    "priority_score": min(95, 80 + int(max(overflow_pt, 0.0) // 5)),
-                    "severity": str(warning.get("severity") or "major"),
-                    "proposed_action": "repair_overfull_boxes",
+                    "priority_score": 99 if is_textheight_cascade else min(95, 80 + int(max(overflow_pt, 0.0) // 5)),
+                    "severity": "critical" if is_textheight_cascade else str(warning.get("severity") or "major"),
+                    "proposed_action": "remove_preamble_textheight_shrink" if is_textheight_cascade else "repair_overfull_boxes",
                     "rationale": (
                         f"overfull_hbox subtype={subtype}, "
                         f"overflow_pt={overflow_pt:.2f}, "
                         f"lines={lines or 'unknown'}"
+                        + (", preamble_textheight_shrink_cascade" if is_textheight_cascade else "")
                     ),
                     "description": str(warning.get("context") or "").strip(),
                     "overflow_amount": overflow_pt,
@@ -1451,10 +1467,23 @@ def generate_repair_plan(
     )
     consistency_candidates = _build_consistency_candidates(visual_report)
     diagnosis_candidates = _build_diagnosis_candidates(diagnosis_report)
+
+    # 读取主 tex 内容（用于 textheight 缩小检测等源码级判断）
+    main_tex_content = ""
+    try:
+        report_dir = Path(visual_signal_report).parent
+        project_root = report_dir.parent
+        tex_files = [f for f in project_root.glob("*.tex") if "\\documentclass" in f.read_text(encoding="utf-8", errors="replace")[:500]]
+        if tex_files:
+            main_tex_content = max(tex_files, key=lambda f: f.stat().st_size).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
     log_candidates = _build_log_candidates(
         rule_report_data,
         visual_report=visual_report,
         target_pages=target_pages,
+        main_tex_content=main_tex_content,
     )
 
     candidates = (

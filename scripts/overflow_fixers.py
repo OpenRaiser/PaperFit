@@ -1177,7 +1177,7 @@ def fix_overflow_defects(
                     table_label=object_name if object_name.startswith("tab:") else None,
                     line_number=line_number,
                 )
-            elif _line_is_preamble_textheight_shrink(tex_content, line_number):
+            elif str(defect.get("proposed_action") or "") == "remove_preamble_textheight_shrink" or _line_is_preamble_textheight_shrink(tex_content, line_number):
                 
                 
                 new_content, fix_result = _remove_preamble_textheight_shrink(
