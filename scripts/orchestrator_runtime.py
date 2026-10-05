@@ -1328,6 +1328,17 @@ class OrchestratorRuntime:
                         rollback_streak=rollback_streak,
                     )
                     if not (current_policy or {}).get("next_round_allowed"):
+                        
+                        if (current_policy or {}).get("stop_condition") == "quality_regressed":
+                            rollback_result = self._rollback_after_quality_regression(
+                                project_root=project_root,
+                                rollback_target=str(snapshot.get("rollback_target") or ""),
+                                round_number=repair_round_count,
+                                round_metrics=round_metrics,
+                                emit_event=emit_runtime_event,
+                                runtime_actions=runtime_actions,
+                            )
+                            state = rollback_result
                         break
                     emit_runtime_event(
                         "phase_completed",
@@ -1466,6 +1477,87 @@ class OrchestratorRuntime:
                 "Inspect rendered endmatter pages before any further source mutation",
             ],
         }
+
+    def _rollback_after_quality_regression(
+        self,
+        *,
+        project_root: Path,
+        rollback_target: str,
+        round_number: int,
+        round_metrics: List[Dict[str, Any]],
+        emit_event: Callable[..., Dict[str, Any]],
+        runtime_actions: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        "质量恶化（overfull/视觉缺陷增多）→ 恢复本轮前快照。"
+        output_path = "data/rollback_report_quality_regression.json"
+        latest_metrics = round_metrics[-1] if round_metrics else {}
+        try:
+            rollback_report = restore_snapshot(
+                project_root=project_root,
+                rollback_target=rollback_target,
+                output_path=output_path,
+            )
+            rollback_result = {
+                "success": True,
+                "reason": "quality_regression",
+                "round": round_number,
+                "input_artifacts": {"rollback_target": rollback_target},
+                "output_path": output_path,
+                "output_artifacts": {"rollback_report": output_path},
+                "restored_files": len(rollback_report.get("restored_files") or []),
+                "round_metrics": latest_metrics,
+            }
+            content_integrity = {
+                "validation_status": "rolled_back",
+                "action_taken": "restore_snapshot",
+                "rollback_target": rollback_target,
+                "reason": "quality_regression",
+            }
+        except Exception as exc:
+            rollback_result = {
+                "success": False,
+                "reason": "quality_regression",
+                "failure_type": "rollback_failed",
+                "error": str(exc),
+                "input_artifacts": {"rollback_target": rollback_target},
+                "output_artifacts": {},
+            }
+            content_integrity = {
+                "validation_status": "rollback_failed",
+                "action_taken": "manual_review",
+                "rollback_target": rollback_target,
+                "reason": "quality_regression_rollback_failed",
+                "error": str(exc),
+            }
+
+        self._record_runtime_action(
+            "rollback_to_snapshot",
+            rollback_result,
+            phase="verify",
+            state="VERIFYING",
+            emit_event=emit_event,
+            runtime_actions=runtime_actions,
+        )
+        self.manager.update_failure_tracking(
+            decision="BLOCKED",
+            failure_type="quality_regression_rollback",
+        )
+        self.manager.update(
+            {
+                "status": "BLOCKED",
+                "last_gatekeeper_decision": "BLOCKED",
+                "artifacts": {
+                    "rollback_report": output_path if rollback_result.get("success") else None,
+                },
+                "content_integrity": content_integrity,
+                "next_actions": [
+                    "Review the round metrics that triggered quality regression",
+                    "Inspect which candidate increased overfull or visual findings",
+                    "Consider excluding that candidate type in future rounds",
+                ],
+            }
+        )
+        return self.manager.load()
 
     def _rollback_after_post_repair_hard_guard_failure(
         self,
