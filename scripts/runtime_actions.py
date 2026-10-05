@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import locale
 import os
 import platform
@@ -224,7 +225,51 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
     else:
         success = (result.returncode == 0 and pdf_path.is_file()) or partial_pdf_available
     case = classify_compile_case(combined_log, success=success)
-    return {
+
+    # compile_result.v2：结构化尝试记录（journal 追加 + 全字段返回，旧键全保留）
+    try:
+        from compile_result import (
+            CompileAttempt,
+            diff_source_fingerprints,
+            source_fingerprint,
+        )
+
+        attempt = CompileAttempt(project_root, main_tex=main_tex.name, compiler="latexmk")
+        fingerprint_store = project_root / "data" / "compile" / "last_fingerprint.json"
+        prev_fp: Dict[str, str] = {}
+        if fingerprint_store.is_file():
+            try:
+                prev_fp = json.loads(fingerprint_store.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                prev_fp = {}
+        current_fp = source_fingerprint(project_root, main_tex.name)
+        changed_files = diff_source_fingerprints(prev_fp, current_fp) if prev_fp else []
+        native_log = project_root / f"{main_tex.stem}.log"
+        v2 = attempt.finalize(
+            command=cmd,
+            cwd=str(project_root),
+            returncode=result.returncode,
+            timed_out=timed_out,
+            stdout=result.stdout or "",
+            stderr=result.stderr or "",
+            log_source=native_log if native_log.is_file() else None,
+            log_text=combined_log if not native_log.is_file() else "",
+            pdf_path=pdf_path if pdf_path.is_file() else None,
+            success=success,
+            changed_files=changed_files,
+            extra={
+                "success": success,
+                "tolerant": tolerant,
+                "case_status": case["case_status"],
+                "restored_baseline_pdf": restored_baseline,
+            },
+        )
+        fingerprint_store.parent.mkdir(parents=True, exist_ok=True)
+        fingerprint_store.write_text(json.dumps(current_fp, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        v2 = {}
+
+    report = {
         "success": success,
         "tolerant": tolerant,
         "restored_baseline_pdf": restored_baseline,
@@ -244,6 +289,8 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
         "pdf_path": str(pdf_path) if success else None,
         "compile_log": str(compile_log),
     }
+    report.update(v2)
+    return report
 
 
 def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) -> Dict[str, Any]:

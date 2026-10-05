@@ -1871,6 +1871,47 @@ class OrchestratorRuntime:
         # 与 B0 冻结口径对齐：数据集源码可带可恢复编译错误，PDF 可读即进入流程。
         # 我们的修改是否搞坏编译由轮前/轮后证据对比与内容门禁裁决，不靠 -halt-on-error。
         compile_result = compile_latex(project_root, main_tex=main_tex, tolerant=True)
+        if not compile_result.get("success"):
+            # 编译恢复子系统：确定性修复（Unicode/缺宏包注入/重复环境/转义下划线等）
+            # + 错误签名去重 + 全败整体回滚。模型不写源码，只走受控 fixer。
+            try:
+                from compile_recovery import recover_compile
+                from runtime_snapshots import create_pre_repair_snapshot, restore_snapshot
+
+                def _snap_create():
+                    return create_pre_repair_snapshot(project_root=project_root, main_tex=task_spec.main_tex)
+
+                def _snap_restore(snapshot):
+                    restore_snapshot(project_root=project_root, rollback_target=str(snapshot.get("rollback_target")))
+
+                recovery = recover_compile(
+                    project_root,
+                    task_spec.main_tex,
+                    compile_fn=lambda root, main: compile_latex(root, main_tex=main, tolerant=True),
+                    snapshot_create=_snap_create,
+                    snapshot_restore=_snap_restore,
+                )
+                compile_result = recovery.final_compile or compile_result
+                self._record_runtime_action(
+                    "compile_recovery",
+                    {
+                        "success": recovery.success,
+                        **recovery.to_dict(),
+                    },
+                    phase="observe",
+                    state="OBSERVING",
+                    emit_event=emit_event,
+                    runtime_actions=runtime_actions,
+                )
+            except Exception as recovery_exc:
+                self._record_runtime_action(
+                    "compile_recovery",
+                    {"success": False, "error": f"{type(recovery_exc).__name__}: {recovery_exc}"},
+                    phase="observe",
+                    state="OBSERVING",
+                    emit_event=emit_event,
+                    runtime_actions=runtime_actions,
+                )
         self._record_runtime_action(
             "compile",
             compile_result,
