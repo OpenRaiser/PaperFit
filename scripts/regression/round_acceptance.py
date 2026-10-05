@@ -69,8 +69,17 @@ class AcceptanceDecision:
 
 
 def evaluate_round_acceptance(evidence: RoundEvidence) -> AcceptanceDecision:
-    """统一接受函数：所有条件都通过才接受。"""
+    "统一接受函数：所有条件都通过才接受。"
     reasons: List[str] = []
+
+    # 0. 页数测量缺失 → fail-closed
+    if evidence.page_count_after is None:
+        reasons.append(
+            "page_count_after unavailable: measurement_unavailable (fail-closed); "
+            "cannot verify the round did not grow the document"
+        )
+    elif evidence.page_count_before is None and evidence.target_pages is not None:
+        reasons.append("page_count_before unavailable: measurement_unavailable (fail-closed)")
 
     # 1. 页距离不能增加
     if evidence.page_distance_before is not None and evidence.page_distance_after is not None:
@@ -117,7 +126,7 @@ def evaluate_round_acceptance(evidence: RoundEvidence) -> AcceptanceDecision:
 
     accepted = len(reasons) == 0
     rollback = not accepted and any(
-        "increased" in r or "lost" in r or "new " in r or "failed" in r
+        "increased" in r or "lost" in r or "new " in r or "failed" in r or "unavailable" in r
         for r in reasons
     )
 

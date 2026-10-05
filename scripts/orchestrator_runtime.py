@@ -1089,6 +1089,8 @@ class OrchestratorRuntime:
                         Path.cwd() / str((state.get("artifacts") or {}).get("visual_signal_report") or "data/visual_signal_report.json")
                     )
                     before_pages = int(((before_visual or {}).get("summary") or {}).get("pages_analyzed") or 0)
+                    before_structural = self._round_structural_counts(state)
+                    before_undefined = self._round_undefined_ref_counts(state)
                     round_metrics.append(
                         {
                             "round": repair_round_count,
@@ -1096,6 +1098,12 @@ class OrchestratorRuntime:
                             "overfull_hbox_total_before": int(before_rule_summary.get("overfull_hbox_total") or 0),
                             "defects_remaining_before": int((state.get("defect_summary") or {}).get("remaining") or 0),
                             "visual_findings_before": len((before_visual or {}).get("findings") or []),
+                            "figures_before": before_structural["figures"],
+                            "tables_before": before_structural["tables"],
+                            "labels_before": before_structural["labels"],
+                            "refs_before": before_structural["refs"],
+                            "undefined_refs_before": before_undefined["undefined_refs"],
+                            "undefined_citations_before": before_undefined["undefined_citations"],
                         }
                     )
                     repair_state = self.execute_repair_plan(
@@ -1354,12 +1362,33 @@ class OrchestratorRuntime:
                             Path.cwd() / str((state.get("artifacts") or {}).get("visual_signal_report") or "data/visual_signal_report.json")
                         )
                         actual_pages = int(((visual_report or {}).get("summary") or {}).get("pages_analyzed") or 0)
+                        after_structural = self._round_structural_counts(state)
+                        after_undefined = self._round_undefined_ref_counts(state)
+                        latest["figures_after"] = after_structural["figures"]
+                        latest["tables_after"] = after_structural["tables"]
+                        latest["labels_after"] = after_structural["labels"]
+                        latest["refs_after"] = after_structural["refs"]
+                        latest["undefined_refs_after"] = after_undefined["undefined_refs"]
+                        latest["undefined_citations_after"] = after_undefined["undefined_citations"]
                         acceptance_evidence = RoundEvidence(
                             page_count_before=latest.get("page_count_before"),
-                            page_count_after=actual_pages if actual_pages > 0 else latest.get("page_count_after"),
+                            # 页数证据缺失时传 None：验收函数 fail-closed，绝不回退旧值放行
+                            page_count_after=actual_pages if actual_pages > 0 else None,
                             target_pages=task_spec.target_pages,
                             overfull_before=latest.get("overfull_hbox_total_before"),
                             overfull_after=latest.get("overfull_hbox_total_after"),
+                            figures_before=latest.get("figures_before") or 0,
+                            figures_after=latest.get("figures_after") or 0,
+                            tables_before=latest.get("tables_before") or 0,
+                            tables_after=latest.get("tables_after") or 0,
+                            labels_before=latest.get("labels_before") or 0,
+                            labels_after=latest.get("labels_after") or 0,
+                            refs_before=latest.get("refs_before") or 0,
+                            refs_after=latest.get("refs_after") or 0,
+                            undefined_refs_before=latest.get("undefined_refs_before") or 0,
+                            undefined_refs_after=latest.get("undefined_refs_after") or 0,
+                            undefined_citations_before=latest.get("undefined_citations_before") or 0,
+                            undefined_citations_after=latest.get("undefined_citations_after") or 0,
                             content_integrity_pass=bool(
                                 ((state.get("content_integrity") or {}).get("validation_status") or "").startswith("mutation")
                                 or (state.get("content_integrity") or {}).get("validation_status") == "snapshot_created"
@@ -2414,6 +2443,42 @@ class OrchestratorRuntime:
         if not path.is_file():
             return {}
         return json.loads(path.read_text(encoding="utf-8"))
+
+    def _round_structural_counts(self, state: Dict[str, Any]) -> Dict[str, int]:
+        "轮边界结构证据：图/表（crossrefs.floats）、label/引用（源码计数）。"
+        counts = {"figures": 0, "tables": 0, "labels": 0, "refs": 0}
+        try:
+            crossrefs_path = Path.cwd() / str((state.get("artifacts") or {}).get("crossrefs_report") or "data/crossrefs.json")
+            if crossrefs_path.is_file():
+                floats = json.loads(crossrefs_path.read_text(encoding="utf-8")).get("floats") or []
+                for item in floats:
+                    kind = str(item.get("float_type") or "")
+                    if kind.startswith("figure"):
+                        counts["figures"] += 1
+                    elif kind.startswith("table"):
+                        counts["tables"] += 1
+        except Exception:
+            pass
+        try:
+            from runtime_snapshots import discover_source_files
+
+            main_tex = str(state.get("main_tex") or "main.tex")
+            label_re = re.compile(r"\\label\{")
+            ref_re = re.compile(r"\\(?:ref|eqref|autoref|pageref|cite[pt]?)\*?(?=\{)")
+            for source in discover_source_files(Path.cwd(), main_tex):
+                text = source.read_text(encoding="utf-8", errors="replace")
+                counts["labels"] += len(label_re.findall(text))
+                counts["refs"] += len(ref_re.findall(text))
+        except Exception:
+            pass
+        return counts
+
+    def _round_undefined_ref_counts(self, state: Dict[str, Any]) -> Dict[str, int]:
+        summary = (state.get("rule_report") or {}).get("summary") or {}
+        return {
+            "undefined_refs": int(summary.get("undefined_references") or 0),
+            "undefined_citations": int(summary.get("citation_issues") or 0),
+        }
 
     def _has_pending_float_priority_candidates(self, state: Optional[Dict[str, Any]] = None) -> bool:
         current_state = state or self.manager.load()

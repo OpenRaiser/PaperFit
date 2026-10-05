@@ -145,10 +145,25 @@ class PageDistanceTest(unittest.TestCase):
         self.assertTrue(d.accepted)
 
     def test_no_target_pages_no_page_check(self):
-        """没有 target_pages → 页距离检查跳过。"""
-        e = _good_evidence(target_pages=None, page_count_before=None, page_count_after=None)
+        """没有 target_pages 但页数已测量 → 页距离检查跳过，仍然接受。"""
+        e = _good_evidence(target_pages=None, page_count_before=None, page_count_after=8)
         d = evaluate_round_acceptance(e)
         self.assertTrue(d.accepted)
+
+    def test_missing_page_measurement_fail_closed(self):
+        "Regression checks."
+        e = _good_evidence(target_pages=None, page_count_before=None, page_count_after=None)
+        d = evaluate_round_acceptance(e)
+        self.assertFalse(d.accepted)
+        self.assertTrue(d.rollback_required)
+        self.assertTrue(any("measurement_unavailable" in r for r in d.reasons))
+
+    def test_missing_after_pages_fail_closed_even_with_target(self):
+        """有页预算但 after 缺失 → 同样 fail-closed。"""
+        e = _good_evidence(page_count_after=None)
+        d = evaluate_round_acceptance(e)
+        self.assertFalse(d.accepted)
+        self.assertTrue(d.rollback_required)
 
 
 class NoEffectDetectionTest(unittest.TestCase):

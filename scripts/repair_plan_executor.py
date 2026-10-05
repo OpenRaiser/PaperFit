@@ -170,6 +170,8 @@ def _build_float_defects(plan: Dict[str, Any], max_candidates: int) -> List[Dict
             "object": label,
             "page": candidate.get("page") or 0,
             "line_number": None,
+            
+            "finding_id": candidate.get("finding_id"),
         }
         if defect_family == "B1":
             defect["ref_page"] = candidate.get("page") or 0
@@ -392,6 +394,9 @@ def _build_overflow_defects(
         # 透传 proposed_action 让 executor 的路由能识别 textheight 移除等特殊动作
         if candidate.get("proposed_action"):
             defect_entry["proposed_action"] = candidate["proposed_action"]
+        
+        if candidate.get("finding_id"):
+            defect_entry["finding_id"] = candidate["finding_id"]
         defects.append(defect_entry)
         if len(defects) >= max_candidates:
             break
@@ -460,6 +465,7 @@ def _build_space_util_defects(
                 "whitespace_ratio": candidate.get("whitespace_ratio"),
                 "current_pages": candidate.get("current_pages"),
                 "height_difference": candidate.get("height_difference"),
+                "finding_id": candidate.get("finding_id"),
             }
         )
         if len(defects) >= max_candidates:

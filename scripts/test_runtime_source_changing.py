@@ -51,7 +51,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 gatekeeper_report = root / "data" / "gatekeeper_decision.json"
                 page = page_dir / "page_001.png"
                 page.write_bytes(b"png")
-                visual_report.write_text("{}", encoding="utf-8")
+                visual_report.write_text(json.dumps({"summary": {"pages_analyzed": 8}}), encoding="utf-8")
                 defect_report.write_text("{}", encoding="utf-8")
                 gatekeeper_report.write_text("{}", encoding="utf-8")
                 base_mtime = 1_800_000_000 + core_calls["count"] * 10
@@ -282,7 +282,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 gatekeeper_report = root / "data" / "gatekeeper_decision.json"
                 repair_plan = root / "data" / "repair_plan.json"
                 page.write_bytes(b"png")
-                visual_report.write_text("{}", encoding="utf-8")
+                visual_report.write_text(json.dumps({"summary": {"pages_analyzed": 8}}), encoding="utf-8")
                 defect_report.write_text("{}", encoding="utf-8")
                 gatekeeper_report.write_text(json.dumps({"decision": "CONTINUE"}), encoding="utf-8")
                 repair_plan.write_text(
@@ -607,7 +607,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 defect_report = root / "data" / "defect_report.json"
                 gatekeeper_report = root / "data" / "gatekeeper_decision.json"
                 page.write_bytes(b"png")
-                visual_report.write_text("{}", encoding="utf-8")
+                visual_report.write_text(json.dumps({"summary": {"pages_analyzed": 8}}), encoding="utf-8")
                 defect_report.write_text("{}", encoding="utf-8")
                 gatekeeper_report.write_text(json.dumps({"decision": decision}), encoding="utf-8")
                 for offset, path in enumerate([pdf, page, visual_report, defect_report, gatekeeper_report]):
@@ -794,7 +794,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 defect_report = root / "data" / "defect_report.json"
                 gatekeeper_report = root / "data" / "gatekeeper_decision.json"
                 page.write_bytes(b"png")
-                visual_report.write_text("{}", encoding="utf-8")
+                visual_report.write_text(json.dumps({"summary": {"pages_analyzed": 8}}), encoding="utf-8")
                 defect_report.write_text("{}", encoding="utf-8")
                 gatekeeper_report.write_text(json.dumps({"decision": "CONTINUE"}), encoding="utf-8")
                 for offset, path in enumerate([pdf, page, visual_report, defect_report, gatekeeper_report]):
@@ -991,7 +991,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 defect_report = root / "data" / "defect_report.json"
                 gatekeeper_report = root / "data" / "gatekeeper_decision.json"
                 repair_plan = root / "data" / "repair_plan.json"
-                visual_report.write_text("{}", encoding="utf-8")
+                visual_report.write_text(json.dumps({"summary": {"pages_analyzed": 8}}), encoding="utf-8")
                 defect_report.write_text("{}", encoding="utf-8")
                 gatekeeper_report.write_text("{}", encoding="utf-8")
                 repair_plan.write_text(

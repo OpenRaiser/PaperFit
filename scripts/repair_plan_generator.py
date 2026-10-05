@@ -1437,7 +1437,10 @@ def _promote_visual_action_plan(visual_signal_report: str) -> List[Dict[str, Any
         return []
 
     candidates: List[Dict[str, Any]] = []
-    seen_families: set[str] = set()
+    
+    
+    seen_keys: set[tuple[str, str]] = set()
+    family_counts: Dict[str, int] = {}
     for entry in plan.get("entries") or []:
         if not isinstance(entry, dict):
             continue
@@ -1449,14 +1452,23 @@ def _promote_visual_action_plan(visual_signal_report: str) -> List[Dict[str, Any
         label = entry.get("label")
         page = entry.get("page")
         anchor = entry.get("source_anchors") or []
-        has_anchor = bool(anchor)
+        anchor_status = str(entry.get("anchor_status") or "")
         severity = str(entry.get("severity") or "minor")
         confidence = float(entry.get("confidence") or 0.5)
 
-        if not family or family in seen_families:
+        dedupe_key = (family, str(label if label is not None else finding_id))
+        if not family or dedupe_key in seen_keys:
             continue
-        if not has_anchor and severity in {"major", "critical"}:
-            continue  # 无锚点的高严重度不自动执行
+        if family_counts.get(family, 0) >= 3:
+            continue
+        
+        
+        if anchor_status and anchor_status != "resolved":
+            continue
+        if len(anchor) > 1:
+            continue
+        if not anchor and severity in {"major", "critical"}:
+            continue
 
         # 按家族映射到 proposed_action
         action_map = {
@@ -1512,7 +1524,8 @@ def _promote_visual_action_plan(visual_signal_report: str) -> List[Dict[str, Any
             "evidence_sources": ["visual_action_plan"],
             **extra_fields,
         })
-        seen_families.add(family)  # 每个家族只提升一个（避免重复）
+        seen_keys.add(dedupe_key)
+        family_counts[family] = family_counts.get(family, 0) + 1
 
     return candidates
 

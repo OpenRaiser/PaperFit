@@ -370,6 +370,78 @@ def _vlm_configured() -> bool:
     return bool(os.environ.get("BASELINE_VLM_API_URL") and os.environ.get("BASELINE_VLM_API_KEY") and os.environ.get("BASELINE_VLM_MODEL_NAME"))
 
 
+def _apply_vlm_pair_results(
+    *,
+    normal_reports: List[Dict[str, Any]],
+    swapped_reports: List[Dict[str, Any]],
+    common_cases: List[str],
+    case_records: List[Dict[str, Any]],
+    records_by_case: Dict[tuple, Dict[str, Any]],
+    paired: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """把双序 VLM 裁决转换成 delta 样本并回写 case_records。
+
+    - delta = 双序 repair_score 均值（符号恒为 candidate−reference，tie=0），
+      绝不用"gated 均值 − 3.0"这类常数冒充分差。
+    - 双序冲突/缺裁决/缺分数的 case 是不确定项：剔出 CI 样本，单独返回。
+    """
+    evaluator_lib = REPO_ROOT / "evaluator" / "lib"
+    if str(evaluator_lib) not in sys.path:
+        sys.path.insert(0, str(evaluator_lib))
+    from pair_symmetry import reconcile_pair_runs
+
+    def _pair_score(report: Dict[str, Any]) -> Optional[float]:
+        # repair_score ∈ [-1,3]，符号方向恒为 candidate−reference（tie=0）；
+        # gated_v3_score 是绝对分（无符号），不能作为配对差使用
+        vlm = report.get("vlm") or {}
+        value = vlm.get("repair_score")
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
+
+    uncertain_cases: List[Dict[str, Any]] = []
+    normal_by_case = {r.get("case_id"): r for r in normal_reports}
+    swapped_by_case = {r.get("case_id"): r for r in swapped_reports}
+    for case_id in common_cases:
+        n = normal_by_case.get(case_id, {})
+        s = swapped_by_case.get(case_id, {})
+        reconciled = reconcile_pair_runs(n, s)
+        paper_id, _, arxiv_id = case_id.partition("/")
+
+        normal_score = _pair_score(n)
+        swapped_score = _pair_score(s)
+        entry = {
+            "paper_id": paper_id,
+            "case_id": case_id,
+            "gated_score_normal": float(((n.get("vlm") or {}).get("gated_v3_score") or 0)),
+            "gated_score_swapped": float(((s.get("vlm") or {}).get("gated_v3_score") or 0)),
+            "repair_score_normal": normal_score,
+            "repair_score_swapped": swapped_score,
+            "reconciled": reconciled.get("winner"),
+            "agreement": reconciled.get("agreement"),
+        }
+
+        # 回写 case_records 使报告 win_counts 正确（复合键 venue + arXiv-id）
+        record = records_by_case.get((paper_id, arxiv_id))
+        if record is not None:
+            record["vlm"] = {
+                "reconciled": reconciled.get("winner"),
+                "agreement": reconciled.get("agreement"),
+                "gated_score": entry["gated_score_normal"],
+                "repair_score_normal": normal_score,
+                "repair_score_swapped": swapped_score,
+            }
+        else:
+            print(f"VLM write-back miss: no case_record for {case_id}", file=sys.stderr)
+
+        if reconciled.get("agreement") == "agree" and normal_score is not None and swapped_score is not None:
+            entry["delta"] = (normal_score + swapped_score) / 2
+            paired.append(entry)
+        else:
+            uncertain_cases.append(entry)
+    return uncertain_cases
+
+
 def _run_vlm_revision_pairs(
     *,
     methods_root: Path,
@@ -404,8 +476,11 @@ def _run_vlm_revision_pairs(
     api_key = os.environ.get("BASELINE_VLM_API_KEY", "")
     model = os.environ.get("BASELINE_VLM_MODEL_NAME", "")
 
-    # case_records 索引，用于回写 VLM 结果
-    records_by_case = {r.get("case_id"): r for r in case_records}
+    
+    
+    records_by_case = {
+        (str(r.get("paper_id") or ""), str(r.get("case_id") or "")): r for r in case_records
+    }
 
     try:
         evaluator_dir = REPO_ROOT / "evaluator"
@@ -453,50 +528,21 @@ def _run_vlm_revision_pairs(
             swap_order=True,
         )
 
-        from pair_symmetry import reconcile_pair_runs
+        from pair_symmetry import reconcile_pair_runs  # noqa: F401  (保证可导入，实际使用在 _apply_vlm_pair_results)
 
-        normal_by_case = {r.get("case_id"): r for r in normal_summary.get("reports", [])}
-        swapped_by_case = {r.get("case_id"): r for r in swapped_summary.get("reports", [])}
+        uncertain_cases = _apply_vlm_pair_results(
+            normal_reports=normal_summary.get("reports", []),
+            swapped_reports=swapped_summary.get("reports", []),
+            common_cases=common_cases,
+            case_records=case_records,
+            records_by_case=records_by_case,
+            paired=paired,
+        )
 
-        for case_id in common_cases:
-            n = normal_by_case.get(case_id, {})
-            s = swapped_by_case.get(case_id, {})
-            reconciled = reconcile_pair_runs(n, s)
-            paper_id = case_id.split("/")[0]
-
-            # 真实 gated score（不是 -3.0 常数）
-            normal_gated = float(((n.get("vlm") or {}).get("gated_v3_score") or 0))
-            entry = {
-                "paper_id": paper_id,
-                "case_id": case_id,
-                "gated_score_normal": normal_gated,
-                "gated_score_swapped": float(((s.get("vlm") or {}).get("gated_v3_score") or 0)),
-                "reconciled": reconciled.get("winner"),
-                "agreement": reconciled.get("agreement"),
-            }
-            paired.append(entry)
-
-            # 回写 case_records 使报告 win_counts 正确
-            record = records_by_case.get(case_id)
-            if record is not None:
-                record["vlm"] = {
-                    "reconciled": reconciled.get("winner"),
-                    "agreement": reconciled.get("agreement"),
-                    "gated_score": normal_gated,
-                    "repair_score_normal": ((n.get("vlm") or {}).get("repair_score")),
-                    "repair_score_swapped": ((s.get("vlm") or {}).get("repair_score")),
-                }
-
-        # paired_scores 的 delta 用两序均值（排除 uncertain）
-        for entry in paired:
-            if entry.get("agreement") == "agree":
-                entry["delta"] = (
-                    entry["gated_score_normal"] + entry["gated_score_swapped"]
-                ) / 2 - 3.0  # 相对中立值的偏移（B0 vs OURS 模式）
-            else:
-                entry["delta"] = 0.0  # uncertain 不进入 CI
-
-        print(f"VLM revision pairs: {len(paired)} cases evaluated")
+        print(
+            f"VLM revision pairs: {len(paired)} scored, "
+            f"{len(uncertain_cases)} uncertain (excluded from CI)"
+        )
     except Exception as exc:
         print(f"VLM evaluation failed: {exc}", file=sys.stderr)
 

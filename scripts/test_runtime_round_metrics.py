@@ -47,7 +47,7 @@ class RoundMetricsTest(unittest.TestCase):
                 visual_report = root / "data" / "visual_signal_report.json"
                 defect_report = root / "data" / "defect_report.json"
                 gatekeeper_report = root / "data" / "gatekeeper_decision.json"
-                visual_report.write_text("{}", encoding="utf-8")
+                visual_report.write_text(json.dumps({"summary": {"pages_analyzed": 8}}), encoding="utf-8")
                 defect_report.write_text("{}", encoding="utf-8")
                 gatekeeper_report.write_text("{}", encoding="utf-8")
                 base_mtime = 1_800_000_000 + core_calls["count"] * 10
