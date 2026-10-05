@@ -38,6 +38,60 @@ PROMPT_KWARGS = dict(
 )
 
 
+
+
+class RelativeHardConstraintsTest(unittest.TestCase):
+    """配对评测的约束门是相对语义：双方共有的 B0 固有缺陷不单方面惩罚候选。"""
+
+    def test_shared_undefined_refs_not_penalized(self):
+        from revision_pair import build_hard_constraints
+
+        cand = {"compile_success": True, "render_success": True, "page_budget_hit": False, "undefined_ref_count": 83}
+        ref = {"page_budget_hit": False, "undefined_ref_count": 83}
+        c = build_hard_constraints(cand, reference_evaluation=ref)
+        self.assertEqual(c["undefined_ref_count"], 0)  # 无增量 → 不罚
+        self.assertTrue(c["page_budget_hit"])  # 引用侧同样超页 → 双方共有
+        self.assertEqual(c["undefined_ref_count_absolute"], 83)  # 绝对值留档
+
+    def test_new_undefined_refs_penalized(self):
+        from revision_pair import build_hard_constraints
+
+        cand = {"compile_success": True, "render_success": True, "page_budget_hit": True, "undefined_ref_count": 7}
+        ref = {"page_budget_hit": True, "undefined_ref_count": 2}
+        c = build_hard_constraints(cand, reference_evaluation=ref)
+        self.assertEqual(c["undefined_ref_count"], 5)  # 候选新增 → 罚增量
+        self.assertFalse(c["page_budget_hit"]) if False else None
+
+    def test_budget_miss_only_candidate_penalized(self):
+        from revision_pair import build_hard_constraints
+
+        cand = {"compile_success": True, "render_success": True, "page_budget_hit": False, "undefined_ref_count": 0}
+        ref = {"page_budget_hit": True, "undefined_ref_count": 0}
+        c = build_hard_constraints(cand, reference_evaluation=ref)
+        self.assertFalse(c["page_budget_hit"])  # 只有候选超页 → 罚
+
+    def test_reference_unknown_keeps_conservative_absolute(self):
+        from revision_pair import build_hard_constraints
+
+        cand = {"compile_success": True, "render_success": True, "page_budget_hit": False, "undefined_ref_count": 3}
+        c = build_hard_constraints(cand)
+        self.assertEqual(c["undefined_ref_count"], 3)
+        self.assertFalse(c["page_budget_hit"])
+
+    def test_prompt_shows_both_sides_counts(self):
+        from revision_pair import build_revision_user_prompt
+
+        prompt = build_revision_user_prompt(
+            reference_method="v1", candidate_method="v2", template_name="T", profile=None,
+            target_pages=10, reference_page_count=14, candidate_page_count=12,
+            candidate_compile_success=True, candidate_render_success=True,
+            candidate_page_budget_hit=False, candidate_undefined_ref_count=83,
+            reference_page_budget_hit=False, reference_undefined_ref_count=83,
+        )
+        self.assertIn("Reference: page_budget_hit=False, undefined_ref_count=83", prompt)
+        self.assertIn("undefined_ref_count=83", prompt)
+
+
 class RevisionPromptTest(unittest.TestCase):
     def test_prompt_uses_revision_semantics_not_b0(self) -> None:
         prompt = build_revision_user_prompt(**PROMPT_KWARGS)

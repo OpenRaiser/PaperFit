@@ -59,7 +59,10 @@ def evaluate_case(
     ref_eval = load_case_evaluation(reference_root, case_id)
     cand_eval = load_case_evaluation(candidate_root, case_id)
     context = case_context or {}
-    constraints = build_hard_constraints(cand_eval)
+    
+    
+    
+    constraints = build_hard_constraints(cand_eval, reference_evaluation=ref_eval)
 
     comparison_path = case_out / f"comparison_{pair_tag}.png"
     comparison = labeled_revision_comparison_image(
@@ -82,8 +85,10 @@ def evaluate_case(
         candidate_page_count=cand_eval.get("page_count"),
         candidate_compile_success=constraints.get("compile_success"),
         candidate_render_success=constraints.get("render_success"),
-        candidate_page_budget_hit=constraints.get("page_budget_hit"),
-        candidate_undefined_ref_count=constraints.get("undefined_ref_count"),
+        candidate_page_budget_hit=constraints.get("page_budget_hit_absolute"),
+        candidate_undefined_ref_count=cand_eval.get("undefined_ref_count"),
+        reference_page_budget_hit=ref_eval.get("page_budget_hit"),
+        reference_undefined_ref_count=ref_eval.get("undefined_ref_count"),
         swap_order=swap_order,
     )
     raw_response, usage = client.analyze(

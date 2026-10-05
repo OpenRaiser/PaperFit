@@ -229,10 +229,42 @@ def load_case_evaluation(method_root: Path, case_id: str) -> Dict[str, Any]:
     return _load_json(method_root / case_id / "reports" / "evaluation_report.json")
 
 
-def build_hard_constraints(candidate_evaluation: Dict[str, Any]) -> Dict[str, Any]:
+def build_hard_constraints(
+    candidate_evaluation: Dict[str, Any],
+    reference_evaluation: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """配对评测的约束门（相对语义）。
+
+    compile/render 失败是候选自身绝对问题，保持绝对判定；
+    page_budget / undefined refs 是数据集 B0 源码可能自带的状态——只有当
+    引用侧满足而候选侧不满足（候选变差）时才作为约束违规惩罚。
+    引用侧未知时保持保守的绝对判定。绝对值同时保留（*_absolute）供审计。
+    """
+    cand_budget = candidate_evaluation.get("page_budget_hit")
+    cand_undef = candidate_evaluation.get("undefined_ref_count")
+    ref_budget = (reference_evaluation or {}).get("page_budget_hit")
+    ref_undef = (reference_evaluation or {}).get("undefined_ref_count")
+
+    if ref_budget is None:
+        gated_budget = cand_budget
+    else:
+        gated_budget = bool(cand_budget) if not ref_budget else bool(cand_budget)
+        # 引用侧也没命中预算 → 双方共有，不作为候选的约束违规
+        if not cand_budget and not ref_budget:
+            gated_budget = True
+
+    if isinstance(cand_undef, int) and isinstance(ref_undef, int):
+        gated_undef = max(0, cand_undef - ref_undef)
+    else:
+        gated_undef = cand_undef  # 引用侧未知：保守保持绝对计数
+
     return {
         "compile_success": candidate_evaluation.get("compile_success"),
         "render_success": candidate_evaluation.get("render_success"),
-        "page_budget_hit": candidate_evaluation.get("page_budget_hit"),
-        "undefined_ref_count": candidate_evaluation.get("undefined_ref_count"),
+        "page_budget_hit": gated_budget,
+        "undefined_ref_count": gated_undef,
+        "page_budget_hit_absolute": cand_budget,
+        "undefined_ref_count_absolute": cand_undef,
+        "reference_page_budget_hit": ref_budget,
+        "reference_undefined_ref_count": ref_undef,
     }
