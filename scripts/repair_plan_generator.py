@@ -1399,7 +1399,15 @@ def _build_log_candidates(
                     "scope": "table_overflow" if subtype == "alignment" else "overflow",
                 },
                 "defect_family": "D1",
-                "priority_score": 99 if is_textheight_cascade else min(95, 80 + int(max(overflow_pt, 0.0) // 5)),
+                
+                
+                
+                "priority_score": (
+                    99 if is_textheight_cascade
+                    else 97 if overflow_pt >= 100
+                    else 94 if overflow_pt >= 50
+                    else min(93, 80 + int(max(overflow_pt, 0.0) // 5))
+                ),
                 "severity": "critical" if is_textheight_cascade else str(warning.get("severity") or "major"),
                 "proposed_action": "remove_preamble_textheight_shrink" if is_textheight_cascade else "repair_overfull_boxes",
                 "rationale": (

@@ -94,6 +94,12 @@ def candidate_action_metadata(candidate: Dict[str, Any]) -> Dict[str, Any]:
     "规格的候选元数据。"
     action = str(candidate.get("proposed_action") or "")
     action_class = classify_action(action)
+    
+    
+    
+    overflow_amount = float(candidate.get("overflow_amount") or 0.0)
+    if action_class == "local_safe" and overflow_amount >= 50.0:
+        action_class = "layout_sensitive"
     return {
         "action_class": action_class,
         "vertical_cost": 1 if action in VERTICAL_COST_ACTIONS else 0,
