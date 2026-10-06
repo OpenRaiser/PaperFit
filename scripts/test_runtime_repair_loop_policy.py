@@ -146,7 +146,7 @@ class RepairLoopPolicyBatchLimitTest(unittest.TestCase):
     def test_bounded_apply_reports_default_batch_limit(self) -> None:
         policy = build_repair_loop_policy(**_base_inputs())
         self.assertEqual(policy["candidate_batch_limit"], DEFAULT_CANDIDATE_BATCH_LIMIT)
-        self.assertEqual(policy["candidate_batch_limit"], 3)
+        self.assertEqual(policy["candidate_batch_limit"], 8)  # 吞吐上调后
 
     def test_dry_run_reports_zero_batch_limit(self) -> None:
         policy = build_repair_loop_policy(

@@ -787,7 +787,7 @@ def main() -> int:
     parser.add_argument("--paperfit-data", required=True, type=Path)
     parser.add_argument("--out", default=Path("regression_runs"), type=Path)
     parser.add_argument("--cases", type=int, default=10)
-    parser.add_argument("--max-rounds", type=int, default=2)
+    parser.add_argument("--max-rounds", type=int, default=4)
     parser.add_argument("--dry-run", action="store_true", help="PaperFit 只诊断不写回（默认 apply）")
     parser.add_argument(
         "--source-mode",

@@ -21,7 +21,7 @@ SOURCE_CHANGING_TASK_TYPES = {
 # Candidates executed per bounded-apply round. The orchestrator scope gate
 # and the repair executor must use the same value, and the loop policy must
 # report it truthfully.
-DEFAULT_CANDIDATE_BATCH_LIMIT = 3
+DEFAULT_CANDIDATE_BATCH_LIMIT = 8
 
 
 def _task_type(task: Dict[str, Any]) -> str:

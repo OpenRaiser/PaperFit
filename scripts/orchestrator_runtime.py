@@ -524,9 +524,9 @@ class OrchestratorRuntime:
                 main_tex=main_tex,
                 column_type=task_config.get("column_type"),
                 target_pages=task_config.get("target_pages"),
-                max_local_batch=6,
-                max_layout_candidates=max(3, max_candidates),
-                max_global_candidates=1,
+                max_local_batch=16,
+                max_layout_candidates=max(8, max_candidates),
+                max_global_candidates=2,
                 report_path=Path.cwd() / "data" / "phased_repair_report.json",
             )
             out_path = Path.cwd() / output_path
