@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""单 case 的 PaperFit 机器调用封装（回归 runner 的被测引擎入口）。
-
-复用 typed runtime（orchestrator_runtime.py run-task）：一次调用完成
-快照→编译→渲染→诊断→修复→复验，产物（state.json / run_result.json /
-data/pages）全部落在工作目录，供后续导出与评测消费。
-
-paperfit_runner 可注入（测试用假实现），真实实现走子进程。
-"""
+"单 case 的 PaperFit 机器调用封装（回归 runner 的被测引擎入口）。"
 
 from __future__ import annotations
 
@@ -14,6 +7,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -23,15 +17,46 @@ ORCHESTRATOR = REPO_ROOT / "scripts" / "orchestrator_runtime.py"
 
 PaperFitRunner = Callable[[Path, Path, Path], Dict[str, Any]]
 
+RUN_STATUS_COMPLETED = "completed"
+RUN_STATUS_CRASH = "runner_crash"
+RUN_STATUS_NOT_RUN = "not_run"
+
+RENDER_STATUS_RENDERED = "rendered"
+RENDER_STATUS_FAILED = "failed"
+
+REPAIR_EFFECT_ACCEPTED = "accepted"
+REPAIR_EFFECT_NO_EFFECT = "no_effect"
+REPAIR_EFFECT_GUARD_ROLLED_BACK = "guard_rolled_back"
+REPAIR_EFFECT_BLOCKED = "blocked"
+REPAIR_EFFECT_APPROVAL_REQUIRED = "approval_required"
+REPAIR_EFFECT_COMPILE_FAILED = "compile_failed"
+# payload 无任何修复执行痕迹（旧假实现 / 极早期 payload）时的诚实值：
+# 整体 status 维持旧口径 layout_evaluable，但 repair_effect 列不冒充 accepted
+REPAIR_EFFECT_UNKNOWN = "unknown"
+REPAIR_EFFECT_NOT_RUN = "not_run"
+
+RUNNER_TIMEOUT_SEC = 1800
+REPAIR_EXECUTION_REPORT_RELPATH = Path("data") / "repair_execution_report.json"
+
+# 编译失败时 runtime 语义化的 case_status（整词表见 runtime_compile_case_status）
+COMPILE_CASE_STATUSES = {"environment_ineligible", "input_incomplete", "source_compile_error"}
+
 
 @dataclass
 class CaseRunResult:
     case_id: str
     paper_id: str
-    status: str  # layout_evaluable / environment_ineligible / input_incomplete / source_compile_error / runner_crash / not_run
+    # 兼容聚合列：layout_evaluable / no_effect / guard_rolled_back / approval_required /
+    # blocked / environment_ineligible / input_incomplete / source_compile_error /
+    # runner_crash / not_run
+    status: str
     reasons: List[str] = field(default_factory=list)
     work_dir: Optional[Path] = None
     run_result: Dict[str, Any] = field(default_factory=dict)
+    
+    run_status: str = RUN_STATUS_NOT_RUN
+    candidate_render_status: str = RENDER_STATUS_FAILED
+    repair_effect_status: str = REPAIR_EFFECT_NOT_RUN
 
 
 def build_task_spec(
@@ -67,29 +92,119 @@ def build_task_spec(
     }
 
 
+def _coerce_output_text(value: Any) -> str:
+    """子进程输出统一成可读 str（无输出给空串，绝不让 None 流入下游）。"""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return ""
+
+
+def _read_repair_execution_summary(project: Path, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    "读工作目录里的 repair_execution_report.json，归一成执行摘要。"
+    candidates: List[Path] = []
+    artifacts = payload.get("artifacts")
+    if isinstance(artifacts, dict):
+        rel = artifacts.get("repair_execution_report")
+        if isinstance(rel, str) and rel:
+            candidates.append(project / rel)
+    candidates.append(project / REPAIR_EXECUTION_REPORT_RELPATH)
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        try:
+            source = str(path.resolve().relative_to(project.resolve()))
+        except ValueError:
+            source = str(path)
+        return {
+            "status": data.get("status"),
+            "applied_count": int(data.get("applied_count") or 0),
+            "accepted_count": int(data.get("accepted_count") or 0),
+            "rejected_count": int(data.get("rejected_count") or 0),
+            "rolled_back_count": int(data.get("rolled_back_count") or 0),
+            "source": source,
+        }
+    return None
+
+
 def default_paperfit_runner(
     project_root: Path,
     orchestrator: Path,
     python_exe: str,
 ) -> PaperFitRunner:
     def _run(project: Path, task_path: Path, output_path: Path) -> Dict[str, Any]:
-        completed = subprocess.run(
-            [python_exe, str(orchestrator), "run-task", str(task_path), "--output", str(output_path)],
-            cwd=str(project),
-            capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-            timeout=1800,
-        )
+        command = [
+            python_exe,
+            str(orchestrator),
+            "run-task",
+            str(task_path),
+            "--output",
+            str(output_path),
+        ]
+        started = time.monotonic()
+        timed_out = False
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(project),
+                capture_output=True,
+                text=True, encoding="utf-8", errors="replace",
+                timeout=RUNNER_TIMEOUT_SEC,
+            )
+            returncode = int(completed.returncode)
+            stdout = _coerce_output_text(completed.stdout)
+            stderr = _coerce_output_text(completed.stderr)
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            returncode = -1
+            stdout = _coerce_output_text(exc.stdout)
+            stderr = _coerce_output_text(exc.stderr)
+        duration_sec = round(time.monotonic() - started, 3)
+
+        payload: Optional[Dict[str, Any]] = None
         if output_path.is_file():
-            return json.loads(output_path.read_text(encoding="utf-8"))
-        return {
-            "status": "runner_crash",
-            "failure": {
-                "failure_type": "paperfit_runner_exit",
-                "reason": f"returncode={completed.returncode}",
-                "stderr_tail": (completed.stderr or "")[-2000:],
-            },
+            try:
+                loaded = json.loads(output_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                loaded = None
+            if isinstance(loaded, dict):
+                payload = loaded
+        if payload is None:
+            reason = f"timeout after {RUNNER_TIMEOUT_SEC}s" if timed_out else f"returncode={returncode}"
+            payload = {
+                "status": "runner_crash",
+                "failure": {
+                    "failure_type": "paperfit_runner_exit",
+                    "reason": reason,
+                    "stderr_tail": stderr[-2000:],
+                },
+            }
+
+        
+        
+        payload["paperfit_process"] = {
+            "command": command,
+            "cwd": str(project),
+            "returncode": returncode,
+            "duration_sec": duration_sec,
+            "timed_out": timed_out,
+            "stdout": stdout,
+            "stderr": stderr,
         }
+        # 退出码 0 也要读 execution report：真实 run_result.json 顶层不带
+        # repair_execution_summary，no_effect 只能从执行报告本体判定
+        if payload.get("repair_execution_summary") is None:
+            summary = _read_repair_execution_summary(project, payload)
+            if summary is not None:
+                payload["repair_execution_summary"] = summary
+        return payload
 
     return _run
 
@@ -142,37 +257,152 @@ def run_paperfit_case(
 
     result.work_dir = work_dir
     result.run_result = run_payload
-    result.status = _derive_status(run_payload)
+    states = _derive_case_states(run_payload)
+    result.status = states["status"]
+    result.run_status = states["run_status"]
+    result.candidate_render_status = states["candidate_render_status"]
+    result.repair_effect_status = states["repair_effect_status"]
     if result.status != "layout_evaluable":
-        failure = run_payload.get("failure") or {}
-        reason = str(failure.get("reason") or failure.get("failure_type") or run_payload.get("status") or "")
-        result.reasons.append(f"{failure.get('failure_type') or 'status'}: {reason}" if reason else str(run_payload.get("status")))
+        if result.status == "no_effect":
+            summary = _execution_summary(run_payload)
+            result.reasons.append(
+                "repair_no_effect: "
+                f"repair_execution_summary status={summary.get('status')!r}, "
+                f"applied_count={int(summary.get('applied_count') or 0)} (candidate source equals B0)"
+            )
+        else:
+            failure = run_payload.get("failure") or {}
+            reason = str(failure.get("reason") or failure.get("failure_type") or run_payload.get("status") or "")
+            result.reasons.append(
+                f"{failure.get('failure_type') or 'status'}: {reason}" if reason else str(run_payload.get("status"))
+            )
     return result
 
 
-def _derive_status(run_payload: Dict[str, Any]) -> str:
-    if run_payload.get("status") == "runner_crash":
-        return "runner_crash"
-    failure = run_payload.get("failure") or {}
-    failure_type = str(failure.get("failure_type") or "")
-    # 安全系统正确拦截：修复触发硬门禁并已回滚，源码等价于 B0
-    if failure_type == "post_repair_hard_guard_failed":
-        return "guard_rolled_back"
+def _compile_action(run_payload: Dict[str, Any]) -> Dict[str, Any]:
     runtime_actions = run_payload.get("runtime_actions") or {}
     compile_action = runtime_actions.get("compile") or {}
     if not compile_action:
         # typed runtime 把编译动作嵌在 initial_observe 里
         initial_observe = runtime_actions.get("initial_observe") or {}
         compile_action = initial_observe.get("compile") or {}
-    if not compile_action.get("success"):
-        case_status = str(compile_action.get("case_status") or "")
-        if case_status in {"environment_ineligible", "input_incomplete", "source_compile_error"}:
-            return case_status
-        return "source_compile_error"
+    return compile_action if isinstance(compile_action, dict) else {}
+
+
+def _render_action(run_payload: Dict[str, Any]) -> Dict[str, Any]:
+    runtime_actions = run_payload.get("runtime_actions") or {}
     render_action = runtime_actions.get("render") or {}
     if not render_action:
         initial_observe = runtime_actions.get("initial_observe") or {}
         render_action = initial_observe.get("render") or {}
-    if not render_action.get("success"):
-        return "input_incomplete"
-    return "layout_evaluable"
+    return render_action if isinstance(render_action, dict) else {}
+
+
+def _execution_summary(run_payload: Dict[str, Any]) -> Dict[str, Any]:
+    "归一读取修复执行摘要（）。"
+    summary = run_payload.get("repair_execution_summary")
+    if isinstance(summary, dict) and summary.get("status") is not None:
+        return summary
+    records = run_payload.get("round_execution_records")
+    if isinstance(records, list):
+        rounds = [item for item in records if isinstance(item, dict)]
+        if rounds:
+            totals = run_payload.get("execution_totals")
+            if not isinstance(totals, dict):
+                totals = {}
+            applied = totals.get("applied")
+            applied_total = int(applied) if isinstance(applied, int) else sum(int(r.get("applied") or 0) for r in rounds)
+            accepted = totals.get("accepted")
+            accepted_total = (
+                int(accepted) if isinstance(accepted, int) else sum(int(r.get("accepted") or 0) for r in rounds)
+            )
+            return {
+                # applied 总数为 0 时整轮零有效修改（noop 或全回滚），统一按 noop 口径
+                "status": "noop" if applied_total == 0 else str(rounds[-1].get("status") or "success"),
+                "applied_count": applied_total,
+                "accepted_count": accepted_total,
+            }
+    executor = (run_payload.get("runtime_actions") or {}).get("repair_plan_executor")
+    if isinstance(executor, dict) and executor.get("status") is not None:
+        return {
+            "status": executor.get("status"),
+            "applied_count": int(executor.get("applied_count") or 0),
+        }
+    return {}
+
+
+def _classify_repair_effect(
+    run_payload: Dict[str, Any],
+    *,
+    failure_type: str,
+    compile_ok: bool,
+) -> str:
+    """修复效果三列判定（与渲染成败正交）。"""
+    # 安全系统正确拦截：修复触发硬门禁并已回滚，源码等价于 B0
+    if failure_type == "post_repair_hard_guard_failed":
+        return REPAIR_EFFECT_GUARD_ROLLED_BACK
+    if not compile_ok:
+        return REPAIR_EFFECT_COMPILE_FAILED
+    run_status = str(run_payload.get("status") or "")
+    if run_status == "approval_required" or failure_type == "approval_required":
+        return REPAIR_EFFECT_APPROVAL_REQUIRED
+    if run_status == "blocked":
+        return REPAIR_EFFECT_BLOCKED
+    summary = _execution_summary(run_payload)
+    if not summary:
+        return REPAIR_EFFECT_UNKNOWN
+    if int(summary.get("applied_count") or 0) > 0:
+        return REPAIR_EFFECT_ACCEPTED
+    # status=noop（或 failed 后全部回滚）且 applied=0：候选源码等价 B0
+    return REPAIR_EFFECT_NO_EFFECT
+
+
+def _derive_case_states(run_payload: Dict[str, Any]) -> Dict[str, str]:
+    """从 run payload 派生三列状态 + 兼容聚合 status。"""
+    if run_payload.get("status") == "runner_crash":
+        return {
+            "status": "runner_crash",
+            "run_status": RUN_STATUS_CRASH,
+            "candidate_render_status": RENDER_STATUS_FAILED,
+            "repair_effect_status": REPAIR_EFFECT_UNKNOWN,
+        }
+    failure = run_payload.get("failure") or {}
+    failure_type = str(failure.get("failure_type") or "")
+    compile_ok = bool(_compile_action(run_payload).get("success"))
+    render_ok = bool(_render_action(run_payload).get("success"))
+    effect = _classify_repair_effect(run_payload, failure_type=failure_type, compile_ok=compile_ok)
+
+    if failure_type == "post_repair_hard_guard_failed":
+        # 即使 PDF 可渲染也是回滚态：修复没有存活，不许进可评估桶
+        status = "guard_rolled_back"
+    elif not compile_ok:
+        compile_action = _compile_action(run_payload)
+        case_status = str(compile_action.get("case_status") or "")
+        if case_status in COMPILE_CASE_STATUSES:
+            status = case_status
+        elif effect == REPAIR_EFFECT_APPROVAL_REQUIRED:
+            status = "approval_required"
+        else:
+            status = "source_compile_error"
+    elif not render_ok:
+        status = "input_incomplete"
+    elif effect == REPAIR_EFFECT_NO_EFFECT:
+        status = "no_effect"
+    elif effect == REPAIR_EFFECT_APPROVAL_REQUIRED:
+        status = "approval_required"
+    elif effect == REPAIR_EFFECT_BLOCKED:
+        status = "blocked"
+    else:
+        status = "layout_evaluable"
+
+    return {
+        "status": status,
+        "run_status": RUN_STATUS_COMPLETED,
+        "candidate_render_status": RENDER_STATUS_RENDERED if (compile_ok and render_ok) else RENDER_STATUS_FAILED,
+        "repair_effect_status": effect,
+    }
+
+
+def _derive_status(run_payload: Dict[str, Any]) -> str:
+    """兼容入口：只取聚合 status（三列版见 _derive_case_states）。"""
+    return _derive_case_states(run_payload)["status"]

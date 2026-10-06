@@ -618,7 +618,7 @@ _GUARDED_ARG_COMMANDS = (
 
 
 def _token_inside_guarded_argument(tex_content: str, token: str, token_pos: int) -> bool:
-    """token 是否位于受保护命令的 {...} 参数内或 display math 环境内。
+    r"""token 是否位于受保护命令的 {...} 参数内或 display math 环境内。
 
     判定方式：从 token 位置向前找最近的未闭合 \cmd{ 开括号——若它属于
     _GUARDED_ARG_COMMANDS，token 在其参数内；括号越过行首的 display math

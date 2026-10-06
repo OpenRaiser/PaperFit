@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+import tarfile
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -18,13 +21,36 @@ for entry in (str(SCRIPTS_DIR.parent), str(REPO_ROOT), str(SCRIPTS_DIR)):
 
 from regression.funnel import build_funnel  # noqa: E402
 from regression.manifest import build_run_manifest, file_sha256  # noqa: E402
-from regression.pack_builder import build_pack, find_main_tex  # noqa: E402
+from regression.pack_builder import build_pack, find_main_tex, resolve_case_dir  # noqa: E402
 from regression.report import build_regression_report, write_regression_report  # noqa: E402
-from regression.run_case import run_paperfit_case  # noqa: E402
+from regression.run_case import (  # noqa: E402
+    RENDER_STATUS_FAILED,
+    REPAIR_EFFECT_NOT_RUN,
+    RUN_STATUS_NOT_RUN,
+    run_paperfit_case,
+)
 from runtime_actions import compile_latex, render_pdf_pages  # noqa: E402
 
 SUPPORTED_PERTURBATIONS = ["D1_long_token_overflow", "D2_long_formula", "B2_shrink_graphics", "C1_table_resizebox"]
 FALLBACK_PERTURBATION = "D1_long_token_overflow"
+
+
+
+
+
+
+SOURCE_MODE_FROZEN_B0 = "frozen_b0"
+SOURCE_MODE_INJECT_FROM_RAW = "inject_from_raw"
+SOURCE_MODES = (SOURCE_MODE_FROZEN_B0, SOURCE_MODE_INJECT_FROM_RAW)
+PERTURBATION_SOURCE_DATASET_B0 = "dataset_b0"
+PERTURBATION_SOURCE_MVP_INJECTOR = "mvp_injector"
+
+# 扰动标记：dataset 生成器用 % DISTURBANCE:*，本仓库注入器用 % PERTURBED:
+_PERTURBATION_MARKER_RE = re.compile(r"(?mi)^\s*%\s*(?:DISTURBANCE|PERTURBED)\b")
+
+
+class SourceModeMismatchError(ValueError):
+    """source_mode 与数据实际形态不符（如对已扰动的 frozen_b0 数据要求二次注入）。"""
 
 
 def load_cases_metadata(paperfit_data: Path) -> List[Dict[str, Any]]:
@@ -69,6 +95,78 @@ def choose_perturbation(case: Dict[str, Any], *, used_counts: Dict[str, int]) ->
     if not candidates:
         candidates = list(SUPPORTED_PERTURBATIONS)
     return min(candidates, key=lambda item: used_counts.get(item, 0))
+
+
+def detect_raw_is_clean(archive: Path) -> bool:
+    """raw 归档是否为未扰动的干净作者源码（无 DISTURBANCE/PERTURBED 标记）。
+
+    inject_from_raw 的前置校验必须 fail-closed：归档不可读/解包失败一律视为
+    不干净（返回 False），宁可拒绝也不在来路不明的源码上叠加扰动。
+    """
+    try:
+        with tarfile.open(archive, "r:*") as tar:
+            for member in tar.getmembers():
+                if not member.isfile() or not member.name.lower().endswith(".tex"):
+                    continue
+                handle = tar.extractfile(member)
+                if handle is None:
+                    continue
+                text = handle.read().decode("utf-8", errors="replace")
+                if _PERTURBATION_MARKER_RE.search(text):
+                    return False
+    except (OSError, tarfile.TarError):
+        return False
+    return True
+
+
+def _dataset_perturbations(paperfit_data: Path) -> Dict[str, Dict[str, List[str]]]:
+    """metadata/perturbations.jsonl → 每 case 的 applied/validated 扰动 id。
+
+    frozen_b0 模式的扰动事实来源：数据集生成时哪些扰动真正落到了 B0 上、
+    哪些通过了强验证，都以 metadata 为准，不靠我方注入器重新猜。
+    """
+    by_case: Dict[str, Dict[str, List[str]]] = {}
+    path = paperfit_data / "metadata" / "perturbations.jsonl"
+    if not path.is_file():
+        return by_case
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            case_id = str(row.get("case_id") or "")
+            if not case_id:
+                continue
+            entry = by_case.setdefault(case_id, {"applied": [], "validated": []})
+            perturbation_id = str(row.get("perturbation_id") or "")
+            if not perturbation_id:
+                continue
+            if row.get("applied"):
+                entry["applied"].append(perturbation_id)
+            if str(row.get("validation_status") or "") == "passed":
+                entry["validated"].append(perturbation_id)
+    return by_case
+
+
+def _enforce_raw_is_clean(entries: List[Dict[str, Any]]) -> None:
+    """inject_from_raw 的前置门禁：任一 selected case 的 raw 不干净即整体拒绝。"""
+    dirty: List[str] = []
+    for entry in entries:
+        if not detect_raw_is_clean(Path(entry["archive"])):
+            dirty.append(f"{entry['paper_id']}/{entry['case_id']}")
+    if dirty:
+        listed = ", ".join(dirty[:5])
+        suffix = " ..." if len(dirty) > 5 else ""
+        raise SourceModeMismatchError(
+            "source_mode_mismatch: inject_from_raw requires raw_is_clean=true, but "
+            f"{len(dirty)} selected case(s) already carry dataset perturbation markers "
+            f"(DISTURBANCE/PERTURBED): {listed}{suffix}. This dataset is a frozen "
+            "perturbed B0; run with the default frozen_b0 source mode instead."
+        )
 
 
 def real_compile_fn(project_root: Path) -> Dict[str, Any]:
@@ -267,17 +365,23 @@ def run_mvp(
     paperfit_runner=None,
     compile_fn=None,
     render_fn=None,
-    inject: bool = True,
+    source_mode: str = SOURCE_MODE_FROZEN_B0,
 ) -> Dict[str, Any]:
+    if source_mode not in SOURCE_MODES:
+        raise ValueError(f"unknown source_mode: {source_mode!r}; expected one of {SOURCE_MODES}")
     paperfit_data = paperfit_data.resolve()
     out_root = out_root.resolve()
-    run_id = f"MVP1_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # 微秒 + uuid 短缀防碰撞：同秒内两次 run 不许互相覆盖（旧 %H%M%S 会撞名）
+    run_id = f"MVP1_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex[:8]}"
     run_dir = out_root / run_id
     pack_root = run_dir / "benchmark_pack"
     methods_root = run_dir / "methods"
 
     cases_metadata = load_cases_metadata(paperfit_data)
     selected = select_cases(cases_metadata, count=case_count)
+    dataset_perturbations = (
+        _dataset_perturbations(paperfit_data) if source_mode == SOURCE_MODE_FROZEN_B0 else {}
+    )
 
     used_counts: Dict[str, int] = {}
     entries: List[Dict[str, Any]] = []
@@ -285,26 +389,45 @@ def run_mvp(
         archive = paperfit_data / "raw" / str(case["venue_id"]) / f"{case['paper_id']}.tar.gz"
         if not archive.is_file():
             continue
-        perturbation = choose_perturbation(case, used_counts=used_counts)
-        used_counts[perturbation] = used_counts.get(perturbation, 0) + 1
-        entries.append(
-            {
-                "archive": str(archive),
-                "paper_id": str(case["venue_id"]),
-                "case_id": str(case["paper_id"]),
-                "venue_id": str(case["venue_id"]),
-                "perturbation_ids": [perturbation],
-                "seed": int(case.get("seed") or 0) % (2**31),
-                "target_pages": case.get("target_pages"),
-                "profile": case.get("profile"),
-                "column_type": case.get("column_type"),
-            }
-        )
+        metadata_case_id = str(case.get("case_id") or f"{case['venue_id']}/{case['paper_id']}")
+        if source_mode == SOURCE_MODE_FROZEN_B0:
+            # 数据集自身已是扰动 B0：扰动事实以 metadata 的 requested/applied/validated 为准
+            perturbation_ids = [str(item) for item in (case.get("requested_perturbations") or [])]
+            applied = list((dataset_perturbations.get(metadata_case_id) or {}).get("applied") or [])
+            validated = list((dataset_perturbations.get(metadata_case_id) or {}).get("validated") or [])
+            perturbation_source = PERTURBATION_SOURCE_DATASET_B0
+        else:
+            perturbation = choose_perturbation(case, used_counts=used_counts)
+            used_counts[perturbation] = used_counts.get(perturbation, 0) + 1
+            perturbation_ids = [perturbation]
+            # applied/validated 不预填：pack_builder 按注入器真实结果回填
+            perturbation_source = PERTURBATION_SOURCE_MVP_INJECTOR
+        entry = {
+            "archive": str(archive),
+            "paper_id": str(case["venue_id"]),
+            "case_id": str(case["paper_id"]),
+            "venue_id": str(case["venue_id"]),
+            "perturbation_ids": perturbation_ids,
+            "perturbation_source": perturbation_source,
+            "seed": int(case.get("seed") or 0) % (2**31),
+            "target_pages": case.get("target_pages"),
+            "profile": case.get("profile"),
+            "column_type": case.get("column_type"),
+        }
+        if source_mode == SOURCE_MODE_FROZEN_B0:
+            entry["applied_perturbations"] = applied
+            entry["validated_perturbations"] = validated
+        entries.append(entry)
+
+    if source_mode == SOURCE_MODE_INJECT_FROM_RAW:
+        # 前置门禁：任一 case 的 raw 已带扰动标记即整体拒绝，不产生半套结果
+        _enforce_raw_is_clean(entries)
 
     compile_fn = compile_fn or real_compile_fn
     render_fn = render_fn or real_render_fn
     pack_manifest_path = pack_root / "pack_manifest.json"
-    if pack_manifest_path.is_file() and len((pack_root.glob("*/*/pages"))) > 0:
+    # glob 返回生成器，判空必须 any()（len() 对生成器直接 TypeError）
+    if pack_manifest_path.is_file() and any(pack_root.glob("*/*/pages")):
         # 已有冻结 pack：直接复用（B0 只生成一次的原则），不重新编译
         pack_manifest = json.loads(pack_manifest_path.read_text(encoding="utf-8"))
     else:
@@ -313,7 +436,7 @@ def run_mvp(
             pack_root=pack_root,
             compile_fn=compile_fn,
             render_fn=render_fn,
-            skip_injection=not inject,
+            skip_injection=source_mode == SOURCE_MODE_FROZEN_B0,
         )
 
     case_records: List[Dict[str, Any]] = []
@@ -324,24 +447,32 @@ def run_mvp(
     for entry, pack_result in zip(entries, pack_manifest["case_results"]):
         case_id = entry["case_id"]
         paper_id = entry["paper_id"]
-        case_dir = pack_root / paper_id / case_id
+        # pack 物理目录是短 key（sha256(case_id)[:12]），按 case_id 解析定位
+        case_dir = resolve_case_dir(pack_root, paper_id, case_id)
         source_manifest = _load_json(case_dir / "source_manifest.json")
         main_rel = source_manifest.get("main_tex_relpath")
         benchmark = (_load_json(case_dir / "benchmark_case.json").get("benchmark_case") or {})
         record: Dict[str, Any] = {
             "case_id": case_id,
             "paper_id": paper_id,
-            "perturbation_types": entry["perturbation_ids"],
+            # 扰动类型以 pack 冻结的 applied 清单为准（frozen_b0 即数据集 metadata
+            # 的 applied/validated 扰动），缺省回退到 entry 请求清单
+            "perturbation_types": benchmark.get("applied_perturbations") or entry["perturbation_ids"],
+            "perturbation_source": benchmark.get("selected_perturbation_source") or entry.get("perturbation_source"),
             "column_type": benchmark.get("column_type"),
             "profile": benchmark.get("profile"),
             "assigned": True,
             "injection_status": (
                 "skipped_by_design"
-                if not inject
+                if source_mode == SOURCE_MODE_FROZEN_B0
                 else pack_result["injection_status"] if pack_result["status"] != "injection_failed" else (pack_result.get("injection_status") or "failed")
             ),
             "b0_status": "layout_evaluable" if pack_result["status"] == "success" else "input_incomplete",
+            
             "candidate_status": "not_run",
+            "run_status": RUN_STATUS_NOT_RUN,
+            "candidate_render_status": RENDER_STATUS_FAILED,
+            "repair_effect_status": REPAIR_EFFECT_NOT_RUN,
             "environment_state": "clean",
             "vlm": {"reconciled": None},
         }
@@ -366,10 +497,13 @@ def run_mvp(
                 column_type=benchmark.get("column_type"),
             )
             record["candidate_status"] = run.status
-            if run.status == "guard_rolled_back":
-                # 修复被硬门禁拦截并已回滚：源码等价 B0，工作区页图是回滚前渲染，
-                # 导出它们会失真——如实记录，不导出 OURS 侧
-                record["environment_state"] = "guard_rolled_back"
+            record["run_status"] = run.run_status
+            record["candidate_render_status"] = run.candidate_render_status
+            record["repair_effect_status"] = run.repair_effect_status
+            if run.status in {"guard_rolled_back", "no_effect"}:
+                # 修复被硬门禁拦截已回滚 / 修复 noop 零有效修改：候选源码等价 B0，
+                # 导出 OURS 页图只会制造 B0-vs-B0 假配对——如实记录，不导出 OURS 侧
+                record["environment_state"] = run.status
             elif run.status != "not_run" and run.status != "runner_crash":
                 ours_export = export_ours_side(
                     run_result_dir=run.work_dir / "data" if run.work_dir else run_dir,
@@ -434,6 +568,7 @@ def run_mvp(
     )
     manifest["pack_summary"] = pack_manifest["summary"]
     manifest["applied_cases"] = applied_any
+    manifest["source_mode"] = source_mode
 
     (run_dir / "reports").mkdir(parents=True, exist_ok=True)
     (run_dir / "run_manifest.json").write_text(
@@ -655,21 +790,41 @@ def main() -> int:
     parser.add_argument("--max-rounds", type=int, default=2)
     parser.add_argument("--dry-run", action="store_true", help="PaperFit 只诊断不写回（默认 apply）")
     parser.add_argument(
+        "--source-mode",
+        choices=list(SOURCE_MODES),
+        default=SOURCE_MODE_FROZEN_B0,
+        help=(
+            "扰动来源模式：frozen_b0（默认，直接冻结数据集 B0，扰动事实读 metadata 的"
+            " applied/validated 清单）或 inject_from_raw（要求 raw_is_clean=true，"
+            "否则 source_mode_mismatch 拒绝）"
+        ),
+    )
+    parser.add_argument(
         "--inject",
         action="store_true",
-        help="对未扰动源码执行二次注入。默认跳过：paperfit-data 的 raw 源码本身已是扰动 B0"
-        "（含 DISTURBANCE 标记），二次注入会叠加扰动并打断 4/10 案例的编译（实测教训）",
+        help="等价于 --source-mode inject_from_raw：对干净 raw 源码二次注入。"
+        "paperfit-data 的 raw 本身已是扰动 B0（含 DISTURBANCE 标记）时会以 "
+        "source_mode_mismatch 明确拒绝，不产生半套结果",
     )
     args = parser.parse_args()
 
-    result = run_mvp(
-        paperfit_data=args.paperfit_data,
-        out_root=args.out,
-        case_count=args.cases,
-        max_rounds=args.max_rounds,
-        apply=not args.dry_run,
-        inject=args.inject,
-    )
+    source_mode = args.source_mode
+    if args.inject:
+        # 旧旗标映射：--inject 显式要求"从干净 raw 注入"，与默认 frozen_b0 二选一
+        source_mode = SOURCE_MODE_INJECT_FROM_RAW
+
+    try:
+        result = run_mvp(
+            paperfit_data=args.paperfit_data,
+            out_root=args.out,
+            case_count=args.cases,
+            max_rounds=args.max_rounds,
+            apply=not args.dry_run,
+            source_mode=source_mode,
+        )
+    except SourceModeMismatchError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     print(json.dumps({key: value for key, value in result.items() if key != "report"}, ensure_ascii=False, indent=2))
     print(f"report: {result['run_dir']}/reports/regression_report.md")
     return 0

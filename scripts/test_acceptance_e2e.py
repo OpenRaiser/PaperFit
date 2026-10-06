@@ -34,7 +34,7 @@ DOC = (
     + LONG_TOKEN
     + " and a few trailing words after it.\n"
     "\\includegraphics{none-needed.pdf}\n"
-    "\\caption{cap}\\label{fig:x}\\\cite{ref:x}\n"
+    "\\caption{cap}\\label{fig:x}\\\\cite{ref:x}\n"
     "\\end{document}\n"
 )
 

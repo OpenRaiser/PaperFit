@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from runtime_snapshots import load_snapshot_manifest, validate_snapshot_manifest
+from runtime_snapshots import load_snapshot_manifest, resolve_manifest_path, validate_snapshot_manifest
 
 
 def _sha256_file(path: Path) -> Optional[str]:
@@ -29,8 +29,10 @@ def build_source_mutation_report(
     output_path: Optional[str | Path] = None,
 ) -> Dict[str, Any]:
     root = project_root.resolve()
+    # 快照可能在 project_root 之外（短外部根），校验时以 manifest 所在目录为锚点解析备份。
+    manifest_path = resolve_manifest_path(root, rollback_target)
     manifest = load_snapshot_manifest(root, rollback_target)
-    validation = validate_snapshot_manifest(root, manifest)
+    validation = validate_snapshot_manifest(root, manifest, snapshot_dir=manifest_path.parent)
     files: List[Dict[str, Any]] = []
     changed_count = 0
     missing_count = 0

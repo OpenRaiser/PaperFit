@@ -2,11 +2,93 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from scripts.runtime_status import build_runtime_status
+
+
+def _run_cli(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout: int = 120,
+    check: bool = True,
+) -> subprocess.CompletedProcess:
+    """以显式 UTF-8 解码捕获 CLI 输出（Windows GBK locale 安全）。
+
+    只写 text=True 不写 encoding 时，读者线程按本地代码页（cp936）解码，
+    遇到非 GBK 字节抛 UnicodeDecodeError，CompletedProcess.stdout 变 None，
+    断言随即 TypeError。这里显式 encoding/errors，并把 None 归一化为 ""，
+    保证夹具永远产出 stdout/stderr 可读、returncode 保真的 CompletedProcess。
+    """
+    result = subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd is not None else None,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        check=False,
+    )
+    completed = subprocess.CompletedProcess(
+        args=cmd,
+        returncode=result.returncode,
+        stdout="" if result.stdout is None else result.stdout,
+        stderr="" if result.stderr is None else result.stderr,
+    )
+    if check:
+        completed.check_returncode()
+    return completed
+
+
+class RuntimeStatusCliCaptureFixtureTest(unittest.TestCase):
+    """夹具自检：_run_cli 在命令失败、无输出、非 GBK 字节输出下都可读。"""
+
+    def test_failed_command_keeps_readable_streams(self) -> None:
+        result = _run_cli(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.write('partial out'); "
+                "sys.stderr.write('boom'); sys.exit(3)",
+            ],
+            check=False,
+        )
+        self.assertEqual(result.returncode, 3)
+        self.assertIsInstance(result.stdout, str)
+        self.assertIsInstance(result.stderr, str)
+        self.assertIn("partial out", result.stdout)
+        self.assertIn("boom", result.stderr)
+
+    def test_no_output_command_returns_empty_strings_not_none(self) -> None:
+        result = _run_cli([sys.executable, "-c", "pass"], check=False)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+
+    def test_non_gbk_byte_output_stays_readable(self) -> None:
+        # 模拟 TeX 编译日志：UTF-8 数学符号 + 根本不在 GBK 里的字节
+        result = _run_cli(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write("
+                "'Overfull \\\\hbox (12.34pt too wide) étendu ✓\\n'.encode('utf-8') + b'\\x81\\x8b\\xff\\xfe'); "
+                "sys.stdout.buffer.flush(); sys.stderr.buffer.write(b'\\x81 log')",
+            ],
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIsInstance(result.stdout, str)
+        self.assertIsInstance(result.stderr, str)
+        self.assertIn("Overfull", result.stdout)
+        self.assertIn("12.34pt", result.stdout)
+        # stderr 含非 GBK 字节也必须可读（替换字符），不能是 None
+        self.assertIn("log", result.stderr)
 
 
 class RuntimeStatusTest(unittest.TestCase):
@@ -871,13 +953,7 @@ class RuntimeStatusTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = subprocess.run(
-                ["node", str(cli), "status-view"],
-                cwd=root,
-                check=True,
-                text=True,
-                capture_output=True,
-            )
+            result = _run_cli(["node", str(cli), "status-view"], cwd=root)
             status = json.loads(result.stdout)
 
             self.assertEqual(status["run_result_path"], "data/run_result_agent.json")
@@ -936,13 +1012,7 @@ class RuntimeStatusTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = subprocess.run(
-                ["node", str(cli), "status-view"],
-                cwd=root,
-                check=True,
-                text=True,
-                capture_output=True,
-            )
+            result = _run_cli(["node", str(cli), "status-view"], cwd=root)
             status = json.loads(result.stdout)
 
             policy = status["repair_loop_policy"]
@@ -998,13 +1068,7 @@ class RuntimeStatusTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = subprocess.run(
-                ["node", str(cli), "status"],
-                cwd=root,
-                check=True,
-                text=True,
-                capture_output=True,
-            )
+            result = _run_cli(["node", str(cli), "status"], cwd=root)
 
             self.assertIn("RunResult: data/run_result_agent.json", result.stdout)
             self.assertIn("Artifact Freshness: pass", result.stdout)
@@ -1147,13 +1211,7 @@ class RuntimeStatusTest(unittest.TestCase):
             state["artifacts"]["repair_plan"] = "data/repair_plan.json"
             (root / "data" / "state.json").write_text(json.dumps(state), encoding="utf-8")
 
-            result = subprocess.run(
-                ["node", str(cli), "status"],
-                cwd=root,
-                check=True,
-                text=True,
-                capture_output=True,
-            )
+            result = _run_cli(["node", str(cli), "status"], cwd=root)
 
             self.assertIn("Gatekeeper Reasons: category A blocking defects remaining", result.stdout)
             self.assertIn("Page Budget: 9 (unspecified)", result.stdout)
@@ -1222,13 +1280,7 @@ class RuntimeStatusTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = subprocess.run(
-                ["node", str(cli), "status"],
-                cwd=root,
-                check=True,
-                text=True,
-                capture_output=True,
-            )
+            result = _run_cli(["node", str(cli), "status"], cwd=root)
 
             self.assertIn("Gatekeeper: DONE", result.stdout)
             self.assertIn("Gatekeeper Remaining Defects", result.stdout)
@@ -1289,13 +1341,7 @@ class RuntimeStatusTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = subprocess.run(
-                ["node", str(cli), "status"],
-                cwd=root,
-                check=True,
-                text=True,
-                capture_output=True,
-            )
+            result = _run_cli(["node", str(cli), "status"], cwd=root)
 
             self.assertIn("Status: BLOCKED", result.stdout)
             self.assertIn("Gatekeeper: DONE", result.stdout)
@@ -1374,13 +1420,7 @@ class RuntimeStatusTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = subprocess.run(
-                ["node", str(cli), "status"],
-                cwd=root,
-                check=True,
-                text=True,
-                capture_output=True,
-            )
+            result = _run_cli(["node", str(cli), "status"], cwd=root)
 
             self.assertIn("Stop: approval_scope_blocked", result.stdout)
             self.assertIn("Reason: approval_scope_blocked", result.stdout)
@@ -1444,13 +1484,7 @@ class RuntimeStatusTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = subprocess.run(
-                ["node", str(cli), "status"],
-                cwd=root,
-                check=True,
-                text=True,
-                capture_output=True,
-            )
+            result = _run_cli(["node", str(cli), "status"], cwd=root)
 
             self.assertIn("Candidate Gate: blocked", result.stdout)
             self.assertIn("Blocked Candidates: 1", result.stdout)
@@ -1503,13 +1537,7 @@ class RuntimeStatusTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = subprocess.run(
-                ["node", str(cli), "status"],
-                cwd=root,
-                check=True,
-                text=True,
-                capture_output=True,
-            )
+            result = _run_cli(["node", str(cli), "status"], cwd=root)
 
             self.assertIn("Approval Carry-forward: blocked", result.stdout)
             self.assertIn(
@@ -1614,13 +1642,7 @@ class RuntimeStatusTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = subprocess.run(
-                ["node", str(cli), "status"],
-                cwd=root,
-                check=True,
-                text=True,
-                capture_output=True,
-            )
+            result = _run_cli(["node", str(cli), "status"], cwd=root)
 
             self.assertIn("Mode: bounded_apply", result.stdout)
             self.assertIn("Round Limit: 3", result.stdout)
@@ -1668,13 +1690,7 @@ class RuntimeStatusTest(unittest.TestCase):
             }
             (root / "data" / "state.json").write_text(json.dumps(state), encoding="utf-8")
 
-            result = subprocess.run(
-                ["node", str(cli), "status"],
-                cwd=root,
-                check=True,
-                text=True,
-                capture_output=True,
-            )
+            result = _run_cli(["node", str(cli), "status"], cwd=root)
 
             self.assertIn("Execution: success", result.stdout)
             self.assertIn("Applied: 1", result.stdout)

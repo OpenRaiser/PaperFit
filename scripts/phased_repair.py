@@ -3,19 +3,36 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
-    from runtime_snapshots import create_pre_repair_snapshot, discover_source_files, restore_snapshot
+    from runtime_snapshots import (
+        _resolve_backup_file,
+        create_pre_repair_snapshot,
+        discover_source_files,
+        env_snapshot_root,
+        load_snapshot_manifest,
+        resolve_manifest_path,
+        restore_snapshot,
+    )
 except ModuleNotFoundError:  # package import
-    from .runtime_snapshots import create_pre_repair_snapshot, discover_source_files, restore_snapshot
+    from .runtime_snapshots import (
+        _resolve_backup_file,
+        create_pre_repair_snapshot,
+        discover_source_files,
+        env_snapshot_root,
+        load_snapshot_manifest,
+        resolve_manifest_path,
+        restore_snapshot,
+    )
 
-PHASED_REPAIR_SCHEMA_VERSION = "1.0"
+PHASED_REPAIR_SCHEMA_VERSION = "1.1"
 
 LOCAL_SAFE_ACTIONS = {
     "repair_overfull_boxes",  # D1 段落级：长 token/局部 stretch（灾难级仍会被抢占逻辑排序）
@@ -58,6 +75,10 @@ VERTICAL_COST_ACTIONS = {
 
 # 明确增加页数风险的全局动作
 PAGE_RISK_ACTIONS = GLOBAL_SENSITIVE_ACTIONS | {"split_display_formula"}
+
+
+
+ACTION_CLASS_SUSPICION_RANK = {"global_sensitive": 0, "layout_sensitive": 1, "local_safe": 2}
 
 
 def classify_action(proposed_action: str) -> str:
@@ -109,6 +130,11 @@ class CandidateOutcome:
     rolled_back: bool = False
     reason: str = ""
     source_anchor: Optional[Dict[str, Any]] = None
+    
+    
+    unit_index: Optional[int] = None
+    page: Optional[int] = None
+    rollback_edits: Optional[List[Dict[str, Any]]] = field(default=None)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -121,6 +147,9 @@ class CandidateOutcome:
             "rolled_back": self.rolled_back,
             "reason": self.reason,
             "source_anchor": self.source_anchor,
+            "unit_index": self.unit_index,
+            "page": self.page,
+            "rollback_edits": self.rollback_edits,
         }
 
 
@@ -222,6 +251,290 @@ def gate_decision(
     return True, "all gates passed"
 
 
+
+
+
+
+
+def _read_source_text(path: Path) -> str:
+    """按字节读源文件并 surrogateescape 解码：回滚时能逐字节还原（含非 UTF-8 序列与行尾风格）。"""
+    return path.read_bytes().decode("utf-8", errors="surrogateescape")
+
+
+def _write_source_text(path: Path, text: str) -> None:
+    path.write_bytes(text.encode("utf-8", errors="surrogateescape"))
+
+
+def _count_fragment_lines(fragment: str) -> int:
+    if not fragment:
+        return 0
+    return fragment.count("\n") + (0 if fragment.endswith("\n") else 1)
+
+
+def diff_line_hunks(before_text: str, after_text: str) -> List[Dict[str, Any]]:
+    """行级 diff：把一次编辑表达成 (before, after, after_start_line) hunk 列表。
+
+    hunk 的 after_start_line 是该 hunk 在编辑后文件中的 1-based 起始行，
+    撤销时优先按此定位，定位失败再全文唯一匹配，仍不唯一则拒绝（fail-closed）。
+    """
+    before_lines = before_text.splitlines(keepends=True)
+    after_lines = after_text.splitlines(keepends=True)
+    matcher = difflib.SequenceMatcher(a=before_lines, b=after_lines, autojunk=False)
+    hunks: List[Dict[str, Any]] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        hunks.append(
+            {
+                "before": "".join(before_lines[i1:i2]),
+                "after": "".join(after_lines[j1:j2]),
+                "after_start_line": j1 + 1,
+            }
+        )
+    return hunks
+
+
+def revert_line_hunks(file_text: str, hunks: List[Dict[str, Any]]) -> Optional[str]:
+    """在当前文件文本上撤销一组 hunk（after → before）。定位失败/歧义返回 None。"""
+    lines = file_text.splitlines(keepends=True)
+    for hunk in sorted(hunks, key=lambda h: -int(h.get("after_start_line") or 1)):
+        after_frag = str(hunk.get("after") or "")
+        before_frag = str(hunk.get("before") or "")
+        n_after = _count_fragment_lines(after_frag)
+        expected = int(hunk.get("after_start_line") or 1) - 1
+        if n_after == 0:
+            # 纯插入型 hunk 的撤销 = 在原位置插回 before 行；位置必须仍有效
+            if not (0 <= expected <= len(lines)):
+                return None
+            chosen = expected
+        else:
+            def _match_at(idx: int) -> bool:
+                return 0 <= idx and idx + n_after <= len(lines) and "".join(lines[idx : idx + n_after]) == after_frag
+
+            if _match_at(expected):
+                chosen = expected
+            else:
+                matches = [i for i in range(len(lines) - n_after + 1) if _match_at(i)]
+                if len(matches) != 1:
+                    return None
+                chosen = matches[0]
+        lines[chosen : chosen + n_after] = before_frag.splitlines(keepends=True)
+    return "".join(lines)
+
+
+def collect_unit_rollback_edits(
+    project_root: Path,
+    rollback_target: str,
+) -> List[Dict[str, Any]]:
+    """对比单元执行前快照与当前源码，记录该执行单元的源码编辑范围。
+
+    返回 [{"file": 相对路径, "hunks": diff_line_hunks(...)}]；单元未改任何文件时为空列表。
+    """
+    root = Path(project_root)
+    manifest = load_snapshot_manifest(root, rollback_target)
+    manifest_dir = resolve_manifest_path(root, rollback_target).parent
+    edits: List[Dict[str, Any]] = []
+    for item in manifest.get("files") or []:
+        if not isinstance(item, dict):
+            continue
+        rel = str(item.get("path") or "")
+        if not rel:
+            continue
+        backup = _resolve_backup_file(root, manifest_dir, item)
+        if backup is None or not backup.is_file():
+            continue
+        try:
+            pre_text = _read_source_text(backup)
+        except OSError:
+            continue
+        current = root / rel
+        cur_text = _read_source_text(current) if current.is_file() else ""
+        if pre_text == cur_text:
+            continue
+        hunks = diff_line_hunks(pre_text, cur_text)
+        if hunks:
+            edits.append({"file": rel, "hunks": hunks})
+    return edits
+
+
+def rollback_units_by_edits(
+    project_root: Path,
+    unit_edits: List[List[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    """手术式撤销若干执行单元的编辑：只动这些单元改过的 hunk，其余源码原样保留。
+
+    两阶段：先把所有文件的新文本计算出来（任一 hunk 定位失败则整体放弃、不写盘），
+    再统一写回——失败时源码保持尝试前状态。
+    """
+    root = Path(project_root).resolve()
+    staged_text: Dict[str, str] = {}
+    staged_dirty: Dict[str, bool] = {}
+    for unit in reversed(unit_edits):  # 后执行的单元先撤销，减少行号漂移
+        for file_entry in unit or []:
+            rel = str(file_entry.get("file") or "")
+            if not rel:
+                continue
+            path = root / rel
+            if rel in staged_text:
+                text = staged_text[rel]
+            else:
+                text = _read_source_text(path) if path.is_file() else ""
+            hunks = file_entry.get("hunks") or []
+            if not isinstance(hunks, list) or not hunks:
+                continue
+            new_text = revert_line_hunks(text, hunks)
+            if new_text is None:
+                return {
+                    "success": False,
+                    "reason": "hunk_not_locatable",
+                    "file": rel,
+                    "restored_files": [],
+                }
+            staged_text[rel] = new_text
+            staged_dirty[rel] = True
+    restored: List[str] = []
+    for rel, new_text in staged_text.items():
+        if not staged_dirty.get(rel):
+            continue
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_source_text(path, new_text)
+        restored.append(rel)
+    return {"success": True, "reason": "units_reverted", "restored_files": restored}
+
+
+def _intrusion_page(failure_evidence: Dict[str, Any]) -> Optional[int]:
+    if not isinstance(failure_evidence, dict):
+        return None
+    pages: List[int] = []
+    endmatter = failure_evidence.get("endmatter_start_page")
+    if isinstance(endmatter, (int, float)):
+        pages.append(int(endmatter))
+    for intrusion in failure_evidence.get("intrusions") or []:
+        if isinstance(intrusion, dict) and isinstance(intrusion.get("page"), (int, float)):
+            pages.append(int(intrusion["page"]))
+    return max(pages) if pages else None
+
+
+def _unit_suspicion_key(unit: Dict[str, Any], intrusion_page: Optional[int]) -> Tuple[int, int, int]:
+    """致害嫌疑排序：副作用范围大的优先（global > layout > local），
+
+    距离失败证据页近的候选优先，同嫌疑时后接受的优先。
+    """
+    classes = unit.get("action_classes") or ["local_safe"]
+    rank = min((ACTION_CLASS_SUSPICION_RANK.get(cls, 2) for cls in classes), default=2)
+    near = 1
+    if intrusion_page is not None:
+        pages = [int(p) for p in (unit.get("pages") or []) if isinstance(p, (int, float))]
+        near = 0 if any(p >= intrusion_page - 1 for p in pages) else 1
+    return (rank, near, -int(unit.get("unit_index") or 0))
+
+
+def attribute_and_rollback_round_failure(
+    *,
+    project_root: Path,
+    main_tex: str,
+    candidate_outcomes: List[Dict[str, Any]],
+    failure_evidence: Dict[str, Any],
+    verify_fn: Callable[[List[str]], Dict[str, Any]],
+) -> Dict[str, Any]:
+    "轮级失败时的候选归因回滚。"
+    root = Path(project_root)
+    report: Dict[str, Any] = {
+        "schema_version": "1.0",
+        "status": "not_supported",
+        "attributed_candidate": None,
+        "rolled_back_candidate_ids": [],
+        "attempts": [],
+        "attempts_used": 0,
+        "candidate_units_considered": 0,
+        "reason": "",
+    }
+
+    units: Dict[int, Dict[str, Any]] = {}
+    for outcome in candidate_outcomes or []:
+        if not isinstance(outcome, dict) or not outcome.get("accepted"):
+            continue
+        unit_index = outcome.get("unit_index")
+        if not isinstance(unit_index, int):
+            continue
+        edits = outcome.get("rollback_edits")
+        if not isinstance(edits, list) or not edits:
+            # 无编辑范围的接受候选无法手术式撤销（保持保留，不阻塞其余归因）
+            continue
+        unit = units.setdefault(
+            unit_index,
+            {
+                "unit_index": unit_index,
+                "candidate_ids": [],
+                "action_classes": [],
+                "pages": [],
+                "edits": edits,
+            },
+        )
+        unit["candidate_ids"].append(str(outcome.get("candidate_id")))
+        unit["action_classes"].append(str(outcome.get("action_class") or "local_safe"))
+        if isinstance(outcome.get("page"), (int, float)):
+            unit["pages"].append(int(outcome["page"]))
+    if not units:
+        report["reason"] = "no_accepted_candidate_with_rollback_edits"
+        return report
+    report["candidate_units_considered"] = len(units)
+
+    intrusion_page = _intrusion_page(failure_evidence)
+    suspicion_order = sorted(units.values(), key=lambda u: _unit_suspicion_key(u, intrusion_page))
+    reverse_acceptance_order = sorted(units.values(), key=lambda u: -int(u["unit_index"]))
+
+    # 尝试序列：第 1 个 = 嫌疑最大的单元；其后按"最后接受的候选逆序"逐个累计
+    sequence: List[Dict[str, Any]] = [suspicion_order[0]]
+    for unit in reverse_acceptance_order:
+        if unit["unit_index"] != sequence[0]["unit_index"]:
+            sequence.append(unit)
+
+    rolled_units: List[Dict[str, Any]] = []
+    attributed_unit: Optional[Dict[str, Any]] = None
+    for unit in sequence:
+        rolled_units.append(unit)
+        report["attempts_used"] += 1
+        rollback_report = rollback_units_by_edits(root, [u["edits"] for u in rolled_units])
+        if not rollback_report.get("success"):
+            report["attempts"].append(
+                {
+                    "rolled_back_units": [u["unit_index"] for u in rolled_units],
+                    "cleared": False,
+                    "reason": f"surgical_revert_failed:{rollback_report.get('reason')}",
+                }
+            )
+            continue
+        rolled_ids = [cid for u in rolled_units for cid in u["candidate_ids"]]
+        verification = verify_fn(rolled_ids)
+        attempt_entry = {
+            "rolled_back_units": [u["unit_index"] for u in rolled_units],
+            "rolled_back_candidate_ids": rolled_ids,
+            "cleared": bool(verification.get("cleared")),
+            "reason": str(verification.get("reason") or ""),
+        }
+        report["attempts"].append(attempt_entry)
+        if verification.get("cleared"):
+            attributed_unit = unit
+            break
+
+    if attributed_unit is not None:
+        rolled_ids = [cid for u in rolled_units for cid in u["candidate_ids"]]
+        report["status"] = "candidate" if len(rolled_units) == 1 else "candidates_partial"
+        # 归因候选 = 定位到致害的那次回滚中新加入的单元；单候选单元才有唯一 id
+        last_ids = attributed_unit["candidate_ids"]
+        report["attributed_candidate"] = last_ids[0] if len(last_ids) == 1 else None
+        report["rolled_back_candidate_ids"] = rolled_ids
+        report["reason"] = "attributed_and_rolled_back"
+        return report
+
+    report["status"] = "candidates_exhausted"
+    report["rolled_back_candidate_ids"] = [cid for u in rolled_units for cid in u["candidate_ids"]]
+    report["reason"] = "all_accepted_candidates_rolled_back_without_clearing_gates"
+    return report
+
+
 def _subset_plan(plan: Dict[str, Any], subset: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {**{k: v for k, v in plan.items() if k != "candidates"}, "candidates": subset}
 
@@ -281,6 +594,7 @@ def execute_phased_repair(
     current = baseline
 
     def _candidate_outcome(candidate: Dict[str, Any]) -> CandidateOutcome:
+        page_value = candidate.get("page")
         return CandidateOutcome(
             candidate_id=str(
                 candidate.get("overflow_id")
@@ -291,17 +605,33 @@ def execute_phased_repair(
             action=str(candidate.get("proposed_action") or ""),
             action_class=candidate.get("action_class") or classify_action(candidate.get("proposed_action")),
             source_anchor=candidate.get("source_anchor"),
+            page=int(page_value) if isinstance(page_value, (int, float)) else None,
         )
 
     def _trial_compile() -> RoundEvidenceSnapshot:
         compile_fn(root, main_tex)
         return collect_evidence(root, main_tex, page_count_fn)
 
+    def _record_unit_edits(unit_outcomes: List[CandidateOutcome], unit_index: int, rollback_target: str) -> None:
+        "接受后记录该单元的源码编辑范围（供轮级失败归因时单独撤销）。"
+        try:
+            edits = collect_unit_rollback_edits(root, rollback_target)
+        except Exception:
+            edits = None
+        for oc in unit_outcomes:
+            oc.unit_index = unit_index
+            oc.rollback_edits = edits
+
+    unit_counter = 0
+
     # —— Phase 1: local_safe 批量（一次试编译，批次级回滚）——
     local_batch = groups["local_safe"]
     if local_batch:
         snapshot = create_pre_repair_snapshot(
-            project_root=root, main_tex=main_tex, snapshot_id=f"phased_local_{datetime.now().strftime('%H%M%S_%f')}"
+            project_root=root,
+            main_tex=main_tex,
+            snapshot_id=f"phased_local_{datetime.now().strftime('%H%M%S_%f')}",
+            snapshot_root=env_snapshot_root(),
         )
         local_plan_path = root / "data" / "phased_local_plan.json"
         _write_json(local_plan_path, _subset_plan(plan, local_batch))
@@ -331,19 +661,24 @@ def execute_phased_repair(
                     oc.reason = reason
                     accepted_count += 1
                 current = after
+                _record_unit_edits(batch_outcomes, unit_counter, str(snapshot.get("rollback_target")))
             else:
                 restore_snapshot(project_root=root, rollback_target=str(snapshot.get("rollback_target")))
                 for oc in batch_outcomes:
                     oc.rolled_back = True
                     oc.reason = reason
                     rolled_back_count += 1
+        unit_counter += 1
         outcomes.extend(batch_outcomes)
 
     # —— Phase 2: layout_sensitive 逐候选（每候选快照 + 试编译，失败只回滚该候选）——
     for idx, candidate in enumerate(groups["layout_sensitive"]):
         outcome = _candidate_outcome(candidate)
         snapshot = create_pre_repair_snapshot(
-            project_root=root, main_tex=main_tex, snapshot_id=f"phased_layout_{idx}_{datetime.now().strftime('%H%M%S_%f')}"
+            project_root=root,
+            main_tex=main_tex,
+            snapshot_id=f"phased_layout_{idx}_{datetime.now().strftime('%H%M%S_%f')}",
+            snapshot_root=env_snapshot_root(),
         )
         subset_plan_path = root / "data" / f"phased_layout_plan_{idx}.json"
         _write_json(subset_plan_path, _subset_plan(plan, [candidate]))
@@ -375,18 +710,23 @@ def execute_phased_repair(
             outcome.reason = reason
             accepted_count += 1
             current = after
+            _record_unit_edits([outcome], unit_counter, str(snapshot.get("rollback_target")))
         else:
             restore_snapshot(project_root=root, rollback_target=str(snapshot.get("rollback_target")))
             outcome.rolled_back = True
             outcome.reason = reason
             rolled_back_count += 1
+        unit_counter += 1
         outcomes.append(outcome)
 
     # —— Phase 3: global_sensitive 单独试编译（严格 page_gap）——
     for idx, candidate in enumerate(groups["global_sensitive"]):
         outcome = _candidate_outcome(candidate)
         snapshot = create_pre_repair_snapshot(
-            project_root=root, main_tex=main_tex, snapshot_id=f"phased_global_{idx}_{datetime.now().strftime('%H%M%S_%f')}"
+            project_root=root,
+            main_tex=main_tex,
+            snapshot_id=f"phased_global_{idx}_{datetime.now().strftime('%H%M%S_%f')}",
+            snapshot_root=env_snapshot_root(),
         )
         subset_plan_path = root / "data" / f"phased_global_plan_{idx}.json"
         _write_json(subset_plan_path, _subset_plan(plan, [candidate]))
@@ -413,11 +753,13 @@ def execute_phased_repair(
             outcome.reason = reason
             accepted_count += 1
             current = after
+            _record_unit_edits([outcome], unit_counter, str(snapshot.get("rollback_target")))
         else:
             restore_snapshot(project_root=root, rollback_target=str(snapshot.get("rollback_target")))
             outcome.rolled_back = True
             outcome.reason = reason
             rolled_back_count += 1
+        unit_counter += 1
         outcomes.append(outcome)
 
     summary = {

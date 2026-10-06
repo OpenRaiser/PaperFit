@@ -219,7 +219,7 @@ class FixLayoutCliExitTest(unittest.TestCase):
 
         root = Path(tmpdir)
         (root / "data").mkdir(exist_ok=True)
-        (root / "main.tex").write_text("\documentclass{article}x\end{document}", encoding="utf-8")
+        (root / "main.tex").write_text(r"\documentclass{article}x\end{document}", encoding="utf-8")
         (root / "main.pdf").write_bytes(b"%PDF-old")  # 磁盘旧 PDF
 
         argv = [

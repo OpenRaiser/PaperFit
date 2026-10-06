@@ -13,7 +13,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from regression.pack_builder import build_pack, find_main_tex  # noqa: E402
+from regression.pack_builder import build_pack, find_main_tex, resolve_case_dir  # noqa: E402
 
 
 PAPER_MAIN = (
@@ -89,7 +89,7 @@ class BuildPackTest(unittest.TestCase):
                 render_fn=_fake_render_ok,
             )
             self.assertEqual(manifest["summary"]["success"], 1)
-            case_dir = pack_root / "AAAI" / "arXiv-2601.00001v1"
+            case_dir = resolve_case_dir(pack_root, "AAAI", "arXiv-2601.00001v1")
             # 冻结工件齐全
             source_manifest = json.loads((case_dir / "source_manifest.json").read_text(encoding="utf-8"))
             self.assertTrue(source_manifest["page_hashes"])
@@ -135,7 +135,7 @@ class BuildPackTest(unittest.TestCase):
             self.assertEqual(manifest["summary"]["injection_failed"], 1)
             self.assertEqual(manifest["case_results"][0]["status"], "injection_failed")
             failure_manifest = json.loads(
-                (root / "pack" / "ICLR" / "bare-case" / "source_manifest.json").read_text(encoding="utf-8")
+                (resolve_case_dir(root / "pack", "ICLR", "bare-case") / "source_manifest.json").read_text(encoding="utf-8")
             )
             self.assertIn("failed perturbations: B2_shrink_graphics", failure_manifest["failure"]["reasons"])
 

@@ -1,5 +1,7 @@
 "Regression checks."
 
+import contextlib
+import io
 import sys
 import unittest
 from pathlib import Path
@@ -77,14 +79,21 @@ class TestVlmWriteback(unittest.TestCase):
         self.assertEqual(len(uncertain), 1)
 
     def test_writeback_miss_is_auditable(self):
-        # records 里没有对应 case 时不得静默丢失（stderr 提示）
-        records, paired, uncertain = self._run(
-            normal=[_report("IJCV/arXiv-ZZ", "candidate", 2)],
-            swapped=[_report("IJCV/arXiv-ZZ", "candidate", 2)],
-            common=["IJCV/arXiv-ZZ"],
-        )
+        # records 里没有对应 case 时不得静默丢失（stderr 提示）。
+        # 夹具说明：IJCV/arXiv-ZZ 是假 case，records 里只有 IJCV/arXiv-a 与
+        # ICLR/arXiv-b 两个真实 case，复合键必然 miss——本测试要审计的正是
+        # 这条 miss 路径。stderr 在夹具内捕获断言，不再漏到测试运行日志。
+        with contextlib.redirect_stderr(io.StringIO()) as captured:
+            records, paired, uncertain = self._run(
+                normal=[_report("IJCV/arXiv-ZZ", "candidate", 2)],
+                swapped=[_report("IJCV/arXiv-ZZ", "candidate", 2)],
+                common=["IJCV/arXiv-ZZ"],
+            )
         self.assertEqual(records[0]["vlm"]["reconciled"], None)  # 未被误写
         self.assertEqual(len(paired), 1)  # 统计仍然完整
+        # miss 审计信息必须真实写出且指名假 case，而不是污染测试输出
+        self.assertIn("VLM write-back miss", captured.getvalue())
+        self.assertIn("IJCV/arXiv-ZZ", captured.getvalue())
 
 
 if __name__ == "__main__":

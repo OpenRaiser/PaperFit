@@ -16,7 +16,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from runtime_artifacts import collect_artifact_manifest
 from runtime_actions import (
@@ -38,7 +38,7 @@ from runtime_repair_loop import (
     build_round_artifact_lineage,
 )
 from runtime_mutation_integrity import build_source_mutation_report
-from runtime_snapshots import create_pre_repair_snapshot, restore_snapshot
+from runtime_snapshots import create_pre_repair_snapshot, env_snapshot_root, restore_snapshot
 from runtime_status import build_runtime_status
 from runtime_state_machine import SOURCE_CHANGING_STATE_MACHINE, VISUAL_ONLY_STATE_MACHINE
 from runtime_types import ActionResult, RunResult, SOURCE_CHANGING_TASK_TYPES, TaskSpec, load_task_spec
@@ -889,6 +889,8 @@ class OrchestratorRuntime:
             snapshot = create_pre_repair_snapshot(
                 project_root=project_root,
                 main_tex=task_spec.main_tex,
+                # PAPERFIT_SNAPSHOT_ROOT 可注入 run 级短外部根，规避 Windows 深路径；未设置时行为不变。
+                snapshot_root=env_snapshot_root(),
             )
             self.manager.update(
                 {
@@ -1169,6 +1171,7 @@ class OrchestratorRuntime:
                     snapshot = create_pre_repair_snapshot(
                         project_root=project_root,
                         main_tex=task_spec.main_tex,
+                        snapshot_root=env_snapshot_root(),
                     )
                     self.manager.update(
                         {
@@ -1245,6 +1248,10 @@ class OrchestratorRuntime:
                             "candidate_outcomes": list(repair_summary.get("candidate_outcomes") or []),
                             "status": str(repair_summary.get("status") or ""),
                             "approval_gate_status": str(candidate_scope_gate.get("status") or ""),
+                            
+                            
+                            "rollback_scope": "none",
+                            "attributed_candidate": None,
                         }
                     )
                     # M2 双止损的回滚计数：执行器结构回滚或本轮零有效修改都算"回滚轮"，
@@ -1356,13 +1363,47 @@ class OrchestratorRuntime:
                         rollback_target=str(snapshot.get("rollback_target") or ""),
                     )
                     if post_repair_hard_guard_failure is not None:
-                        state = self._rollback_after_post_repair_hard_guard_failure(
+                        
+                        
+                        
+                        
+                        attribution = self._attempt_candidate_level_rollback(
                             project_root=project_root,
-                            rollback_target=str(snapshot.get("rollback_target") or ""),
-                            failure=post_repair_hard_guard_failure,
+                            task_spec=task_spec,
+                            repair_summary=self.manager.load().get("repair_execution_summary") or {},
+                            failure_evidence=post_repair_hard_guard_failure.get("visual_hard_guards") or {},
+                            verify_kind="hard_guard",
                             emit_event=emit_runtime_event,
                             runtime_actions=runtime_actions,
                         )
+                        attribution_retained = (
+                            attribution is not None
+                            and str(attribution.get("status")) in {"candidate", "candidates_partial"}
+                        )
+                        if attribution_retained:
+                            state = self._apply_candidate_rollback_to_state(
+                                attribution=attribution or {},
+                                reason="post_repair_hard_guard_failed",
+                                rollback_target=str(snapshot.get("rollback_target") or ""),
+                                hard_guard_evidence=post_repair_hard_guard_failure.get("visual_hard_guards"),
+                            )
+                            self._annotate_round_record_rollback(
+                                round_execution_records,
+                                attribution or {},
+                            )
+                        else:
+                            state = self._rollback_after_post_repair_hard_guard_failure(
+                                project_root=project_root,
+                                rollback_target=str(snapshot.get("rollback_target") or ""),
+                                failure=post_repair_hard_guard_failure,
+                                emit_event=emit_runtime_event,
+                                runtime_actions=runtime_actions,
+                            )
+                            self._annotate_round_record_rollback(
+                                round_execution_records,
+                                attribution,
+                                fallback_scope="full_round",
+                            )
                         runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "artifacts_observed")
                         emit_runtime_event(
                             "phase_completed",
@@ -1490,63 +1531,45 @@ class OrchestratorRuntime:
                     
                     
                     if round_metrics:
-                        from regression.round_acceptance import RoundEvidence, evaluate_round_acceptance
+                        from regression.round_acceptance import evaluate_round_acceptance
 
                         latest = round_metrics[-1]
-                        visual_report = self._load_optional_json(
-                            Path.cwd() / str((state.get("artifacts") or {}).get("visual_signal_report") or "data/visual_signal_report.json")
-                        )
-                        actual_pages = int(((visual_report or {}).get("summary") or {}).get("pages_analyzed") or 0)
-                        after_structural = self._round_structural_counts(state)
-                        after_undefined = self._round_undefined_ref_counts(state)
-                        after_severe = self._severe_overfull_counts(state)
-                        after_rule_summary = (state.get("rule_report") or {}).get("summary") or {}
-                        latest["figures_after"] = after_structural["figures"]
-                        latest["tables_after"] = after_structural["tables"]
-                        latest["labels_after"] = after_structural["labels"]
-                        latest["refs_after"] = after_structural["refs"]
-                        latest["undefined_refs_after"] = after_undefined["undefined_refs"]
-                        latest["undefined_citations_after"] = after_undefined["undefined_citations"]
-                        latest["object_counts_after"] = after_structural
-                        latest["severe_overfull_after"] = after_severe
-                        latest["total_overflow_pt_after"] = float(after_rule_summary.get("total_overflow_pt") or 0.0)
-                        latest["page_count_after"] = actual_pages if actual_pages > 0 else None
-                        latest["page_gap_after"] = (
-                            abs(actual_pages - task_spec.target_pages)
-                            if actual_pages > 0 and task_spec.target_pages is not None
-                            else None
-                        )
-                        phased_summary = state.get("repair_execution_summary") or {}
-                        latest["accepted_candidates"] = int(phased_summary.get("accepted_count") or 0)
-                        latest["rejected_candidates"] = int(phased_summary.get("rejected_count") or 0)
-                        acceptance_evidence = RoundEvidence(
-                            page_count_before=latest.get("page_count_before"),
-                            # 页数证据缺失时传 None：验收函数 fail-closed，绝不回退旧值放行
-                            page_count_after=actual_pages if actual_pages > 0 else None,
-                            target_pages=task_spec.target_pages,
-                            overfull_before=latest.get("overfull_hbox_total_before"),
-                            overfull_after=latest.get("overfull_hbox_total_after"),
-                            severe_overfull_before=latest.get("severe_overfull_before"),
-                            severe_overfull_after=latest.get("severe_overfull_after"),
-                            figures_before=latest.get("figures_before") or 0,
-                            figures_after=latest.get("figures_after") or 0,
-                            tables_before=latest.get("tables_before") or 0,
-                            tables_after=latest.get("tables_after") or 0,
-                            labels_before=latest.get("labels_before") or 0,
-                            labels_after=latest.get("labels_after") or 0,
-                            refs_before=latest.get("refs_before") or 0,
-                            refs_after=latest.get("refs_after") or 0,
-                            undefined_refs_before=latest.get("undefined_refs_before") or 0,
-                            undefined_refs_after=latest.get("undefined_refs_after") or 0,
-                            undefined_citations_before=latest.get("undefined_citations_before") or 0,
-                            undefined_citations_after=latest.get("undefined_citations_after") or 0,
-                            content_integrity_pass=bool(
-                                ((state.get("content_integrity") or {}).get("validation_status") or "").startswith("mutation")
-                                or (state.get("content_integrity") or {}).get("validation_status") == "snapshot_created"
-                            ),
+                        acceptance_evidence = self._refresh_round_metrics_after(
+                            state=state,
+                            task_spec=task_spec,
+                            latest=latest,
                         )
                         acceptance = evaluate_round_acceptance(acceptance_evidence)
                         if not acceptance.accepted and acceptance.rollback_required:
+                            
+                            
+                            
+                            attribution = self._attempt_candidate_level_rollback(
+                                project_root=project_root,
+                                task_spec=task_spec,
+                                repair_summary=self.manager.load().get("repair_execution_summary") or {},
+                                failure_evidence={"reasons": list(acceptance.reasons or [])},
+                                verify_kind="round_acceptance",
+                                round_metrics=round_metrics,
+                                emit_event=emit_runtime_event,
+                                runtime_actions=runtime_actions,
+                            )
+                            attribution_retained = (
+                                attribution is not None
+                                and str(attribution.get("status")) in {"candidate", "candidates_partial"}
+                            )
+                            if attribution_retained:
+                                state = self._apply_candidate_rollback_to_state(
+                                    attribution=attribution or {},
+                                    reason="round_acceptance_failed",
+                                    rollback_target=str(snapshot.get("rollback_target") or ""),
+                                )
+                                self._annotate_round_record_rollback(
+                                    round_execution_records,
+                                    attribution or {},
+                                )
+                                # 候选级回滚后验收复检已通过：保留其余已接受候选，本轮到此为止
+                                break
                             round_metrics[-1]["rollback_reason"] = "; ".join(acceptance.reasons)[:300]
                             rollback_result = self._rollback_after_quality_regression(
                                 project_root=project_root,
@@ -1555,6 +1578,11 @@ class OrchestratorRuntime:
                                 round_metrics=round_metrics,
                                 emit_event=emit_runtime_event,
                                 runtime_actions=runtime_actions,
+                            )
+                            self._annotate_round_record_rollback(
+                                round_execution_records,
+                                attribution,
+                                fallback_scope="full_round",
                             )
                             state = rollback_result
                             break
@@ -1895,6 +1923,297 @@ class OrchestratorRuntime:
         )
         return self.manager.load()
 
+    
+    
+    
+
+    def _attempt_candidate_level_rollback(
+        self,
+        *,
+        project_root: Path,
+        task_spec: TaskSpec,
+        repair_summary: Dict[str, Any],
+        failure_evidence: Dict[str, Any],
+        verify_kind: str,
+        emit_event: Callable[..., Dict[str, Any]],
+        runtime_actions: Dict[str, Any],
+        round_metrics: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """轮级失败时的候选归因回滚。
+
+        用 phased candidate_outcomes（unit_index + rollback_edits 源码编辑范围）先单独
+        回滚最可能致害的候选（layout_sensitive/global_sensitive 优先），重编译重检测：
+        - verify_kind="hard_guard"：重新检查 endmatter float intrusion 硬门禁；
+        - verify_kind="round_acceptance"：重跑轮核心诊断并复验统一接受门。
+        门禁清零 → 保留其余已接受候选；归因不唯一则逆序累计回滚重验证（有界）；
+        全撤销仍未清零返回 status="candidates_exhausted"（调用方整轮回滚）。
+
+        无 candidate_outcomes / 无编辑范围（旧执行器或回退路径）返回 None：
+        调用方保持既有整轮回滚行为，不降低任何门禁阈值。
+        """
+        outcomes = [oc for oc in (repair_summary.get("candidate_outcomes") or []) if isinstance(oc, dict)]
+        if not outcomes:
+            return None
+        main_tex = task_spec.main_tex
+
+        def _verify_hard_guard(rolled_back_candidate_ids: List[str]) -> Dict[str, Any]:
+            compile_result = compile_latex(project_root, main_tex=Path(main_tex), tolerant=True)
+            if not compile_result.get("success") or not compile_result.get("pdf_path"):
+                return {
+                    "cleared": False,
+                    "reason": "recompile_failed_after_candidate_rollback",
+                    "rolled_back_candidate_ids": rolled_back_candidate_ids,
+                }
+            guards = inspect_endmatter_float_intrusion(Path(str(compile_result.get("pdf_path"))))
+            hard_failures = guards.get("hard_failures") or []
+            return {
+                "cleared": not hard_failures,
+                "reason": "" if not hard_failures else "endmatter_hard_guards_still_failing",
+                "rolled_back_candidate_ids": rolled_back_candidate_ids,
+                "visual_hard_guards": guards,
+            }
+
+        def _verify_round_acceptance(rolled_back_candidate_ids: List[str]) -> Dict[str, Any]:
+            from regression.round_acceptance import evaluate_round_acceptance
+
+            compile_result = compile_latex(project_root, main_tex=Path(main_tex), tolerant=True)
+            if not compile_result.get("success"):
+                return {
+                    "cleared": False,
+                    "reason": "recompile_failed_after_candidate_rollback",
+                    "rolled_back_candidate_ids": rolled_back_candidate_ids,
+                }
+            # 重检测：重跑轮核心诊断，用最新证据复验统一接受门（阈值不变）
+            # 注意用返回值：rule_report 由 _run_round_core 附在返回 state 上（不进 state schema）
+            state = self._run_round_core(
+                main_tex=main_tex,
+                log_file=task_spec.log_file,
+                page_dir=task_spec.page_dir,
+                template=task_spec.template,
+                target_pages=task_spec.target_pages,
+                column_void_report=task_spec.column_void_report,
+                emit_event=emit_event,
+                runtime_actions=runtime_actions,
+            ) or self.manager.load()
+            latest = round_metrics[-1] if round_metrics else {}
+            evidence = self._refresh_round_metrics_after(
+                state=state,
+                task_spec=task_spec,
+                latest=latest,
+            )
+            acceptance = evaluate_round_acceptance(evidence)
+            return {
+                "cleared": bool(acceptance.accepted or not acceptance.rollback_required),
+                "reason": "" if acceptance.accepted else "; ".join(acceptance.reasons)[:200],
+                "rolled_back_candidate_ids": rolled_back_candidate_ids,
+                "acceptance_reasons": acceptance.reasons,
+            }
+
+        verify_fn = _verify_hard_guard if verify_kind == "hard_guard" else _verify_round_acceptance
+        try:
+            from phased_repair import attribute_and_rollback_round_failure
+
+            report = attribute_and_rollback_round_failure(
+                project_root=project_root,
+                main_tex=main_tex,
+                candidate_outcomes=outcomes,
+                failure_evidence=failure_evidence if isinstance(failure_evidence, dict) else {},
+                verify_fn=verify_fn,
+            )
+        except Exception as exc:
+            report = {
+                "status": "not_supported",
+                "reason": f"attribution_error:{type(exc).__name__}: {exc}",
+                "attributed_candidate": None,
+                "rolled_back_candidate_ids": [],
+                "attempts": [],
+                "attempts_used": 0,
+                "candidate_units_considered": 0,
+            }
+        report = dict(report)
+        report["verify_kind"] = verify_kind
+        self._record_runtime_action(
+            "candidate_level_rollback",
+            {
+                "success": str(report.get("status")) in {"candidate", "candidates_partial"},
+                "status": report.get("status"),
+                "verify_kind": verify_kind,
+                "attributed_candidate": report.get("attributed_candidate"),
+                "rolled_back_candidate_ids": report.get("rolled_back_candidate_ids") or [],
+                "attempts_used": int(report.get("attempts_used") or 0),
+                "candidate_units_considered": int(report.get("candidate_units_considered") or 0),
+                "attempts": report.get("attempts") or [],
+                "reason": report.get("reason"),
+            },
+            phase="verify",
+            state="VERIFYING",
+            emit_event=emit_event,
+            runtime_actions=runtime_actions,
+        )
+        return report
+
+    def _apply_candidate_rollback_to_state(
+        self,
+        *,
+        attribution: Dict[str, Any],
+        reason: str,
+        rollback_target: str,
+        hard_guard_evidence: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """候选级回滚成功后落账：被归因候选标记 rolled_back，其余接受态保持。"""
+        rolled_ids = {str(cid) for cid in (attribution.get("rolled_back_candidate_ids") or [])}
+        summary = dict(self.manager.load().get("repair_execution_summary") or {})
+        outcomes: List[Any] = []
+        for oc in summary.get("candidate_outcomes") or []:
+            if isinstance(oc, dict) and rolled_ids and str(oc.get("candidate_id")) in rolled_ids:
+                updated = dict(oc)
+                updated["accepted"] = False
+                updated["rolled_back"] = True
+                updated["reason"] = f"round_level_rollback_attribution:{reason}"
+                outcomes.append(updated)
+            else:
+                outcomes.append(oc)
+        accepted_count = sum(1 for oc in outcomes if isinstance(oc, dict) and oc.get("accepted"))
+        rolled_back_count = sum(1 for oc in outcomes if isinstance(oc, dict) and oc.get("rolled_back"))
+        applied_count = sum(
+            1
+            for oc in outcomes
+            if isinstance(oc, dict) and oc.get("applied") and not oc.get("rolled_back")
+        )
+        summary["candidate_outcomes"] = outcomes
+        summary["accepted_count"] = accepted_count
+        summary["rolled_back_count"] = rolled_back_count
+        summary["applied_count"] = applied_count
+        summary["candidate_rollback_attribution"] = {
+            "schema_version": "1.0",
+            "status": attribution.get("status"),
+            "attributed_candidate": attribution.get("attributed_candidate"),
+            "rolled_back_candidate_ids": sorted(rolled_ids),
+            "attempts": attribution.get("attempts") or [],
+            "reason": reason,
+        }
+        self.manager.update(
+            {
+                "repair_execution_summary": summary,
+                # content_integrity 字段集是封闭集合（state_schema.CONTENT_INTEGRITY_FIELDS），
+                # 归因明细放 repair_execution_summary.candidate_rollback_attribution
+                "content_integrity": {
+                    "validation_status": "candidate_level_rollback",
+                    "action_taken": "rollback_attributed_candidates",
+                    "rollback_target": rollback_target,
+                    "reason": reason,
+                },
+                "next_actions": [
+                    "Attributed candidate rolled back individually; remaining accepted candidates retained",
+                    "Regenerate the repair plan from the current source before the next mutation",
+                ],
+            }
+        )
+        if hard_guard_evidence is not None:
+            # 非阻断学习证据：下一 run 仍可把致害 B2 标注为 FloatBarrier 保护路径
+            self.manager.update(
+                {
+                    "post_repair_hard_guard": {
+                        "status": "attributed_candidate_rolled_back",
+                        "failure_type": "post_repair_hard_guard_failed",
+                        "reason": reason,
+                        "visual_hard_guards": hard_guard_evidence,
+                    }
+                }
+            )
+        return self.manager.load()
+
+    def _annotate_round_record_rollback(
+        self,
+        round_execution_records: List[Dict[str, Any]],
+        attribution: Optional[Dict[str, Any]],
+        *,
+        fallback_scope: str = "full_round",
+    ) -> None:
+        "把本轮回滚范围与归因候选写进不可变轮执行记录。"
+        if not round_execution_records:
+            return
+        record = round_execution_records[-1]
+        status = str((attribution or {}).get("status") or "")
+        if status in {"candidate", "candidates_partial"}:
+            rolled_ids = list((attribution or {}).get("rolled_back_candidate_ids") or [])
+            record["rollback_scope"] = status
+            record["attributed_candidate"] = (attribution or {}).get("attributed_candidate")
+            record["rolled_back_candidate_ids"] = rolled_ids
+            record["accepted"] = max(0, int(record.get("accepted") or 0) - len(rolled_ids))
+            record["rolled_back"] = int(record.get("rolled_back") or 0) + len(rolled_ids)
+        else:
+            record["rollback_scope"] = "candidates_exhausted" if status == "candidates_exhausted" else fallback_scope
+            record["attributed_candidate"] = None
+
+    def _refresh_round_metrics_after(
+        self,
+        *,
+        state: Dict[str, Any],
+        task_spec: TaskSpec,
+        latest: Dict[str, Any],
+    ) -> Any:
+        """刷新 latest 轮指标的 *_after 字段并返回统一验收证据（RoundEvidence）。"""
+        from regression.round_acceptance import RoundEvidence
+
+        visual_report = self._load_optional_json(
+            Path.cwd() / str((state.get("artifacts") or {}).get("visual_signal_report") or "data/visual_signal_report.json")
+        )
+        actual_pages = int(((visual_report or {}).get("summary") or {}).get("pages_analyzed") or 0)
+        after_structural = self._round_structural_counts(state)
+        after_undefined = self._round_undefined_ref_counts(state)
+        after_severe = self._severe_overfull_counts(state)
+        after_rule_summary = (state.get("rule_report") or {}).get("summary") or {}
+        # 重检测后的 overfull/缺陷/视觉计数也必须刷新（候选级回滚复验依赖最新值）
+        latest["overfull_hbox_total_after"] = int(after_rule_summary.get("overfull_hbox_total") or 0)
+        latest["defects_remaining_after"] = int((state.get("defect_summary") or {}).get("remaining") or 0)
+        latest["visual_findings_after"] = len((visual_report or {}).get("findings") or [])
+        latest["figures_after"] = after_structural["figures"]
+        latest["tables_after"] = after_structural["tables"]
+        latest["labels_after"] = after_structural["labels"]
+        latest["refs_after"] = after_structural["refs"]
+        latest["undefined_refs_after"] = after_undefined["undefined_refs"]
+        latest["undefined_citations_after"] = after_undefined["undefined_citations"]
+        latest["object_counts_after"] = after_structural
+        latest["severe_overfull_after"] = after_severe
+        latest["total_overflow_pt_after"] = float(after_rule_summary.get("total_overflow_pt") or 0.0)
+        latest["page_count_after"] = actual_pages if actual_pages > 0 else None
+        latest["page_gap_after"] = (
+            abs(actual_pages - task_spec.target_pages)
+            if actual_pages > 0 and task_spec.target_pages is not None
+            else None
+        )
+        phased_summary = state.get("repair_execution_summary") or {}
+        latest["accepted_candidates"] = int(phased_summary.get("accepted_count") or 0)
+        latest["rejected_candidates"] = int(phased_summary.get("rejected_count") or 0)
+        return RoundEvidence(
+            page_count_before=latest.get("page_count_before"),
+            # 页数证据缺失时传 None：验收函数 fail-closed，绝不回退旧值放行
+            page_count_after=actual_pages if actual_pages > 0 else None,
+            target_pages=task_spec.target_pages,
+            overfull_before=latest.get("overfull_hbox_total_before"),
+            overfull_after=latest.get("overfull_hbox_total_after"),
+            severe_overfull_before=latest.get("severe_overfull_before"),
+            severe_overfull_after=latest.get("severe_overfull_after"),
+            figures_before=latest.get("figures_before") or 0,
+            figures_after=latest.get("figures_after") or 0,
+            tables_before=latest.get("tables_before") or 0,
+            tables_after=latest.get("tables_after") or 0,
+            labels_before=latest.get("labels_before") or 0,
+            labels_after=latest.get("labels_after") or 0,
+            refs_before=latest.get("refs_before") or 0,
+            refs_after=latest.get("refs_after") or 0,
+            undefined_refs_before=latest.get("undefined_refs_before") or 0,
+            undefined_refs_after=latest.get("undefined_refs_after") or 0,
+            undefined_citations_before=latest.get("undefined_citations_before") or 0,
+            undefined_citations_after=latest.get("undefined_citations_after") or 0,
+            content_integrity_pass=bool(
+                ((state.get("content_integrity") or {}).get("validation_status") or "").startswith("mutation")
+                or (state.get("content_integrity") or {}).get("validation_status") == "snapshot_created"
+                or (state.get("content_integrity") or {}).get("validation_status") == "candidate_level_rollback"
+            ),
+        )
+
     def _terminal_visual_evidence_failure(
         self,
         *,
@@ -1955,10 +2274,14 @@ class OrchestratorRuntime:
             # + 错误签名去重 + 全败整体回滚。模型不写源码，只走受控 fixer。
             try:
                 from compile_recovery import recover_compile
-                from runtime_snapshots import create_pre_repair_snapshot, restore_snapshot
+                from runtime_snapshots import create_pre_repair_snapshot, env_snapshot_root, restore_snapshot
 
                 def _snap_create():
-                    return create_pre_repair_snapshot(project_root=project_root, main_tex=task_spec.main_tex)
+                    return create_pre_repair_snapshot(
+                        project_root=project_root,
+                        main_tex=task_spec.main_tex,
+                        snapshot_root=env_snapshot_root(),
+                    )
 
                 def _snap_restore(snapshot):
                     restore_snapshot(project_root=project_root, rollback_target=str(snapshot.get("rollback_target")))
