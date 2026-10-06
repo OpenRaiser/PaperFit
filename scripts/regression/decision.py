@@ -65,16 +65,34 @@ def paired_bootstrap_ci(
     return (observed, low, high)
 
 
-def check_safety(safety_v1: Dict[str, float], safety_v2: Dict[str, float], *, tolerance_pp: float = 0.0) -> List[str]:
-    """安全指标回退检测（比例型，v2 < v1 - tolerance 即回退）。"""
+def check_safety(
+    safety_v1: Dict[str, float],
+    safety_v2: Dict[str, float],
+    *,
+    tolerance_pp: float = 0.0,
+    safety_paired: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    "安全指标回退检测。"
     regressions: List[str] = []
+    paired_metrics = (safety_paired or {}).get("metrics") or {}
     for key in SAFETY_KEYS:
+        paired = paired_metrics.get(key)
+        if isinstance(paired, dict) and paired.get("v1") is not None and paired.get("v2") is not None:
+            before, after = paired["v1"], paired["v2"]
+            den = paired.get("denominator")
+            if after < before - tolerance_pp:
+                regressions.append(
+                    f"{key}: {before:.3f} -> {after:.3f} (paired, denominator={den})"
+                )
+            continue
         before = safety_v1.get(key)
         after = safety_v2.get(key)
         if before is None or after is None:
             continue
         if after < before - tolerance_pp:
-            regressions.append(f"{key}: {before:.3f} -> {after:.3f}")
+            regressions.append(
+                f"{key}: {before:.3f} -> {after:.3f} (conditional rates, denominators differ)"
+            )
     return regressions
 
 
@@ -88,6 +106,7 @@ def decide_regression(
     confidence: float = 0.95,
     seed: int = 20261005,
     manifest_compatible: bool = True,
+    safety_paired: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """paired_scores: [{paper_id, case_id, delta(v2-v1 的 gated 分差), 双序对账后的有效分}]"""
     if not manifest_compatible:
@@ -96,7 +115,7 @@ def decide_regression(
             "reasons": ["run manifests incompatible (dataset/injection/render/judge/aggregation); new evaluation epoch"],
         }
 
-    safety_regressions = check_safety(safety_v1, safety_v2)
+    safety_regressions = check_safety(safety_v1, safety_v2, safety_paired=safety_paired)
     if safety_regressions:
         return {
             "decision": "REGRESSED",

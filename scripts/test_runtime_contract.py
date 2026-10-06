@@ -280,7 +280,7 @@ class RuntimeContractTest(unittest.TestCase):
             },
         )
 
-        self.assertEqual(gate["status"], "blocked")
+        self.assertEqual(gate["status"], "approval_required")
         self.assertEqual(gate["blocked_candidates"][0]["risk"]["operation"], "float_movement_across_section_boundary")
 
     def test_candidate_approval_scope_gate_allows_medium_same_section_float_candidate(self) -> None:

@@ -1742,29 +1742,42 @@ def _handle_paperfit_request(
     )
 
 
-def _source_changing_exit_code(report: Dict[str, Any], project_root: Path, main_tex: Path) -> int:
-    """P2：不把退出码 0 当作修复成功。
+def _normalized_final_status(report: Dict[str, Any]) -> str:
+    """统一归一化普通报告与 typed 嵌套报告的最终状态。
 
-    done → 0；编译失败/阻断 → 2；其余状态只有在存在可读 PDF 证据时才 0，
-    没有新 PDF 一律非零（评估器要能读到修前状态，宿主要能感知失败）。
+    typed 报告（_run_typed_source_changing）没有顶层 status，真实终态在
+    report["run_result"]["status"]；普通/迁移报告顶层就有。两者都查，取先命中。
     """
-    status = str(report.get("status") or "").lower()
+    status = str(report.get("status") or "").strip().lower()
+    if status:
+        return status
+    nested = report.get("run_result")
+    if isinstance(nested, dict):
+        return str(nested.get("status") or "").strip().lower()
+    return ""
+
+
+def _source_changing_exit_code(report: Dict[str, Any], project_root: Path, main_tex: Path) -> int:
+    """P2：不把退出码 0 当作修复成功，磁盘上的旧 PDF 不等于本次修复成功。
+
+    退出码表（可测试、不静默归 0）：
+      0  done（明确满足成功条件的终态）
+      3  approval_required / needs_approval（合法但需人工审批的注意状态）
+      2  blocked / failed / compile_failed / runner_crash / 状态缺失（fail-closed）
+      1  continue / partial / incomplete 等已运行但未达 done 的状态
+    """
+    status = _normalized_final_status(report)
     if status == "done":
         return 0
     layout = report.get("layout_completion") or {}
     if str(layout.get("status") or "").lower() == "done":
         return 0
-    if status in {"blocked", "failed", "runner_crash", "compile_failed"}:
+    if status in {"approval_required", "needs_approval"} or "requires_approval" in status:
+        return 3
+    if status in {"blocked", "failed", "runner_crash", "compile_failed", ""}:
         return 2
-    runtime_actions = report.get("runtime_actions") or {}
-    compile_action = runtime_actions.get("compile") or (runtime_actions.get("initial_observe") or {}).get("compile") or {}
-    pdf_path = compile_action.get("pdf_path")
-    if pdf_path and Path(pdf_path).is_file():
-        return 0
-    fallback_pdf = project_root / main_tex.with_suffix(".pdf").name
-    if fallback_pdf.is_file():
-        return 0
-    return 2
+    # continue / partial / incomplete 等：明确非零，PDF 是否存在不改变该判定
+    return 1
 
 
 def main() -> None:

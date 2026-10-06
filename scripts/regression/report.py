@@ -36,6 +36,8 @@ def build_regression_report(
     absolute_vs_b0: Optional[Dict[str, Any]] = None,
     minimum_detectable_delta: float = 0.10,
     manifest_compatible: bool = True,
+    safety_paired: Optional[Dict[str, Any]] = None,
+    vlm_sample_accounting: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     funnel = build_funnel(case_records)
     decision = decide_regression(
@@ -44,6 +46,7 @@ def build_regression_report(
         paired_scores=paired_scores,
         minimum_detectable_delta=minimum_detectable_delta,
         manifest_compatible=manifest_compatible,
+        safety_paired=safety_paired,
     )
 
     # win/tie/loss/uncertain：来自双序对账后的 revision_pair 结果
@@ -62,16 +65,24 @@ def build_regression_report(
         "safety": {
             "v1": safety_v1,
             "v2": safety_v2,
+            "paired": safety_paired,
+            "note": "v1/v2 是各侧条件比例（分母不同，不可直接对比）；配对结论只看 paired",
             "regressions": [
                 f"{SAFETY_METRIC_LABELS.get(key, key)}: {safety_v1.get(key)} -> {safety_v2.get(key)}"
                 for key in safety_v1
-                if safety_v1.get(key) is not None
-                and safety_v2.get(key) is not None
+                if not str(key).startswith("_")
+                and isinstance(safety_v1.get(key), (int, float))
+                and isinstance(safety_v2.get(key), (int, float))
                 and safety_v2.get(key) < safety_v1.get(key)
             ],
         },
         "paired_visual": {
             "win_counts": win_counts,
+            "sample_accounting": vlm_sample_accounting or {
+                "vlm_responses": len(case_records),
+                "dual_order_consistent_paired": len(paired_scores),
+                "uncertain_excluded": None,
+            },
             "paired_delta_mean": decision.get("paired_delta_mean"),
             "paired_delta_ci95": decision.get("paired_delta_ci95"),
         },

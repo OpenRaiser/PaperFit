@@ -177,24 +177,83 @@ def export_ours_side(
     )
 
 
-def _aggregate_safety(evaluation_reports: List[Dict[str, Any]]) -> Dict[str, float]:
+def _aggregate_safety(evaluation_reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    "按本侧可评估样本计算的条件比例（不得用于声称配对改进）。"
     if not evaluation_reports:
         return {}
     total = len(evaluation_reports)
 
-    def rate(key: str) -> float:
-        values = [1.0 if report.get(key) else 0.0 for report in evaluation_reports]
-        return round(sum(values) / total, 4)
+    def num(key: str) -> int:
+        return sum(1 for report in evaluation_reports if report.get(key))
 
-    content_ok = [
-        1.0 if ((report.get("content_integrity") or {}).get("ok") is True) else 0.0
-        for report in evaluation_reports
-    ]
+    content_num = sum(
+        1 for report in evaluation_reports if (report.get("content_integrity") or {}).get("ok") is True
+    )
     return {
-        "compile_success": rate("compile_success"),
-        "render_success": rate("render_success"),
-        "content_integrity_ok": round(sum(content_ok) / total, 4),
-        "page_budget_hit": rate("page_budget_hit"),
+        "compile_success": round(num("compile_success") / total, 4),
+        "render_success": round(num("render_success") / total, 4),
+        "content_integrity_ok": round(content_num / total, 4),
+        "page_budget_hit": round(num("page_budget_hit") / total, 4),
+        "_note": "conditional on this side's evaluable samples; NOT a paired comparison",
+        "_denominator": total,
+        "_numerators": {
+            "compile_success": num("compile_success"),
+            "render_success": num("render_success"),
+            "content_integrity_ok": content_num,
+            "page_budget_hit": num("page_budget_hit"),
+        },
+    }
+
+
+def _paired_safety(
+    b0_evaluations: List[Dict[str, Any]], ours_evaluations: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    "双侧都可评估的配对交集指标 + 样本记账。"
+
+    def _index(evals: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        out: Dict[str, Dict[str, Any]] = {}
+        for report in evals:
+            if not isinstance(report, dict):
+                continue
+            key = f"{report.get('paper_id')}/{report.get('case_id')}"
+            if report.get("paper_id") and report.get("case_id"):
+                out[key] = report
+        return out
+
+    b0 = _index(b0_evaluations)
+    ours = _index(ours_evaluations)
+    common = sorted(set(b0) & set(ours))
+    metrics: Dict[str, Any] = {}
+    for key in ("compile_success", "render_success", "page_budget_hit"):
+        v1_hits = [cid for cid in common if b0[cid].get(key)]
+        v2_hits = [cid for cid in common if ours[cid].get(key)]
+        metrics[key] = {
+            "v1": round(len(v1_hits) / len(common), 4) if common else None,
+            "v2": round(len(v2_hits) / len(common), 4) if common else None,
+            "v1_numerator": len(v1_hits),
+            "v2_numerator": len(v2_hits),
+            "denominator": len(common),
+            "paired_case_ids": common,
+        }
+    v1_int = sum(1 for cid in common if (b0[cid].get("content_integrity") or {}).get("ok") is True)
+    v2_int = sum(1 for cid in common if (ours[cid].get("content_integrity") or {}).get("ok") is True)
+    metrics["content_integrity_ok"] = {
+        "v1": round(v1_int / len(common), 4) if common else None,
+        "v2": round(v2_int / len(common), 4) if common else None,
+        "v1_numerator": v1_int,
+        "v2_numerator": v2_int,
+        "denominator": len(common),
+        "paired_case_ids": common,
+    }
+    return {
+        "schema_version": "1.0",
+        "paired_evaluable_count": len(common),
+        "paired_case_ids": common,
+        "b0_only_count": len(set(b0) - set(ours)),
+        "b0_only_case_ids": sorted(set(b0) - set(ours)),
+        "candidate_only_count": len(set(ours) - set(b0)),
+        "candidate_only_case_ids": sorted(set(ours) - set(b0)),
+        "metrics": metrics,
     }
 
 
@@ -348,6 +407,8 @@ def run_mvp(
         reference_version="B0(perturbed)",
         candidate_version="OURS(paperfit HEAD)",
         safety_v1=_aggregate_safety(b0_evaluations),
+        safety_paired=_paired_safety(b0_evaluations, ours_evaluations),
+        vlm_sample_accounting=_load_json(run_dir / "vlm_sample_accounting.json"),
         safety_v2=_aggregate_safety(ours_evaluations),
         case_records=case_records,
         paired_scores=paired_scores,
@@ -564,6 +625,22 @@ def _run_vlm_revision_pairs(
             f"VLM revision pairs: {len(paired)} scored, "
             f"{len(uncertain_cases)} uncertain (excluded from CI)"
         )
+        
+        try:
+            (run_dir / "vlm_sample_accounting.json").write_text(
+                json.dumps(
+                    {
+                        "vlm_responses": len(common_cases),
+                        "dual_order_consistent_paired": len(paired),
+                        "uncertain_excluded": len(uncertain_cases),
+                    },
+                    ensure_ascii=False,
+                    indent=1,
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
     except Exception as exc:
         print(f"VLM evaluation failed: {exc}", file=sys.stderr)
 

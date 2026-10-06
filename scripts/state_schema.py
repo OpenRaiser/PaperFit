@@ -27,6 +27,7 @@ TASK_FIELDS = (
 )
 ARTIFACT_FIELDS = (
     "task_spec",
+    "repair_plan_executable",
     "rule_report",
     "crossrefs_report",
     "source_hygiene_report",

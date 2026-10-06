@@ -947,15 +947,15 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 )
 
             self.assertEqual(execute_calls["count"], 1)
-            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["status"], "approval_required")  
             self.assertEqual(result["gatekeeper_decision"], "BLOCKED")
-            self.assertEqual(result["failure"]["failure_type"], "approval_scope_blocked")
+            self.assertEqual(result["failure"]["failure_type"], "approval_required")
             action = result["runtime_actions"]["repair_plan_executor"]
             self.assertTrue(action["skipped"])
-            self.assertEqual(action["reason"], "approval_scope_blocked")
-            self.assertEqual(action["approval_scope_gate"]["status"], "blocked")
+            self.assertEqual(action["reason"], "approval_required")
+            self.assertEqual(action["approval_scope_gate"]["status"], "approval_required")
             policy = result["repair_loop_policy"]
-            self.assertEqual(policy["stop_condition"], "approval_scope_blocked")
+            self.assertEqual(policy["stop_condition"], "approval_required")
             self.assertFalse(policy["next_round_allowed"])
             self.assertFalse(
                 policy["second_round_apply_readiness"]["checks"]["candidate_approval_scope_gate_pass"]
@@ -1089,22 +1089,23 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 )
 
             self.assertEqual(hashlib.sha256(main_tex.read_bytes()).hexdigest(), original_sha)
-            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["status"], "approval_required")  
             self.assertEqual(result["gatekeeper_decision"], "BLOCKED")
-            self.assertEqual(result["failure"]["failure_type"], "approval_scope_blocked")
+            self.assertEqual(result["failure"]["failure_type"], "approval_required")
             action = result["runtime_actions"]["repair_plan_executor"]
             self.assertTrue(action["skipped"])
-            self.assertEqual(action["reason"], "approval_scope_blocked")
-            self.assertEqual(action["approval_scope_gate"]["status"], "blocked")
+            self.assertEqual(action["reason"], "approval_required")
+            self.assertEqual(action["approval_scope_gate"]["status"], "approval_required")
             self.assertEqual(
                 action["approval_scope_gate"]["blocked_candidates"][0]["risk"]["operation"],
                 "float_movement_across_section_boundary",
             )
             self.assertNotIn("source_mutation_integrity", result["runtime_actions"])
             self.assertNotIn("post_repair_observe", result["runtime_actions"])
-            self.assertEqual(result["approval"]["status"], "approval_required")
-            self.assertEqual(result["repair_loop_policy"]["stop_condition"], "approval_scope_blocked")
-            self.assertEqual(result["repair_loop_policy"]["next_round_reason"], "approval_scope_blocked")
+            # 审批对象是任务级状态；候选级审批事实以 run_result.status 与 approval_scope_gate 为准
+            self.assertEqual(result["status"], "approval_required")
+            self.assertEqual(result["repair_loop_policy"]["stop_condition"], "approval_required")
+            self.assertEqual(result["repair_loop_policy"]["next_round_reason"], "approval_required_grant_fresh_approval_or_regenerate_plan")
             self.assertFalse(
                 result["repair_loop_policy"]["second_round_apply_readiness"]["checks"][
                     "candidate_approval_scope_gate_pass"
@@ -1208,7 +1209,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
             self.assertEqual(action["input_artifacts"]["main_tex"], "main.tex")
             self.assertTrue(action["input_artifacts"]["rollback_target"].endswith("snapshot_manifest.json"))
             self.assertEqual(action["output_artifacts"], {})
-            self.assertEqual(result["approval"]["status"], "approval_required")
+            self.assertEqual(result["status"], "continue")
             self.assertTrue(result["approval"]["requires_approval"])
             self.assertFalse(result["approval"]["approval_granted"])
             self.assertEqual(result["approval"]["reason"], "dry_run_source_mutation")

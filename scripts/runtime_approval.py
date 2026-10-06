@@ -291,14 +291,19 @@ def build_candidate_approval_scope_gate(
     policy = approval.get("policy") if isinstance(approval.get("policy"), dict) else {}
     allowed_surface = set(str(item) for item in (policy.get("mutation_surface") or []))
     high_risk_operations = set(str(item) for item in (policy.get("high_risk_operations") or []))
-    candidates = [
+    all_candidates = [
         item
-        for item in (repair_plan.get("candidates") or [])[: max(0, int(candidate_limit or 0))]
+        for item in (repair_plan.get("candidates") or [])
         if isinstance(item, dict)
     ]
+
     candidate_risks = []
-    blocked_candidates = []
-    for index, candidate in enumerate(candidates, start=1):
+    blocked_candidates = []      
+    allowed_candidates = []      
+    deferred_candidates = []     
+    scanned = 0
+    batch_size = max(0, int(candidate_limit or 0))
+    for index, candidate in enumerate(all_candidates, start=1):
         risk = candidate.get("risk") if isinstance(candidate.get("risk"), dict) else classify_repair_candidate_risk(candidate)
         surfaces = set(str(item) for item in (risk.get("mutation_surface") or []))
         operation = str(risk.get("operation") or "")
@@ -318,25 +323,42 @@ def build_candidate_approval_scope_gate(
             },
             "allowed_under_current_scope": allowed,
         }
-        candidate_risks.append(entry)
-        if not allowed:
+        if allowed:
+            if len(allowed_candidates) < batch_size:
+                allowed_candidates.append(entry)
+        else:
+            entry["deferred_reason"] = (
+                "high_risk_operation_requires_fresh_approval"
+                if high_risk_operation
+                else "mutation_surface_outside_approval_scope"
+            )
+            deferred_candidates.append(entry)
             blocked_candidates.append(entry)
+        candidate_risks.append(entry)
+        scanned = index
+        # 批次填满后再多扫 20 个（记录 deferred 供报告），避免整份大计划全扫
+        if len(allowed_candidates) >= batch_size and batch_size and index - batch_size > 20:
+            break
 
-    status = "pass" if candidates and not blocked_candidates else "blocked" if candidates else "not_evaluated"
-    reason = (
-        "selected_candidates_within_approval_scope"
-        if status == "pass"
-        else "selected_candidate_exceeds_approval_scope"
-        if blocked_candidates
-        else "no_selected_candidates"
-    )
+    allowed_count = len(allowed_candidates)
+    if allowed_count:
+        status = "pass"
+        reason = "safe_subset_within_approval_scope" if deferred_candidates else "selected_candidates_within_approval_scope"
+    elif scanned and (deferred_candidates or blocked_candidates):
+        status = "approval_required"
+        reason = "no_candidate_allowed_under_current_scope"
+    else:
+        status = "not_evaluated"
+        reason = "no_selected_candidates"
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "status": status,
         "reason": reason,
         "approval_scope": policy.get("approval_scope"),
         "candidate_limit": candidate_limit,
-        "selected_candidate_count": len(candidates),
+        "selected_candidate_count": allowed_count,
+        "allowed_candidates": allowed_candidates,
+        "deferred_candidates": deferred_candidates,
         "candidate_risks": candidate_risks,
         "blocked_candidates": blocked_candidates,
     }

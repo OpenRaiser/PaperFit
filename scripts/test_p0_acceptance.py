@@ -142,6 +142,8 @@ class BaselinePdfProtectionTest(unittest.TestCase):
 
 
 class FixLayoutExitCodeTest(unittest.TestCase):
+    "退出码契约（ 重定义）：旧 PDF 不再给任何非 done 状态打 0。"
+
     def _report(self, status, pdf_path=None):
         runtime_actions = {}
         if pdf_path is not None:
@@ -153,25 +155,7 @@ class FixLayoutExitCodeTest(unittest.TestCase):
 
         self.assertEqual(_source_changing_exit_code(self._report("done"), Path("."), Path("main.tex")), 0)
 
-    def test_no_new_pdf_exits_nonzero(self):
-        import tempfile
-
-        from paperfit_command import _source_changing_exit_code
-
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            self.assertEqual(
-                _source_changing_exit_code(self._report("continue"), root, root / "main.tex"), 2
-            )
-
-    def test_blocked_exits_two(self):
-        from paperfit_command import _source_changing_exit_code
-
-        self.assertEqual(
-            _source_changing_exit_code(self._report("blocked"), Path("."), Path("main.tex")), 2
-        )
-
-    def test_continue_with_pdf_exits_zero(self):
+    def test_blocked_exits_two_even_with_pdf(self):
         import tempfile
 
         from paperfit_command import _source_changing_exit_code
@@ -180,9 +164,96 @@ class FixLayoutExitCodeTest(unittest.TestCase):
             root = Path(td)
             pdf = root / "main.pdf"
             pdf.write_bytes(b"%PDF")
+            # 旧 PDF 只供诊断比较，不代表本次修复成功
             self.assertEqual(
-                _source_changing_exit_code(self._report("continue", pdf), root, root / "main.tex"), 0
+                _source_changing_exit_code(self._report("blocked", pdf), root, root / "main.tex"), 2
             )
+
+    def test_typed_nested_blocked_with_pdf_exits_nonzero(self):
+        """typed 报告终态在 run_result.status：嵌套 blocked + 磁盘旧 PDF → 非零。"""
+        import tempfile
+
+        from paperfit_command import _source_changing_exit_code
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "main.pdf").write_bytes(b"%PDF")
+            typed_report = {"mode": "typed_fix_layout", "run_result": {"status": "blocked"}}
+            self.assertEqual(_source_changing_exit_code(typed_report, root, root / "main.tex"), 2)
+
+    def test_typed_nested_done_exits_zero(self):
+        from paperfit_command import _source_changing_exit_code
+
+        typed_report = {"mode": "typed_fix_layout", "run_result": {"status": "done"}}
+        self.assertEqual(_source_changing_exit_code(typed_report, Path("."), Path("main.tex")), 0)
+
+    def test_typed_nested_continue_exits_one(self):
+        from paperfit_command import _source_changing_exit_code
+
+        typed_report = {"mode": "typed_fix_layout", "run_result": {"status": "continue"}}
+        self.assertEqual(_source_changing_exit_code(typed_report, Path("."), Path("main.tex")), 1)
+
+    def test_approval_required_exits_three(self):
+        from paperfit_command import _source_changing_exit_code
+
+        self.assertEqual(
+            _source_changing_exit_code(self._report("approval_required"), Path("."), Path("main.tex")), 3
+        )
+
+    def test_missing_status_fail_closed(self):
+        from paperfit_command import _source_changing_exit_code
+
+        self.assertEqual(_source_changing_exit_code({}, Path("."), Path("main.tex")), 2)
+
+
+
+
+class FixLayoutCliExitTest(unittest.TestCase):
+    """CLI 集成：typed fix-layout 嵌套状态驱动真实退出码。"""
+
+    def _run_cli(self, tmpdir: str, nested_status: str) -> int:
+        import sys as _sys
+        from unittest import mock
+
+        import paperfit_command
+
+        root = Path(tmpdir)
+        (root / "data").mkdir(exist_ok=True)
+        (root / "main.tex").write_text("\documentclass{article}x\end{document}", encoding="utf-8")
+        (root / "main.pdf").write_bytes(b"%PDF-old")  # 磁盘旧 PDF
+
+        argv = [
+            "paperfit_command.py", "fix-layout",
+            "--main", str(root / "main.tex"),
+        ]
+        with mock.patch.object(_sys, "argv", argv),                 mock.patch.object(paperfit_command.Path, "cwd", return_value=root.resolve()),                 mock.patch.object(paperfit_command, "_detect_main_tex", return_value=root / "main.tex"),                 mock.patch.object(paperfit_command, "_build_portrait", return_value={}),                 mock.patch.object(
+                    paperfit_command,
+                    "_run_typed_source_changing",
+                    return_value={"mode": "typed_fix_layout", "run_result": {"status": nested_status}},
+                ),                 mock.patch("builtins.print"):
+            try:
+                paperfit_command.main()
+                return 0
+            except SystemExit as exc:
+                return int(exc.code or 0)
+
+    def test_typed_blocked_with_old_pdf_nonzero(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(self._run_cli(td, "blocked"), 2)
+
+    def test_typed_done_zero(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(self._run_cli(td, "done"), 0)
+
+    def test_typed_continue_one(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(self._run_cli(td, "continue"), 1)
 
 
 if __name__ == "__main__":

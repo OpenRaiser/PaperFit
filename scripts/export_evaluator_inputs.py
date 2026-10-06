@@ -77,6 +77,9 @@ def export_case_inputs(
         render_report=render,
         case_dir=case_dir.resolve() if case_dir else None,
     )
+    
+    report["paper_id"] = paper_id
+    report["case_id"] = case_id
     report["case_status"] = case_status
     # 官方快照不含论文 Program Score 的 content_embedding_similarity 维：
     # 如实标注缺失，不用自选 embedding 模型冒充论文复现。

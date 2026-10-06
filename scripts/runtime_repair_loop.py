@@ -177,6 +177,9 @@ def build_repair_loop_policy(
 
     if failure_type == "post_repair_hard_guard_failed":
         stop_condition = "post_repair_hard_guard_failed"
+    elif approval_scope_gate and approval_scope_gate.get("status") == "approval_required" and not dry_run:
+        # dry-run 不执行源码修改，审批不构成停止条件（保持原 dry_run 语义）
+        stop_condition = "approval_required"
     elif approval_scope_gate and approval_scope_gate.get("status") != "pass":
         stop_condition = "approval_scope_blocked"
     elif gatekeeper_done and freshness_status != "pass":
@@ -220,6 +223,8 @@ def build_repair_loop_policy(
     next_round_reason = "multi_round_apply_not_enabled_in_current_runtime"
     if stop_condition == "post_repair_hard_guard_failed":
         next_round_reason = "post_repair_hard_guard_failed"
+    elif stop_condition == "approval_required" and not dry_run:
+        next_round_reason = "approval_required_grant_fresh_approval_or_regenerate_plan"
     elif stop_condition == "approval_scope_blocked":
         next_round_reason = "approval_scope_blocked"
     elif stop_condition == "artifact_freshness_not_pass":
@@ -254,7 +259,7 @@ def build_repair_loop_policy(
         "artifact_freshness_pass": freshness.get("status") == "pass",
         "mutation_integrity_available": bool(content_integrity.get("validation_status")),
         "source_mutation_executed": applied_count > 0,
-        "candidate_approval_scope_gate_pass": approval_scope_gate is None or approval_scope_gate.get("status") == "pass",
+        "candidate_approval_scope_gate_pass": approval_scope_gate is None or approval_scope_gate.get("status") == "pass",  # approval_required 也算未过
         "within_round_limit": current_round < max_rounds,
         "gatekeeper_continue": str(gatekeeper_decision or "").upper() == "CONTINUE",
         "runtime_execution_mode_can_auto_apply": runtime_execution_mode_can_auto_apply,

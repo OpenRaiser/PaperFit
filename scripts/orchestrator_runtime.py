@@ -493,7 +493,11 @@ class OrchestratorRuntime:
     ) -> Dict[str, Any]:
         "分组批处理 + 原子接受。"
         self.manager.load()
-        repair_plan_path = ((self.manager.get("artifacts") or {}).get("repair_plan")) or "data/repair_plan.json"
+        
+        executable_plan = (self.manager.get("artifacts") or {}).get("repair_plan_executable")
+        repair_plan_path = executable_plan or (
+            ((self.manager.get("artifacts") or {}).get("repair_plan")) or "data/repair_plan.json"
+        )
         task_config = self.manager.get("task") or {}
         freshness = self._validate_repair_plan_before_execution(
             repair_plan_path=repair_plan_path,
@@ -871,6 +875,7 @@ class OrchestratorRuntime:
             runtime_actions: Dict[str, Any] = {}
             round_artifact_lineage: List[Dict[str, Any]] = []
             round_metrics: List[Dict[str, Any]] = []
+            round_execution_records: List[Dict[str, Any]] = []
             rollback_streak = 0
             repair_round_count = 0
 
@@ -1073,12 +1078,16 @@ class OrchestratorRuntime:
                         candidate_limit=DEFAULT_CANDIDATE_BATCH_LIMIT,
                     )
                     if candidate_scope_gate.get("status") != "pass":
+                        
+                        
+                        gate_status_value = str(candidate_scope_gate.get("status") or "")
+                        runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "repair_skipped")
                         self._record_runtime_action(
                             "repair_plan_executor",
                             {
                                 "success": False,
                                 "skipped": True,
-                                "reason": "approval_scope_blocked",
+                                "reason": "approval_required",
                                 "requires_approval": True,
                                 "input_artifacts": {
                                     "repair_plan": (state.get("artifacts") or {}).get("repair_plan"),
@@ -1089,29 +1098,29 @@ class OrchestratorRuntime:
                                 "approval_scope_gate": candidate_scope_gate,
                                 "post_repair_hard_guard_learning": execution_plan_learning,
                                 "planned_candidates": planned_candidates,
+                                "deferred_candidates": candidate_scope_gate.get("deferred_candidates") or [],
                             },
                             phase="repair",
                             state="REPAIRING",
                             emit_event=emit_runtime_event,
                             runtime_actions=runtime_actions,
                         )
-                        runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "repair_skipped")
                         emit_runtime_event(
                             "phase_completed",
                             phase="repair",
                             state=runtime_state,
-                            payload={"reason": "approval_scope_blocked", "approval_scope_gate": candidate_scope_gate},
+                            payload={"reason": "approval_required", "approval_scope_gate": candidate_scope_gate},
                         )
                         self.manager.update_failure_tracking(
                             decision="BLOCKED",
-                            failure_type="approval_scope_blocked",
+                            failure_type="approval_required",
                         )
                         self.manager.update(
                             {
-                                "status": "BLOCKED",
+                                "status": "approval_required",
                                 "last_gatekeeper_decision": "BLOCKED",
                                 "next_actions": [
-                                    "Request fresh approval for the selected high-risk repair candidate or regenerate a lower-risk repair plan",
+                                    "Grant fresh approval for the deferred high-risk candidates, or regenerate a lower-risk repair plan",
                                 ],
                             }
                         )
@@ -1132,6 +1141,29 @@ class OrchestratorRuntime:
                         break
 
                     repair_round_count += 1
+                    
+                    
+                    allowed_indices = {
+                        int(entry["index"])
+                        for entry in candidate_scope_gate.get("allowed_candidates") or []
+                        if isinstance(entry, dict) and entry.get("index")
+                    }
+                    if allowed_indices:
+                        try:
+                            base_plan = self._load_optional_json(
+                                Path.cwd() / str((state.get("artifacts") or {}).get("repair_plan") or "data/repair_plan.json")
+                            )
+                            if base_plan:
+                                all_entries = base_plan.get("candidates") or []
+                                subset = [c for i, c in enumerate(all_entries, start=1) if i in allowed_indices]
+                                base_plan["candidates"] = subset
+                                executable_path = Path.cwd() / "data" / "repair_plan_executable.json"
+                                executable_path.write_text(
+                                    json.dumps(base_plan, indent=2, ensure_ascii=False), encoding="utf-8"
+                                )
+                                self.set_artifact("repair_plan_executable", "data/repair_plan_executable.json")
+                        except Exception:
+                            pass
                     
                     
                     snapshot = create_pre_repair_snapshot(
@@ -1186,6 +1218,35 @@ class OrchestratorRuntime:
                         max_candidates=DEFAULT_CANDIDATE_BATCH_LIMIT,
                     )
                     repair_summary = repair_state.get("repair_execution_summary") or {}
+                    
+                    
+                    round_execution_records.append(
+                        {
+                            "round": repair_round_count,
+                            "planned": int(
+                                len(
+                                    (
+                                        self._load_optional_json(
+                                            Path.cwd()
+                                            / str((state.get("artifacts") or {}).get("repair_plan") or "data/repair_plan.json")
+                                        ).get("candidates")
+                                        or []
+                                    )
+                                )
+                            ),
+                            "attempted": int(repair_summary.get("applied_count") or 0)
+                            + int(repair_summary.get("rejected_count") or 0)
+                            + int(repair_summary.get("rolled_back_count") or 0),
+                            "applied": int(repair_summary.get("applied_count") or 0),
+                            "accepted": int(repair_summary.get("accepted_count") or 0),
+                            "rejected": int(repair_summary.get("rejected_count") or 0),
+                            "rolled_back": int(repair_summary.get("rolled_back_count") or 0),
+                            "deferred_high_risk": len(candidate_scope_gate.get("deferred_candidates") or []),
+                            "candidate_outcomes": list(repair_summary.get("candidate_outcomes") or []),
+                            "status": str(repair_summary.get("status") or ""),
+                            "approval_gate_status": str(candidate_scope_gate.get("status") or ""),
+                        }
+                    )
                     # M2 双止损的回滚计数：执行器结构回滚或本轮零有效修改都算"回滚轮"，
                     # 成功应用则清零；hard-guard 回滚路径在下方单独 break
                     if str(repair_summary.get("status") or "") == "failed" or int(repair_summary.get("applied_count") or 0) == 0:
@@ -1554,6 +1615,11 @@ class OrchestratorRuntime:
                     },
                 )
             status = "done" if runtime_state == "DONE" else ("blocked" if runtime_state == "BLOCKED" else "continue")
+            
+            if status == "blocked":
+                failure_tracking = state.get("failure_tracking") or {}
+                if str(failure_tracking.get("last_failure_type") or "") == "approval_required":
+                    status = "approval_required"
             emit_runtime_event(
                 "artifact_manifest",
                 phase="verify",
@@ -1613,6 +1679,18 @@ class OrchestratorRuntime:
                 round_metrics=round_metrics,
             )
             result_payload = result.to_dict()
+            
+            result_payload["round_execution_records"] = [dict(rec) for rec in round_execution_records]
+            result_payload["execution_totals"] = {
+                "rounds": len(round_execution_records),
+                "planned": sum(int(r.get("planned") or 0) for r in round_execution_records),
+                "attempted": sum(int(r.get("attempted") or 0) for r in round_execution_records),
+                "applied": sum(int(r.get("applied") or 0) for r in round_execution_records),
+                "accepted": sum(int(r.get("accepted") or 0) for r in round_execution_records),
+                "rejected": sum(int(r.get("rejected") or 0) for r in round_execution_records),
+                "rolled_back": sum(int(r.get("rolled_back") or 0) for r in round_execution_records),
+                "deferred_high_risk": sum(int(r.get("deferred_high_risk") or 0) for r in round_execution_records),
+            }
             terminal_event = "task_completed" if status != "blocked" else "task_blocked"
             emit_runtime_event(terminal_event, state=runtime_state, payload=result_payload)
             out_path = Path(output_path)
