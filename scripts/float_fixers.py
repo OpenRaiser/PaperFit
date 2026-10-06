@@ -427,6 +427,12 @@ def _find_labeled_float_block(
 ) -> Tuple[Optional[re.Match[str]], str, Optional[int], Optional[int]]:
     fallback_type = "table" if float_type == "figure" else "figure"
     env_names = []
+    # wrapfigure/wraptable 也是图/表的合法容器（真实案例：NeurIPS 的超宽图
+    # 在 wrapfigure 里，width=K\linewidth 的 \linewidth 指 wrap 容器宽）
+    if float_type == "figure":
+        env_names.append("wrapfigure")
+    else:
+        env_names.append("wraptable")
     for env_name in (float_type, f"{float_type}*", fallback_type, f"{fallback_type}*"):
         if env_name not in env_names:
             env_names.append(env_name)
@@ -1351,6 +1357,35 @@ def fix_figure_width_mismatch(
     if not include_match:
         return tex_content, None
     include_graphic = include_match.group(0)
+
+    
+    
+    
+    
+    overscale = re.search(
+        r'width=([0-9]*\.?[0-9]+)\s*\\(linewidth|columnwidth|textwidth)',
+        include_graphic,
+    )
+    if overscale and float(overscale.group(1)) > 1.0:
+        factor = overscale.group(1)
+        unit = "\\" + overscale.group(2)
+        new_graphic = re.sub(
+            r'width=[0-9]*\.?[0-9]+\s*\\(?:linewidth|columnwidth|textwidth)',
+            lambda _match: f"width={unit}",
+            include_graphic,
+            count=1,
+        )
+        if new_graphic != include_graphic:
+            updated_block = block.replace(include_graphic, new_graphic, 1)
+            modified_content = tex_content[:block_start] + updated_block + tex_content[block_end:]
+            return modified_content, FixResult(
+                defect_id="B2",
+                object_name=figure_label,
+                action=f"超宽图钳制：width={factor}{unit} → width={unit}（超出可用宽度 {factor} 倍）",
+                before=include_graphic[:70] + ("..." if len(include_graphic) > 70 else ""),
+                after=new_graphic[:70] + ("..." if len(new_graphic) > 70 else ""),
+                success=True,
+            )
 
     target_width = r"\textwidth" if template_type == "double_column" and env_name.endswith("*") else r"\linewidth"
     width_match = re.search(r'width=([^\s,\]]+)', include_graphic)

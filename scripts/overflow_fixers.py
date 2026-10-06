@@ -581,6 +581,12 @@ def _fix_long_token_with_breaks(
     token_pos = tex_content.find(token)
     if token_pos < 0:
         return None
+    # 安全守卫（真实事故形态：NeurIPS L133/L617 的图形溢出被误判为 D1，
+    # token 实为文件路径/引用键——在它们内部插 \allowbreak 会直接破坏编译
+    # 或引用解析）。token 出现在下列参数内一律拒绝，转由正确家族处理：
+    guarded = _token_inside_guarded_argument(tex_content, token, token_pos)
+    if guarded:
+        return None
     prefix = tex_content[:token_pos]
     # 数学环境判定用 $ 配对奇偶：旧正则 \$[^$]*token 对"前方出现过任意 $"
     # 一律误判成数学环境，导致正文长 token 永远修不了
@@ -600,6 +606,58 @@ def _fix_long_token_with_breaks(
         line_number=line_number,
         success=True,
     )
+
+
+# token 绝不允许插断点的命令参数（文件路径 / 引用键 / 标签键）
+_GUARDED_ARG_COMMANDS = (
+    "includegraphics", "input", "include", "bibliography", "bibliographystyle",
+    "addbibresource", "graphicspath", "cite", "citep", "citet", "citealp",
+    "citeauthor", "citeyear", "ref", "eqref", "autoref", "pageref", "label",
+    "vref", "cref", "Cref",
+)
+
+
+def _token_inside_guarded_argument(tex_content: str, token: str, token_pos: int) -> bool:
+    """token 是否位于受保护命令的 {...} 参数内或 display math 环境内。
+
+    判定方式：从 token 位置向前找最近的未闭合 \cmd{ 开括号——若它属于
+    _GUARDED_ARG_COMMANDS，token 在其参数内；括号越过行首的 display math
+    开始（\begin{equation/align/...}）同样视为受保护。
+    """
+    depth = 0
+    scan = tex_content[:token_pos]
+    # 从右往左扫描，找包裹 token 的最近一层的开命令
+    for i in range(len(scan) - 1, -1, -1):
+        ch = scan[i]
+        if ch == "}":
+            depth += 1
+        elif ch == "{":
+            if depth > 0:
+                depth -= 1
+                continue
+            # 这是一个尚未闭合的 { —— 检查它前面的命令名（允许中间隔着 [options]）
+            cmd_match = re.search(r"\\([a-zA-Z]+)(?:\[[^\]]*\])?\s*$", scan[:i])
+            if cmd_match:
+                cmd = cmd_match.group(1)
+                if cmd in _GUARDED_ARG_COMMANDS:
+                    return True
+                if cmd == "begin":
+                    # \begin{equation} 等显示数学环境的参数
+                    env = re.search(r"\\begin\{([a-zA-Z*]+)\}\s*$", scan[: i + 1])
+                    if env and env.group(1) in {"equation", "equation*", "align", "align*", "gather", "gather*", "multline", "multline*", "eqnarray", "displaymath"}:
+                        return True
+            # 非受保护命令的参数（如 \mathrm{...}）：继续向外层找
+    # display math 环境整体包裹判定（token 不在命令参数里但在环境内）
+    env_patterns = [
+        (r"\\begin\{(?:equation\*?|align\*?|gather\*?|multline\*?|eqnarray\*?|displaymath)\}", r"\\end\{(?:equation\*?|align\*?|gather\*?|multline\*?|eqnarray\*?|displaymath)\}"),
+        (r"\\\[", r"\\\]"),
+    ]
+    for begin_pat, end_pat in env_patterns:
+        for m in re.finditer(begin_pat, tex_content):
+            end_m = re.search(end_pat, tex_content[m.end():])
+            if end_m and m.end() <= token_pos <= m.end() + end_m.start():
+                return True
+    return False
 
 
 def _insert_safe_breaks_in_token(token: str) -> str:
@@ -1262,6 +1320,21 @@ def _has_top_level_text_columns(column_spec: str) -> bool:
 # D2: 长公式溢出修复
 # ============================================================
 
+_AMSMATH_ENV_RE = re.compile(
+    r"\\begin\{(?:aligned\*?|substack|multline\*?|gather\*?|split)\}|\\substack\{"
+)
+
+
+def _uses_amsmath_envs(snippet: str) -> bool:
+    return bool(_AMSMATH_ENV_RE.search(snippet))
+
+
+def _amsmath_loaded(tex_content: str) -> bool:
+    return bool(
+        re.search(r"\\usepackage(?:\[[^\]]*\])?\{(?:amsmath|mathtools)\}", tex_content)
+    )
+
+
 def fix_equation_overflow(
     tex_content: str,
     equation_label: Optional[str] = None,
@@ -1298,6 +1371,17 @@ def fix_equation_overflow(
         rewritten_equation = f"\\begin{{multline}}\n{equation_body.strip()}\n\\end{{multline}}"
 
     modified_content = tex_content[:match.start()] + rewritten_equation + tex_content[match.end():]
+    
+    
+    
+    if _uses_amsmath_envs(rewritten_equation) and not _amsmath_loaded(modified_content):
+        insert_at = modified_content.find("\\begin{document}")
+        if insert_at > 0:
+            modified_content = (
+                modified_content[:insert_at]
+                + "\\usepackage{amsmath}\n"
+                + modified_content[insert_at:]
+            )
     return modified_content, FixResult(
         defect_id="D2",
         object_name=equation_label or "公式",
