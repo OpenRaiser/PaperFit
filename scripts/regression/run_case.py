@@ -123,9 +123,32 @@ def _read_repair_execution_summary(project: Path, payload: Dict[str, Any]) -> Op
             source = str(path.resolve().relative_to(project.resolve()))
         except ValueError:
             source = str(path)
+        applied = int(data.get("applied_count") or 0)
+        
+        
+        
+        status = str(data.get("status") or "")
+        run_result = payload if isinstance(payload, dict) else {}
+        totals = run_result.get("execution_totals")
+        records = run_result.get("round_execution_records")
+        if isinstance(records, list) and records:
+            if not isinstance(totals, dict):
+                totals = {}
+            try:
+                acc_total = int(totals.get("accepted")) if isinstance(totals.get("accepted"), int) else sum(
+                    int(r.get("accepted") or 0) for r in records if isinstance(r, dict)
+                )
+                appl_total = int(totals.get("applied")) if isinstance(totals.get("applied"), int) else sum(
+                    int(r.get("applied") or 0) for r in records if isinstance(r, dict)
+                )
+            except (TypeError, ValueError):
+                acc_total, appl_total = 0, 0
+            if acc_total > 0 or appl_total > 0:
+                applied = appl_total
+                status = str((records[-1] if isinstance(records[-1], dict) else {}).get("status") or "success")
         return {
-            "status": data.get("status"),
-            "applied_count": int(data.get("applied_count") or 0),
+            "status": status,
+            "applied_count": applied,
             "accepted_count": int(data.get("accepted_count") or 0),
             "rejected_count": int(data.get("rejected_count") or 0),
             "rolled_back_count": int(data.get("rolled_back_count") or 0),
