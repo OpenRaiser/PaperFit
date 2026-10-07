@@ -89,6 +89,33 @@ _PARAGRAPH_BOUNDARY_RE = re.compile(
     r"\\(?:begin|end|section|subsection|subsubsection|paragraph|chapter|maketitle|appendix|bibliography|bibliographystyle)\b"
 )
 _DISPLAY_MATH_ENV_RE = re.compile(r"\\begin\{(equation\*?|align\*?|multline\*?|gather\*?)\}(.*?)\\end\{\1\}", re.DOTALL)
+
+
+
+
+_BRACKET_DISPLAY_RE = re.compile(r"(?<!\\)\\\[ *(\S.*?) *(?<!\\)\\\]", re.DOTALL)
+
+
+class _BracketDisplayMatch:
+    r"""把 `\[...\]` 匹配包装成与 _DISPLAY_MATH_ENV_RE 一致的接口（group(1)=None 表示无编号）。"""
+
+    def __init__(self, match: "re.Match[str]") -> None:
+        self._match = match
+
+    def group(self, index: int) -> Optional[str]:
+        if index == 0:
+            return self._match.group(0)
+        if index == 1:
+            return None
+        if index == 2:
+            return self._match.group(1)
+        return None
+
+    def start(self) -> int:
+        return self._match.start()
+
+    def end(self) -> int:
+        return self._match.end()
 _TABLE_LIKE_ENV_RE = re.compile(
     r"\\(begin|end)\{(table\*?|tabular\*?|tabularx|longtable|sidewaystable)\}"
 )
@@ -728,7 +755,8 @@ def _find_display_math_match(
     equation_label: Optional[str] = None,
     tolerance: int = 2,
 ):
-    matches = list(_DISPLAY_MATH_ENV_RE.finditer(tex_content))
+    matches: List[Any] = list(_DISPLAY_MATH_ENV_RE.finditer(tex_content))
+    matches.extend(_BracketDisplayMatch(m) for m in _BRACKET_DISPLAY_RE.finditer(tex_content))
     if not matches:
         return None
 
@@ -807,7 +835,7 @@ def _split_top_level_additive_terms(rhs: str) -> List[str]:
     return split_safe_additive_terms(rhs)
 
 
-def _rewrite_equation_to_aligned_terms(lhs: str, rhs: str) -> Optional[str]:
+def _rewrite_equation_to_aligned_terms(lhs: str, rhs: str, starred: bool = False) -> Optional[str]:
     terms = _split_top_level_additive_terms(rhs)
     if len(terms) < 3:
         return None
@@ -816,15 +844,16 @@ def _rewrite_equation_to_aligned_terms(lhs: str, rhs: str) -> Optional[str]:
     if not verify_split_preserves_tokens(rhs, terms):
         return None
 
+    outer_env = "equation*" if starred else "equation"
     lines = [
-        "\\begin{equation}",
+        f"\\begin{{{outer_env}}}",
         "\\begin{aligned}",
         f"  {lhs} &= {terms[0]} \\\\",
     ]
     for term in terms[1:-1]:
         lines.append(f"  &\\quad {term} \\\\")
     lines.append(f"  &\\quad {terms[-1]}")
-    lines.extend(["\\end{aligned}", "\\end{equation}"])
+    lines.extend(["\\end{aligned}", f"\\end{{{outer_env}}}"])
     return "\n".join(lines)
 
 
@@ -862,7 +891,7 @@ def _break_long_mathrm_subscripts(expression: str) -> str:
     return re.sub(r"_\{\\mathrm\{([A-Za-z][A-Za-z0-9]{39,})\}\}", replace, expression)
 
 
-def _rewrite_equation_to_multline(equation_body: str) -> Optional[str]:
+def _rewrite_equation_to_multline(equation_body: str, starred: bool = False) -> Optional[str]:
     normalized = " ".join(equation_body.strip().split())
     if "=" not in normalized:
         return None
@@ -873,16 +902,17 @@ def _rewrite_equation_to_multline(equation_body: str) -> Optional[str]:
     concat_fraction_break = _find_safe_concat_fraction_break(rhs)
     if concat_fraction_break is not None:
         first_line_rhs, second_line_rhs = concat_fraction_break
+        outer_env = "equation*" if starred else "equation"
         return (
-            "\\begin{equation}\n"
+            f"\\begin{{{outer_env}}}\n"
             "\\begin{aligned}\n"
             f"  {lhs} &= {first_line_rhs} \\\\\n"
             f"  &{second_line_rhs}\n"
             "\\end{aligned}\n"
-            "\\end{equation}"
+            f"\\end{{{outer_env}}}"
         )
 
-    aligned_terms = _rewrite_equation_to_aligned_terms(lhs, rhs)
+    aligned_terms = _rewrite_equation_to_aligned_terms(lhs, rhs, starred=starred)
     if aligned_terms is not None:
         return aligned_terms
 
@@ -891,11 +921,12 @@ def _rewrite_equation_to_multline(equation_body: str) -> Optional[str]:
         return None
 
     first_line_rhs, second_line_rhs = break_pair
+    env = "multline*" if starred else "multline"
     return (
-        "\\begin{multline}\n"
+        f"\\begin{{{env}}}\n"
         f"  {lhs} = {first_line_rhs} \\\\\n"
         f"  {second_line_rhs}\n"
-        "\\end{multline}"
+        f"\\end{{{env}}}"
     )
 
 
@@ -1366,9 +1397,14 @@ def fix_equation_overflow(
 
     original_equation = match.group(0)
     equation_body = match.group(2)
-    rewritten_equation = _rewrite_equation_to_multline(equation_body)
+    env_name = match.group(1)
+    # 无编号环境（equation*、\[...\]）重写后必须保持无编号：
+    # multline/aligned 默认带编号，会把编号注入原本无编号的公式（内容完整性事故）。
+    starred = env_name is None or env_name.endswith("*")
+    rewritten_equation = _rewrite_equation_to_multline(equation_body, starred=starred)
     if rewritten_equation is None:
-        rewritten_equation = f"\\begin{{multline}}\n{equation_body.strip()}\n\\end{{multline}}"
+        fallback_env = "multline*" if starred else "multline"
+        rewritten_equation = f"\\begin{{{fallback_env}}}\n{equation_body.strip()}\n\\end{{{fallback_env}}}"
 
     modified_content = tex_content[:match.start()] + rewritten_equation + tex_content[match.end():]
     

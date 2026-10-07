@@ -1511,12 +1511,17 @@ def _promote_visual_action_plan(visual_signal_report: str) -> List[Dict[str, Any
             continue
         
         
-        if anchor_status and anchor_status != "resolved":
-            continue
-        if len(anchor) > 1:
-            continue
-        if not anchor and severity in {"major", "critical"}:
-            continue
+        
+        
+        
+        document_level_b1 = family == "B1" and confidence >= 0.6 and not anchor
+        if not document_level_b1:
+            if anchor_status and anchor_status != "resolved":
+                continue
+            if len(anchor) > 1:
+                continue
+            if not anchor and severity in {"major", "critical"}:
+                continue
 
         # 按家族映射到 proposed_action
         action_map = {

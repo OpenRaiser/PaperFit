@@ -18,7 +18,13 @@ FAMILY_ACTIONS: Dict[str, List[str]] = {
     "A4": ["balance_final_columns"],
     "A5": ["reflow_column_void"],
     "A6": ["review_density_shift"],
-    "B1": ["normalize_float_position_near_reference", "move_float_closer_to_first_reference"],
+    "B1": [
+        "normalize_float_position_near_reference",
+        "move_float_closer_to_first_reference",
+        # 文档级去堆叠：页级 finding（浮动页堆叠/漂移，无对象锚点）也有
+        # 安全执行器——[p]→[htbp] 归一化 + 浮动参数放宽（float_fixers）
+        "normalize_float_placements_document_level",
+    ],
     "B2": ["adjust_float_width"],
     "B3": ["decluster_float_sequence", "pack_late_floats_before_endmatter"],
     "B4": ["convert_to_longtable", "force_here_placement"],
@@ -104,6 +110,19 @@ def _status_for(family: str, *, confidence: float, anchor_status: str, severity:
         return {"status": "human_review", "reason": f"confidence {confidence} below {CONFIDENCE_REVIEW_THRESHOLD}"}
     if not FAMILY_ACTIONS.get(family):
         return {"status": "human_review", "reason": f"no action mapping for family {family or 'unknown'}"}
+    # B1 例外：浮动体堆叠/漂移是文档级布局问题，即使没有对象锚点，
+    # [p]→[htbp] 归一化 + 浮动参数放宽也是安全可执行的（不碰内容）。
+    # 页级 VLM finding（无 caption 锚点）由此进入执行而不是永久 human_review。
+    if (
+        family == "B1"
+        and anchor_status == "unresolved"
+        and severity in {"major", "critical"}
+        and confidence >= CONFIDENCE_REVIEW_THRESHOLD
+    ):
+        return {
+            "status": "executable",
+            "reason": "document-level float de-stacking does not require an object anchor",
+        }
     if anchor_status == "unresolved" and severity in {"major", "critical"}:
         # 页级/对象级缺陷允许无锚点进入人工复核——绝不静默丢弃
         return {"status": "human_review", "reason": "source anchor unresolved"}

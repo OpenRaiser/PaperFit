@@ -226,10 +226,135 @@ def run_vlm_diagnosis(
                 "findings_count": len(findings),
             }
         )
+        
+        
+        
+        
+        
+        if _detail_pass_enabled():
+            detail_findings, detail_report = _run_detail_pass(
+                pages,
+                active_client,
+                template_name=template_name,
+                column_type=column_type,
+            )
+            findings = _merge_stage_findings(findings, detail_findings)
+            report["detail_pass"] = detail_report
+            report["findings_count"] = len(findings)
         return findings, report
     except Exception as exc:  # VLM 失败不能阻断诊断管线：CV findings 照常工作
         report["error"] = f"{type(exc).__name__}: {exc}"
         return [], report
+
+
+_DETAIL_OBJECT_CODES = ("B2", "C1", "C2", "D1", "D2")
+
+
+def _detail_pass_enabled() -> bool:
+    return os.environ.get("PAPERFIT_VLM_DETAIL", "1").strip().lower() not in {"0", "false", "off", "no"}
+
+
+def _detail_max_chunks() -> int:
+    try:
+        return max(1, int(os.environ.get("PAPERFIT_VLM_DETAIL_MAX_CHUNKS", "8")))
+    except ValueError:
+        return 8
+
+
+def _build_detail_user_prompt(page_numbers: List[int]) -> str:
+    vocab_lines = "\n".join(
+        f'  "{code}": {DEFECT_VOCABULARY[code]}' for code in _DETAIL_OBJECT_CODES
+    )
+    pages_desc = ", ".join(str(n) for n in page_numbers)
+    return f"""Examine these {len(page_numbers)} consecutive rendered pages at full resolution.
+They are pages {pages_desc} of the paper (left to right).
+
+Report every VISIBLE object-level defect matching this vocabulary:
+{vocab_lines}
+
+Rules:
+- Only report defects you can SEE. Judge object geometry relative to the column/text margins on the same page.
+- For B2/C1/C2 you MUST include the caption number exactly as printed ("Table 2" -> caption_number 2). Omit caption_number only if none is printed.
+- "page" MUST be the global page number ({pages_desc}), not the position in this image.
+- severity: "blocking" | "degrading" | "cosmetic". confidence: 0.0-1.0. evidence: one short sentence.
+
+Respond with exactly this JSON shape:
+{{"defects": [{{"code": "C2", "page": 5, "severity": "degrading", "caption_number": 2, "confidence": 0.85, "evidence": "Table 2 extends past the right column boundary."}}]}}
+If none are visible, respond {{"defects": []}}."""
+
+
+def _run_detail_pass(
+    pages: List[Any],
+    client: Any,
+    *,
+    template_name: str,
+    column_type: Optional[str],
+    chunk_size: int = 3,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    from vlm_evaluator import stitch_images  # noqa: PLC0415
+
+    detail_report: Dict[str, Any] = {
+        "enabled": True,
+        "chunk_size": chunk_size,
+        "chunks_requested": 0,
+        "chunks_failed": 0,
+        "findings": 0,
+        "errors": [],
+    }
+    findings: List[Dict[str, Any]] = []
+    chunks = [
+        (start, pages[start : start + chunk_size])
+        for start in range(0, len(pages), chunk_size)
+    ][:_detail_max_chunks()]
+    for start, chunk in chunks:
+        page_numbers = [start + offset + 1 for offset in range(len(chunk))]
+        try:
+            montage = stitch_images(chunk, max_dim=2400)
+            text, _meta = client.analyze(
+                images=[montage],
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=_build_detail_user_prompt(page_numbers),
+            )
+            detail_report["chunks_requested"] += 1
+            chunk_findings = parse_vlm_defects(text)
+            # 细看组内页码校准：模型偶尔回报组内序号，映射回全局页码
+            valid = set(page_numbers)
+            for f in chunk_findings:
+                if int(f.get("page") or 0) not in valid:
+                    f["page"] = page_numbers[0]
+            findings.extend(chunk_findings)
+        except Exception as exc:  # 单组失败不中断其余组
+            detail_report["chunks_failed"] += 1
+            detail_report["errors"].append(f"{type(exc).__name__}: {exc}")
+    detail_report["findings"] = len(findings)
+    return findings, detail_report
+
+
+def _merge_stage_findings(
+    montage_findings: List[Dict[str, Any]], detail_findings: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """细看结果优先（分辨率高、证据准），拼图结果在同 code+page 上让位。"""
+    detail_keys = set()
+    for f in detail_findings:
+        metrics = f.get("metrics") or {}
+        detail_keys.add(
+            (
+                str(f.get("taxonomy_defect_id") or ""),
+                int(f.get("page") or 0),
+                str(metrics.get("caption_number") or ""),
+            )
+        )
+    merged = list(detail_findings)
+    for f in montage_findings:
+        metrics = f.get("metrics") or {}
+        key = (
+            str(f.get("taxonomy_defect_id") or ""),
+            int(f.get("page") or 0),
+            str(metrics.get("caption_number") or ""),
+        )
+        if key not in detail_keys:
+            merged.append(f)
+    return merged
 
 
 def merge_vlm_findings(visual_report_path: Path, findings: List[Dict[str, Any]], diag_report: Optional[Dict[str, Any]] = None) -> int:
@@ -279,7 +404,14 @@ def merge_vlm_findings(visual_report_path: Path, findings: List[Dict[str, Any]],
             if letter:
                 breakdown[letter] = int(breakdown.get(letter) or 0) + 1
         sources = report.setdefault("machine_sources", [])
-        if "vlm_detector" not in sources:
+        # aggregator 输出的 machine_sources 是 {source: metadata} dict（而非 list），
+        # 此前无条件 .append 会抛 AttributeError——VLM 回写在真实管线上从未成功。
+        if isinstance(sources, dict):
+            sources.setdefault(
+                "vlm_detector",
+                {"findings_added": added, "detail_pass": bool((diag_report or {}).get("detail_pass"))},
+            )
+        elif "vlm_detector" not in sources:
             sources.append("vlm_detector")
         report["vlm_diagnosis"] = diag_report or {"findings_count": added}
         path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")

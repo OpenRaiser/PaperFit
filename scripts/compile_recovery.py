@@ -43,6 +43,74 @@ PACKAGE_FIXES: Dict[str, Tuple[str, str]] = {
     "\\SI": ("siunitx", "\\usepackage{siunitx}"),
 }
 
+
+
+
+
+
+TEMPLATE_MACRO_SHIMS: Dict[str, str] = {
+    r"\IEEEmembership": r"\providecommand{\IEEEmembership}[1]{#1}",
+    r"\IEEEauthorrefmark": r"\providecommand{\IEEEauthorrefmark}[1]{#1}",
+    r"\IEEEPARstart": r"\providecommand{\IEEEPARstart}[2]{#1#2}",
+    r"\IEEEproof": r"\providecommand{\IEEEproof}{\proof}",
+    r"\IEEEitemize": r"\providecommand{\IEEEitemize}{\itemize}",
+    r"\IEEEsetlabelwidth": r"\providecommand{\IEEEsetlabelwidth}[1]{}",
+    r"\ACMConf": r"\providecommand{\ACMConf}[1]{}",
+    r"\icmlpapersize": r"\providecommand{\icmlpapersize}[1]{}",
+    r"\cvprpaperid": r"\providecommand{\cvprpaperid}[1]{}",
+}
+TEMPLATE_ENV_SHIMS: Dict[str, str] = {
+    "IEEEkeywords": r"\newenvironment{IEEEkeywords}{\paragraph*{Index Terms}}{}",
+    "IEEEabstract": r"\newenvironment{IEEEabstract}{\begin{abstract}}{\end{abstract}}",
+}
+_TEMPLATE_SHIM_MARKER = "% PaperFit: template macro shims (compile recovery)"
+_UNDEFINED_CS_RE = re.compile(r"\\([A-Za-z@]+)")
+_UNDEFINED_ENV_RE = re.compile(r"(?:Environment|environment) ([A-Za-z*]+) undefined")
+
+
+def _parse_undefined_names(log_text: str) -> Tuple[set, set]:
+    """从日志提取 Undefined control sequence 的命令名与 undefined 环境名。"""
+    commands: set = set()
+    envs: set = set()
+    lines = (log_text or "").splitlines()
+    for idx, line in enumerate(lines):
+        if "! Undefined control sequence." in line:
+            context = "\n".join(lines[idx + 1 : idx + 4])
+            commands.update(m.group(0) for m in _UNDEFINED_CS_RE.finditer(context) if m.group(0))
+        m = _UNDEFINED_ENV_RE.search(line)
+        if m:
+            envs.add(m.group(1).rstrip("*"))
+    return commands, envs
+
+
+def fix_template_macro_shims(tex: str, log_text: str) -> Tuple[str, List[str]]:
+    """模板宏残留 + 通用 documentclass → 导言区注入 providecommand shim。
+
+    只 shim 日志证实 Undefined 且源码确实使用的宏；幂等（标记已存在跳过）。
+    """
+    if "undefined control sequence" not in (log_text or "").lower() and "undefined" not in (log_text or "").lower():
+        return tex, []
+    if _TEMPLATE_SHIM_MARKER in tex:
+        return tex, []
+    commands, envs = _parse_undefined_names(log_text)
+    if not commands and not envs:
+        return tex, []
+    shim_lines: List[str] = []
+    for macro, shim in TEMPLATE_MACRO_SHIMS.items():
+        if macro in commands and macro in tex:
+            shim_lines.append(shim)
+    for env, shim in TEMPLATE_ENV_SHIMS.items():
+        if env in envs and f"\\begin{{{env}}}" in tex:
+            guarded = "\\makeatletter\\@ifundefined{" + env + "}{" + shim + "}{}\\makeatother"
+            shim_lines.append(guarded)
+    if not shim_lines:
+        return tex, []
+    preamble_end = tex.find("\\begin{document}")
+    if preamble_end <= 0:
+        return tex, []
+    block = "\n".join([_TEMPLATE_SHIM_MARKER] + shim_lines) + "\n"
+    return tex[:preamble_end] + block + tex[preamble_end:], shim_lines
+
 UNICODE_REPLACEMENTS: Dict[str, str] = {
     "\u2018": "`", "\u2019": "'", "\u201c": "``", "\u201d": "''",
     "\u2014": "---", "\u2013": "--", "\u2026": "\\ldots{}",
@@ -298,6 +366,9 @@ def apply_deterministic_recovery(
         tex, inserted = fix_missing_package_for_command(tex, log_text)
         if inserted:
             actions.append(RecoveryAction("missing_package_for_command", rel, ";".join(inserted)))
+        tex, shims = fix_template_macro_shims(tex, log_text)
+        if shims:
+            actions.append(RecoveryAction("template_macro_shims", rel, ";".join(shims)[:200]))
         tex, orphans = fix_orphan_begin_env(tex, log_text)
         if orphans:
             actions.append(RecoveryAction("orphan_begin_env", rel, ",".join(orphans)))

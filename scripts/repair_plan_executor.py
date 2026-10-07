@@ -26,6 +26,11 @@ from transactional_patch import atomic_write_text
 
 _DISPLAY_MATH_BEGIN_RE = re.compile(r"\\begin\{(equation\*?|align\*?|multline\*?|gather\*?)\}")
 _DISPLAY_MATH_END_RE = re.compile(r"\\end\{(equation\*?|align\*?|multline\*?|gather\*?)\}")
+# `\[` / `\]` 短语法显示数学：D1→D2 路由同样要识别（与 overflow_fixers 的
+# _BRACKET_DISPLAY_RE 对齐），否则短语法溢出被当段落溢出处理而无改动。
+# (?<!\\) 排除 `\\[0.5em]`（换行+间距）被误认。
+_BRACKET_DISPLAY_OPEN_RE = re.compile(r"(?<!\\)\\\[")
+_BRACKET_DISPLAY_CLOSE_RE = re.compile(r"(?<!\\)\\\]")
 
 
 def _display_math_anchor_line(main_tex: str, line_number: Optional[int], tolerance: int = 2) -> Optional[int]:
@@ -44,12 +49,20 @@ def _display_math_anchor_line(main_tex: str, line_number: Optional[int], toleran
         begin_match = _DISPLAY_MATH_BEGIN_RE.search(line)
         if begin_match:
             env_stack.append((begin_match.group(1), idx))
+        elif _BRACKET_DISPLAY_OPEN_RE.search(line):
+            env_stack.append(("[bracket-display]", idx))
 
         end_match = _DISPLAY_MATH_END_RE.search(line)
         if end_match:
             end_env = end_match.group(1)
             for stack_index in range(len(env_stack) - 1, -1, -1):
                 if env_stack[stack_index][0] == end_env:
+                    _, start_line = env_stack.pop(stack_index)
+                    display_ranges.append((start_line, idx))
+                    break
+        elif _BRACKET_DISPLAY_CLOSE_RE.search(line):
+            for stack_index in range(len(env_stack) - 1, -1, -1):
+                if env_stack[stack_index][0] == "[bracket-display]":
                     _, start_line = env_stack.pop(stack_index)
                     display_ranges.append((start_line, idx))
                     break
@@ -148,7 +161,29 @@ def _build_float_defects(plan: Dict[str, Any], max_candidates: int) -> List[Dict
             )
             return
 
-        if defect_family not in {"B1", "B2"} or not label:
+        if defect_family not in {"B1", "B2"}:
+            return
+        if not label:
+            # 页级 B1（VLM 看到浮动体堆叠/漂移但无对象锚点）允许以文档级
+            # 候选进入执行：fix_float_defects 的 B1 去堆叠路径
+            # （[p]→[htbp] 归一化 + 浮动参数放宽）不依赖 label。
+            if defect_family == "B1":
+                doc_key = "document"
+                if doc_key in seen_objects:
+                    return
+                seen_objects.add(doc_key)
+                severity = str(candidate.get("severity") or "major").lower()
+                defects.append(
+                    {
+                        "defect_id": "B1",
+                        "object": None,
+                        "page": candidate.get("page") or 0,
+                        "line_number": None,
+                        "finding_id": candidate.get("finding_id"),
+                        "severity": severity,
+                        "description": str(candidate.get("rationale") or "page-level float stacking"),
+                    }
+                )
             return
         if defect_family == "B2" and str(candidate.get("visual_width_subtype") or "") not in {
             "overflow_width",

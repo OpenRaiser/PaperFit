@@ -1982,6 +1982,102 @@ def fix_split_figure(
 
 
 # ============================================================
+# B1 文档级去堆叠（placement 归一化 + 浮动参数放宽）
+# ============================================================
+
+_FLOAT_ONLY_PLACEMENT_RE = re.compile(
+    r"(\\begin\{(?:figure|table)\*?\}\s*)\[p\]"
+)
+_FLOAT_RELAX_MARKER = "% PaperFit: float placement relaxation (B1 de-stacking)"
+_FLOAT_RELAX_BLOCK = """\\makeatletter
+{FLOAT_RELAX_MARKER}
+\\renewcommand{\\topfraction}{0.9}
+\\renewcommand{\\bottomfraction}{0.8}
+\\renewcommand{\\textfraction}{0.07}
+\\renewcommand{\\floatpagefraction}{0.75}
+\\setcounter{topnumber}{3}
+\\setcounter{bottomnumber}{2}
+\\setcounter{totalnumber}{5}
+\\makeatother""".replace("{FLOAT_RELAX_MARKER}", _FLOAT_RELAX_MARKER)
+
+
+def _normalize_float_only_placements(tex_content: str) -> Tuple[str, Optional[FixResult]]:
+    r"""把 figure/table 的 [p]-only 放置归一化为 [htbp]。
+
+    `[p]` 强制浮动体只能上独立浮动页，是“表格/图被赶到文末浮动页、堆在
+    参考文献之后”这一类 B1 缺陷的最常见源码成因（也对应扰动
+    B1_float_to_page 的注入方式）。[htbp] 恢复 LaTeX 自由放置，属纯布局级
+    改动。只改 placement 可选参数，不动浮动体内容。
+    """
+    normalized, count = _FLOAT_ONLY_PLACEMENT_RE.subn(r"\1[htbp]", tex_content)
+    if count == 0:
+        return tex_content, None
+    first = _FLOAT_ONLY_PLACEMENT_RE.search(tex_content)
+    return normalized, FixResult(
+        defect_id="B1",
+        object_name="document",
+        action=f"将 {count} 处 [p]-only 浮动放置归一化为 [htbp]（允许回到正文页）",
+        before=first.group(0) if first else "[p]",
+        after="[htbp]",
+        success=True,
+    )
+
+
+def _inject_float_relaxation(tex_content: str) -> Tuple[str, Optional[FixResult]]:
+    r"""在导言区注入一次性浮动参数放宽块（幂等：标记已存在则跳过）。
+
+    LaTeX 默认参数（topfraction=0.7 等）在浮动体较多时会把整批表格推到
+    文档末尾。放宽后正文页可容纳的浮动体比例提高，堆叠自然消解。
+    """
+    if _FLOAT_RELAX_MARKER in tex_content:
+        return tex_content, None
+    insert_at = tex_content.find("\\begin{document}")
+    if insert_at <= 0:
+        return tex_content, None
+    block = _FLOAT_RELAX_BLOCK + "\n"
+    updated = tex_content[:insert_at] + block + tex_content[insert_at:]
+    return updated, FixResult(
+        defect_id="B1",
+        object_name="document",
+        action="导言区注入浮动参数放宽块（topfraction/floatpagefraction 等）",
+        before="(默认浮动参数)",
+        after=_FLOAT_RELAX_BLOCK.splitlines()[2],
+        success=True,
+    )
+
+
+_ENDMATTER_FLUSH_MARKER = "% PaperFit: flush deferred floats before endmatter (B1)"
+_BIBLIOGRAPHY_RE = re.compile(r"(?<![%\n])[ \t]*(\\(?:bibliography|begin\{thebibliography\})\{?[^%\n]*)")
+
+
+def _flush_floats_before_endmatter(tex_content: str) -> Tuple[str, Optional[FixResult]]:
+    r"""参考文献前插入 \clearpage：把滞留浮动体冲刷到文献列表之前。
+
+    浮动体一旦错过放置点，LaTeX 只能把它排到文档最末——落在参考文献
+    之后/中间（endmatter float intrusion）。[htbp] 归一化 + 参数放宽能让
+    大部分回到正文，但仍放不下的会在文献区堆积并触发 hard guard 整轮
+    回滚。\clearpage 在文献列表前强制冲刷，保证浮动体全部先于 References
+    出现（"图表集中在前、文献收尾"是预印本常见且可接受的版式）。
+    """
+    if _ENDMATTER_FLUSH_MARKER in tex_content:
+        return tex_content, None
+    m = _BIBLIOGRAPHY_RE.search(tex_content)
+    if not m:
+        return tex_content, None
+    insert_at = m.start(1)
+    flush_line = _ENDMATTER_FLUSH_MARKER + "\n\\clearpage\n"
+    updated = tex_content[:insert_at] + flush_line + tex_content[insert_at:]
+    return updated, FixResult(
+        defect_id="B1",
+        object_name="document",
+        action="参考文献前插入 \\clearpage 冲刷滞留浮动体（消除文献区堆积）",
+        before=m.group(1).strip()[:60],
+        after="\\clearpage\n" + m.group(1).strip()[:60],
+        success=True,
+    )
+
+
+# ============================================================
 # 主修复函数
 # ============================================================
 
@@ -2037,6 +2133,41 @@ def fix_float_defects(
             str(defect.get("object") or ""),
         ),
     )
+
+    # —— B1 文档级去堆叠（先于对象级修复）——
+    # 浮动体被强制只上浮动页（[p]）或被默认参数挤出正文时，对象级“移近引用”
+    # 无法奏效：真正缺的是放置约束本身。这两步是纯布局级改动（不碰内容）：
+    # 1) [p]-only 放置归一化为 [htbp]，允许 LaTeX 把浮动体放回正文顶部/底部；
+    # 2) 放宽浮动参数（topfraction 等），让“表格堆在文末/参考文献后”回到正文。
+    # 触发条件：存在 B1 缺陷（页级 VLM finding 无 label 也可触发）。
+    b1_defects = [d for d in ordered_defects if str(d.get("defect_id") or "") == "B1"]
+    if b1_defects:
+        tex_content, placement_change = _normalize_float_only_placements(tex_content)
+        if placement_change is not None:
+            changes.append(placement_change)
+        needs_relaxation = len(b1_defects) >= 2 or any(
+            str(d.get("severity") or "").lower() in {"major", "critical", "degrading", "blocking"}
+            for d in b1_defects
+        )
+        if needs_relaxation:
+            tex_content, relax_change = _inject_float_relaxation(tex_content)
+            if relax_change is not None:
+                changes.append(relax_change)
+        # endmatter 入侵证据（表格/图落在参考文献区）时，[htbp]+参数放宽仍可能
+        # 不够——放不下的浮动体必须先于文献列表冲刷出来，否则触发 hard guard
+        # 整轮回滚，把同轮其他好修复一并吞掉。
+        endmatter_evidence = any(
+            "endmatter" in str(d.get("description") or "").lower()
+            or "reference" in str(d.get("description") or "").lower()
+            for d in b1_defects
+        )
+        if endmatter_evidence:
+            tex_content, flush_change = _flush_floats_before_endmatter(tex_content)
+            if flush_change is not None:
+                changes.append(flush_change)
+        if tex_content != original_tex_content:
+            modified_files.add(str(tex_path))
+        tex_contents[tex_path] = tex_content
 
     # 先把纯文本编号引用标准化为 \ref，给后续同类浮动体重排留出编号更新空间
     for defect in ordered_defects:
@@ -2149,6 +2280,10 @@ def fix_float_defects(
             continue
 
         active_path = tex_path
+        # 页级 B1（无对象标签）：文档级去堆叠已在前置步骤处理
+        # （[p]→[htbp] 归一化 + 浮动参数放宽），对象级修复无从下手，跳过。
+        if defect_id == "B1" and not object_name:
+            continue
         if labels and not _contains_any_labeled_float(tex_contents.get(tex_path, tex_content), labels):
             found_path = _find_tex_file_for_defect(tex_path.parent, labels, tex_path)
             if found_path is not None:

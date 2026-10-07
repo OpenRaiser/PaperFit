@@ -224,6 +224,27 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
         success = pdf_path.is_file() and (pdf_page_count(pdf_path) or 0) > 0
     else:
         success = (result.returncode == 0 and pdf_path.is_file()) or partial_pdf_available
+
+    # 容忍模式下的确定性恢复：PDF 虽可读，但日志证实 Undefined control sequence
+    # （模板被换后残留的模板宏）会中断 latexmk 的 bibtex/bbl 环节——引用全部
+    # 悬空、参考文献缺失，属于"看似成功实则残缺"。补一次确定性 shim 恢复
+    # （providecommand 白名单，幂等）后重编译；只做一层，不递归恢复。
+    if tolerant and fatal_error and "Undefined control sequence" in combined_log:
+        try:
+            from compile_recovery import apply_deterministic_recovery
+
+            recovery_actions = apply_deterministic_recovery(project_root, main_tex.name, combined_log)
+            if recovery_actions:
+                result = run_command(cmd, cwd=project_root, timeout=timeout_sec)
+                combined_log = (result.stdout or "") + "\n" + (result.stderr if result.stderr else "")
+                compile_log.write_text(combined_log, encoding="utf-8")
+                timed_out = result.returncode == 124
+                fatal_error = any(pattern in combined_log for pattern in fatal_patterns)
+                partial_pdf_available = bool(timed_out and pdf_path.is_file() and not fatal_error)
+                success = pdf_path.is_file() and (pdf_page_count(pdf_path) or 0) > 0
+        except Exception:  # 恢复失败不影响原结果口径
+            pass
+
     case = classify_compile_case(combined_log, success=success)
 
     # compile_result.v2：结构化尝试记录（journal 追加 + 全字段返回，旧键全保留）

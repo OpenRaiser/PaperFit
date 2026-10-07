@@ -46,6 +46,30 @@ from state_manager import StateManager
 from visual_action_plan import build_visual_action_plan, write_visual_action_plan
 
 
+def _infer_column_type(main_tex_path: Path) -> Optional[str]:
+    """从 documentclass 选项推断栏型（twocolumn → double，否则 single）。
+
+    供 VLM 诊断提示词使用；文件缺失/推断不出时返回 None，不阻断诊断。
+    """
+    try:
+        head = main_tex_path.read_text(encoding="utf-8", errors="replace")[:4000]
+    except OSError:
+        return None
+    match = re.search(r"\\documentclass(?:\[[^\]]*\])?\{([A-Za-z0-9_-]+)\}", head)
+    if not match:
+        return None
+    options_match = re.search(r"\\documentclass\[([^\]]*)\]", head)
+    options = options_match.group(1) if options_match else ""
+    if "twocolumn" in options or match.group(1) in {"IEEEtran", "cvpr", "iccv", "acl"}:
+        return "double"
+    if "onecolumn" in options:
+        return "single"
+    # 常见双栏会议样式（无显式选项）
+    if match.group(1) in {"ieeecls", "lnecols"}:
+        return "double"
+    return "single"
+
+
 class OrchestratorRuntime:
     def __init__(self, state_path: str = StateManager.DEFAULT_STATE_PATH):
         self.manager = StateManager(state_path=state_path)
@@ -2695,10 +2719,16 @@ class OrchestratorRuntime:
                     from vlm_diagnosis import merge_vlm_findings, run_vlm_diagnosis, vlm_diagnosis_configured
 
                     if vlm_diagnosis_configured():
+                        # inspect_project 没有 column_type 参数——此前这里直接引用
+                        # 未定义名抛 NameError，vision-in-the-loop 主路径从未真正
+                        # 生效（异常被吞掉后静默降级为纯 CV）。改为从主 tex 的
+                        # documentclass 选项推断栏型；推断不出传 None（只影响
+                        # 诊断提示词的上下文，不影响检测本身）。
+                        _vlm_column_type = _infer_column_type(cwd / main_tex)
                         vlm_findings, vlm_diag_report = run_vlm_diagnosis(
                             Path(page_dir),
                             template_name=str(template or "unknown"),
-                            column_type=column_type,
+                            column_type=_vlm_column_type,
                         )
                         merged = merge_vlm_findings(Path(visual_signal_output), vlm_findings, vlm_diag_report)
                         if merged:
