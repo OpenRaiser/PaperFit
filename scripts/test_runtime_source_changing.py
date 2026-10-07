@@ -382,17 +382,21 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 }
             )
 
+            _failing_guard = {
+                "available": True,
+                "endmatter_start_page": 8,
+                "endmatter_heading": "Acknowledgements",
+                "intrusions": [{"page": 8, "captions": ["Figure 7:"]}],
+                "hard_failures": [
+                    "Body float caption detected on endmatter pages starting at page 8 (Acknowledgements): page 8: Figure 7:"
+                ],
+            }
             hard_guard_reports = [
                 {"available": True, "hard_failures": []},
-                {
-                    "available": True,
-                    "endmatter_start_page": 8,
-                    "endmatter_heading": "Acknowledgements",
-                    "intrusions": [{"page": 8, "captions": ["Figure 7:"]}],
-                    "hard_failures": [
-                        "Body float caption detected on endmatter pages starting at page 8 (Acknowledgements): page 8: Figure 7:"
-                    ],
-                },
+                # 第三次：heal_endmatter_float_intrusion 治疗后的复检仍失败
+                # （侵入无法通过去堆叠消除时，回滚+BLOCKED 语义保持不变）
+                _failing_guard,
+                dict(_failing_guard),
             ]
 
             with (
