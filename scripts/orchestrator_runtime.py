@@ -43,6 +43,27 @@ from runtime_status import build_runtime_status
 from runtime_state_machine import SOURCE_CHANGING_STATE_MACHINE, VISUAL_ONLY_STATE_MACHINE
 from runtime_types import ActionResult, RunResult, SOURCE_CHANGING_TASK_TYPES, TaskSpec, load_task_spec
 from state_manager import StateManager
+
+
+def _resolve_vlm_column_type(state: Dict[str, Any], template: Optional[str]) -> Optional[str]:
+    """Use the task override or an unambiguous registered template layout."""
+    configured = (state.get("task") or {}).get("column_type")
+    if configured in {"single", "double"}:
+        return configured
+    if not template:
+        return None
+    from template_registry import load_templates
+
+    templates = load_templates(Path(__file__).resolve().parent.parent)
+    exact = templates.get(template) or {}
+    if exact.get("column_type") in {"single", "double"}:
+        return exact["column_type"]
+    family_columns = {
+        entry.get("column_type") for entry in templates.values()
+        if str(entry.get("family") or "").lower() == template.lower()
+        and entry.get("column_type") in {"single", "double"}
+    }
+    return next(iter(family_columns)) if len(family_columns) == 1 else None
 from visual_action_plan import build_visual_action_plan, write_visual_action_plan
 
 
@@ -2224,6 +2245,18 @@ class OrchestratorRuntime:
             return None
         freshness = (artifact_manifest.get("freshness") or {}) if isinstance(artifact_manifest, dict) else {}
         if freshness.get("status") == "pass":
+            diagnosis = artifact_manifest.get("vision_diagnosis") or {}
+            if diagnosis.get("configured") and diagnosis.get("status") != "completed":
+                return {
+                    "failure_type": "terminal_success_without_complete_vlm_evidence",
+                    "reason": "configured_vlm_diagnosis_incomplete",
+                    "gatekeeper_decision": "DONE",
+                    "vision_diagnosis": diagnosis,
+                    "next_actions": [
+                        "Retry the failed or missing VLM page batches before reporting DONE",
+                        "Review the rendered pages in the host agent if the vision service is unavailable",
+                    ],
+                }
             return None
         return {
             "failure_type": "terminal_success_without_fresh_visual_evidence",
@@ -2691,36 +2724,62 @@ class OrchestratorRuntime:
                 # 论文核心设计（vision-in-the-loop）：page-image 证据层由 VLM 补充。
                 # CV 启发式看不出浮动体堆叠观感、表格压扁、跨页失衡等二维缺陷；
                 # VLM finding 带 caption_number 时锚点解析可定位到源码行。
+                vlm_diag_report = None
                 try:
                     from vlm_diagnosis import merge_vlm_findings, run_vlm_diagnosis, vlm_diagnosis_configured
 
                     if vlm_diagnosis_configured():
+                        column_type = _resolve_vlm_column_type(self.manager.load(), template)
                         vlm_findings, vlm_diag_report = run_vlm_diagnosis(
                             Path(page_dir),
                             template_name=str(template or "unknown"),
                             column_type=column_type,
                         )
                         merged = merge_vlm_findings(Path(visual_signal_output), vlm_findings, vlm_diag_report)
-                        if merged:
-                            visual_report = self._load_optional_json(Path(visual_signal_output))
-                            self._record_runtime_action(
-                                "vlm_diagnosis",
-                                {
-                                    "success": True,
-                                    "input_artifacts": {"page_dir": page_dir},
-                                    "output_artifacts": {"visual_signal_report": visual_signal_output},
-                                    "findings_added": merged,
-                                    "error": vlm_diag_report.get("error"),
-                                },
-                                phase="diagnose",
-                                state="DIAGNOSING",
-                                emit_event=emit_event,
-                                runtime_actions=runtime_actions,
-                            )
+                        visual_report = self._load_optional_json(Path(visual_signal_output))
+                        self._record_runtime_action(
+                            "vlm_diagnosis",
+                            {
+                                "success": vlm_diag_report.get("status") == "completed",
+                                "status": vlm_diag_report.get("status"),
+                                "clean": vlm_diag_report.get("clean"),
+                                "coverage": vlm_diag_report.get("coverage"),
+                                "input_artifacts": {"page_dir": page_dir},
+                                "output_artifacts": {"visual_signal_report": visual_signal_output},
+                                "findings_added": merged,
+                                "error": vlm_diag_report.get("error"),
+                            },
+                            phase="diagnose",
+                            state="DIAGNOSING",
+                            emit_event=emit_event,
+                            runtime_actions=runtime_actions,
+                        )
                 except Exception as vlm_exc:  # VLM 诊断失败绝不阻断主管线
+                    # Preserve the configured failure even when integration fails
+                    # after an API response. Missing evidence must not look like
+                    # an unconfigured optional inspector to the terminal guard.
+                    failed_diagnosis = dict(vlm_diag_report or {})
+                    failed_diagnosis.update({
+                        "configured": True,
+                        "status": "failed",
+                        "success": False,
+                        "clean": None,
+                        "error": f"VLM integration failed: {type(vlm_exc).__name__}",
+                    })
+                    visual_report["vlm_diagnosis"] = failed_diagnosis
+                    Path(visual_signal_output).write_text(
+                        json.dumps(visual_report, indent=2, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
                     self._record_runtime_action(
                         "vlm_diagnosis",
-                        {"success": False, "error": f"{type(vlm_exc).__name__}: {vlm_exc}"},
+                        {
+                            "success": False,
+                            "status": "failed",
+                            "clean": None,
+                            "error": failed_diagnosis["error"],
+                            "output_artifacts": {"visual_signal_report": visual_signal_output},
+                        },
                         phase="diagnose",
                         state="DIAGNOSING",
                         emit_event=emit_event,
@@ -3207,7 +3266,7 @@ class OrchestratorRuntime:
             "--output",
             output_path,
         ]
-        completed = subprocess.run(cmd, check=False, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace")
+        completed = subprocess.run(cmd, check=False, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
 
         report_path = Path(output_path)
         if not report_path.is_file():
@@ -3246,7 +3305,7 @@ class OrchestratorRuntime:
             cmd.extend(["--semantic-report", semantic_report])
         if bool(((state.get("task") or {}).get("strict_mode"))):
             cmd.append("--strict")
-        subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace")
+        subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         self.manager.ingest_gatekeeper_decision(output_path)
         return self.manager.load()
 
@@ -3277,7 +3336,7 @@ class OrchestratorRuntime:
         if pdf_path:
             cmd.extend(["--pdf", str(pdf_path)])
         try:
-            subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace")
+            subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         except subprocess.CalledProcessError:
             return {}
         return json.loads(Path(output_path).read_text(encoding="utf-8"))
@@ -3308,7 +3367,7 @@ class OrchestratorRuntime:
         if diagnosis_report.is_file():
             cmd.extend(["--diagnosis-report", str(diagnosis_report)])
         try:
-            subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace")
+            subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         except subprocess.CalledProcessError:
             return {}
         return json.loads(Path(output_path).read_text(encoding="utf-8"))
@@ -3333,7 +3392,7 @@ class OrchestratorRuntime:
             cmd.extend(["--visual-signal-report", visual_signal_output])
         if hygiene_report_output:
             cmd.extend(["--hygiene-report", hygiene_report_output])
-        subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace")
+        subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         return json.loads(Path(output_path).read_text(encoding="utf-8"))
 
     def _run_source_hygiene_check(self, main_tex: str, output_path: str) -> Dict[str, Any]:
@@ -3345,7 +3404,7 @@ class OrchestratorRuntime:
             "--output",
             output_path,
         ]
-        subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace")
+        subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         return json.loads(Path(output_path).read_text(encoding="utf-8"))
 
     def _run_repair_plan_executor(
@@ -3372,7 +3431,7 @@ class OrchestratorRuntime:
             cmd.extend(["--column-type", column_type])
         if target_pages is not None:
             cmd.extend(["--target-pages", str(target_pages)])
-        result = subprocess.run(cmd, check=False, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace")
+        result = subprocess.run(cmd, check=False, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         output_file = Path(output_path)
         if output_file.is_file():
             return json.loads(output_file.read_text(encoding="utf-8"))
@@ -3401,7 +3460,7 @@ class OrchestratorRuntime:
             "--output",
             output_path,
         ]
-        subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace")
+        subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         return json.loads(Path(output_path).read_text(encoding="utf-8"))
 
 

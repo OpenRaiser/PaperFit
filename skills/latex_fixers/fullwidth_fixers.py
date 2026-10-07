@@ -16,6 +16,8 @@ Full-Width and Reference Separation Fixers
 - 通过自动弹性列（X 格式）、动态字号、列间距微调实现满宽
 """
 
+from __future__ import annotations
+
 import re
 from typing import Any, Dict, Tuple
 

@@ -116,7 +116,8 @@ def fix_escaped_identifiers(tex: str) -> Tuple[str, int]:
         arg = match.group(2)
         if "\\_" in arg:
             count += arg.count("\\_")
-            return f"{match.group(1)}{{{arg.replace('\\_', '_')}}}"
+            repaired_arg = arg.replace("\\_", "_")
+            return f"{match.group(1)}{{{repaired_arg}}}"
         return match.group(0)
 
     return _ID_CMD_RE.sub(_fix, tex), count

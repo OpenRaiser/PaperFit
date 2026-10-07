@@ -36,6 +36,7 @@ try:
         ensure_tabularx_package,
         find_first_tabular_span,
         is_plain_alignment_column_spec,
+        mask_latex_comments,
         read_braced_group,
         remove_resizebox_around_first_tabular,
         rewrite_first_tabular_to_tabular_star,
@@ -52,6 +53,7 @@ except ModuleNotFoundError:
         ensure_tabularx_package,
         find_first_tabular_span,
         is_plain_alignment_column_spec,
+        mask_latex_comments,
         read_braced_group,
         remove_resizebox_around_first_tabular,
         rewrite_first_tabular_to_tabular_star,
@@ -1324,23 +1326,111 @@ def add_floatbarrier_to_preamble(
 # B2：浮动体大小不适配栏宽
 # ============================================================
 
+def _graphics_commands_in_block(block: str) -> List[Dict[str, Any]]:
+    """Locate active graphics and effective width keys without guessing a panel."""
+    active = mask_latex_comments(block)
+    commands: List[Dict[str, Any]] = []
+    for match in re.finditer(r'\\includegraphics\*?(?![A-Za-z])', active):
+        cursor = match.end()
+        while cursor < len(active) and active[cursor].isspace():
+            cursor += 1
+        options_start = None
+        options_end = None
+        widths = []
+        if cursor < len(active) and active[cursor] == "[":
+            options_start = cursor
+            brace_depth = 0
+            index = cursor + 1
+            part_start = index
+            while index < len(active):
+                char = active[index]
+                if char == "\\":
+                    index += 2
+                    continue
+                if char == "{":
+                    brace_depth += 1
+                elif char == "}":
+                    brace_depth = max(0, brace_depth - 1)
+                if brace_depth == 0 and char in ",]":
+                    part = active[part_start:index]
+                    width = re.fullmatch(r'\s*width\s*=\s*(.*?)\s*', part, re.DOTALL)
+                    if width:
+                        widths.append({"start": part_start + width.start(1),
+                                       "end": part_start + width.end(1), "value": width.group(1)})
+                    part_start = index + 1
+                    if char == "]":
+                        options_end = index
+                        cursor = index + 1
+                        break
+                index += 1
+            if options_end is None:
+                continue
+        while cursor < len(active) and active[cursor].isspace():
+            cursor += 1
+        asset = read_braced_group(active, cursor)
+        if asset is None:
+            continue
+        commands.append({"start": match.start(), "command_end": match.end(), "end": asset[1], "options_start": options_start,
+                         "options_end": options_end, "widths": widths})
+    return commands
+
+
+def _graphics_is_inside_caption(block: str, position: int) -> bool:
+    active = mask_latex_comments(block)
+    for caption in re.finditer(r'\\caption\*?(?![A-Za-z])', active):
+        cursor = caption.end()
+        while cursor < len(active) and active[cursor].isspace():
+            cursor += 1
+        if cursor < len(active) and active[cursor] == "[":
+            # Both the short and full caption may contain decorative graphics.
+            short_start = cursor
+            brace_depth, bracket_depth = 0, 1
+            cursor += 1
+            while cursor < len(active) and bracket_depth:
+                char = active[cursor]
+                if char == "\\":
+                    cursor += 2
+                    continue
+                if char == "{":
+                    brace_depth += 1
+                elif char == "}":
+                    brace_depth = max(0, brace_depth - 1)
+                elif brace_depth == 0 and char == "[":
+                    bracket_depth += 1
+                elif brace_depth == 0 and char == "]":
+                    bracket_depth -= 1
+                cursor += 1
+            if bracket_depth:
+                continue
+            if short_start < position < cursor:
+                return True
+            while cursor < len(active) and active[cursor].isspace():
+                cursor += 1
+        span = read_braced_group(active, cursor)
+        if span and span[0] < position < span[1]:
+            return True
+    return False
+
+
 def fix_figure_width_mismatch(
     tex_content: str,
     figure_label: str,
     template_type: str = "single_column",
+    visual_width_subtype: Optional[str] = None,
 ) -> Tuple[str, Optional[FixResult]]:
     r"""
     修复图片宽度不适配栏宽问题
 
     策略优先级:
-    1. 设置宽度为 \linewidth
-    2. 区分单栏/跨栏 (双栏模板)
-    3. 设置高度 + keepaspectratio
+    1. 钳制已定位浮动体内明确超出可用栏宽的图片
+    2. 有明确视觉 underfill 证据时仅扩大唯一非图注主体图片
+    3. 无尺寸证据时保留多图容器，单主体保持旧版宽度规范行为
 
     Args:
         tex_content: .tex 文件内容
         figure_label: 图片标签
         template_type: 模板类型 ("single_column" | "double_column")
+        visual_width_subtype: 执行计划中的已定位视觉宽度类型
 
     Returns:
         (修改后的内容，修复结果)
@@ -1353,69 +1443,98 @@ def fix_figure_width_mismatch(
     if block_start is None or block_end is None:
         return tex_content, None
     block = tex_content[block_start:block_end]
-    include_match = re.search(r'\\includegraphics(?:\[[^\]]*\])?\{[^}]+\}', block)
-    if not include_match:
+    graphics = _graphics_commands_in_block(block)
+    if not graphics:
         return tex_content, None
-    include_graphic = include_match.group(0)
-
-    
-    
-    
-    
-    overscale = re.search(
-        r'width=([0-9]*\.?[0-9]+)\s*\\(linewidth|columnwidth|textwidth)',
-        include_graphic,
-    )
-    if overscale and float(overscale.group(1)) > 1.0:
-        factor = overscale.group(1)
-        unit = "\\" + overscale.group(2)
-        new_graphic = re.sub(
-            r'width=[0-9]*\.?[0-9]+\s*\\(?:linewidth|columnwidth|textwidth)',
-            lambda _match: f"width={unit}",
-            include_graphic,
-            count=1,
+    # The last repeated key is effective in graphicx. An earlier oversized key
+    # must not expand an author's final underfill; each panel has its own keys.
+    edits = []
+    for graphic in graphics:
+        if not graphic["widths"]:
+            continue
+        effective = graphic["widths"][-1]
+        value = effective["value"].strip()
+        if value.startswith("{") and value.endswith("}"):
+            value = value[1:-1].strip()
+        overscale = re.fullmatch(r'([0-9]*\.?[0-9]+)\s*\\(linewidth|columnwidth|textwidth)', value)
+        if overscale is None or float(overscale.group(1)) <= 1.0:
+            continue
+        unit = overscale.group(2)
+        if unit == "textwidth" and env_name != "figure*":
+            continue
+        edits.append((effective["start"], effective["end"], "\\" + unit))
+    if edits:
+        updated_block = block
+        for start, end, replacement in reversed(edits):
+            updated_block = updated_block[:start] + replacement + updated_block[end:]
+        modified_content = tex_content[:block_start] + updated_block + tex_content[block_end:]
+        return modified_content, FixResult(
+            defect_id="B2", object_name=figure_label,
+            action=f"超宽图钳制：在已定位浮动体内修正 {len(edits)} 个实际生效的 K>1 栏宽系数（含图注内图片）",
+            before=" | ".join(block[start:end] for start, end, _ in edits)[:120],
+            after=" | ".join(replacement for _, _, replacement in edits)[:120],
+            success=True,
         )
-        if new_graphic != include_graphic:
-            updated_block = block.replace(include_graphic, new_graphic, 1)
-            modified_content = tex_content[:block_start] + updated_block + tex_content[block_end:]
-            return modified_content, FixResult(
-                defect_id="B2",
-                object_name=figure_label,
-                action=f"超宽图钳制：width={factor}{unit} → width={unit}（超出可用宽度 {factor} 倍）",
-                before=include_graphic[:70] + ("..." if len(include_graphic) > 70 else ""),
-                after=new_graphic[:70] + ("..." if len(new_graphic) > 70 else ""),
-                success=True,
-            )
+
+    if visual_width_subtype == "underfilled_width":
+        body_graphics = [graphic for graphic in graphics
+                         if not _graphics_is_inside_caption(block, graphic["start"])]
+        if len(body_graphics) != 1 or not body_graphics[0]["widths"]:
+            return tex_content, None
+        effective = body_graphics[0]["widths"][-1]
+        value = effective["value"].strip()
+        if value.startswith("{") and value.endswith("}"):
+            value = value[1:-1].strip()
+        underfill = re.fullmatch(r'([0-9]*\.?[0-9]+)\s*\\(linewidth|columnwidth|textwidth)', value)
+        if underfill is None or not 0.0 < float(underfill.group(1)) < 1.0:
+            return tex_content, None
+        if underfill.group(2) == "textwidth" and env_name != "figure*":
+            return tex_content, None
+        target_width = r"\textwidth" if template_type == "double_column" and env_name == "figure*" else r"\linewidth"
+        updated_block = block[:effective["start"]] + target_width + block[effective["end"]:]
+        return tex_content[:block_start] + updated_block + tex_content[block_end:], FixResult(
+            defect_id="B2", object_name=figure_label,
+            action=f"依据 underfilled_width 视觉证据将唯一非图注主体图片宽度设为 {target_width}",
+            before=block[effective["start"]:effective["end"]], after=target_width,
+            success=True,
+        )
+
+    # Multi-panel figures and caption icons need their own evidence. Changing
+    # the first graphic can enlarge an unrelated panel and leave the defect.
+    if len(graphics) != 1:
+        return tex_content, None
+    graphic = graphics[0]
+    if len(graphic["widths"]) > 1 or _graphics_is_inside_caption(block, graphic["start"]):
+        return tex_content, None
+    include_graphic = block[graphic["start"]:graphic["end"]]
+    if graphic["widths"] and "\\textwidth" in graphic["widths"][-1]["value"] and env_name != "figure*":
+        return tex_content, None
 
     target_width = r"\textwidth" if template_type == "double_column" and env_name.endswith("*") else r"\linewidth"
-    width_match = re.search(r'width=([^\s,\]]+)', include_graphic)
+    width_match = graphic["widths"][-1] if graphic["widths"] else None
     if width_match:
-        current_width = width_match.group(1).strip()
+        current_width = width_match["value"].strip()
         if current_width == target_width:
             return tex_content, None
 
     if width_match:
         # 替换现有宽度为目标栏宽；跨栏图必须显式使用 \textwidth。
-        new_graphic = re.sub(
-            r'width=[^\s,\]]+',
-            lambda _match: f"width={target_width}",
-            include_graphic
-        )
+        relative_start = width_match["start"] - graphic["start"]
+        relative_end = width_match["end"] - graphic["start"]
+        new_graphic = include_graphic[:relative_start] + target_width + include_graphic[relative_end:]
     else:
         # 没有 width 参数，添加
         # 检查是否有可选参数
-        if include_graphic.startswith('\\includegraphics['):
+        if graphic["options_end"] is not None:
             # 有可选参数，在 ] 前插入
-            bracket_pos = include_graphic.find(']')
+            bracket_pos = graphic["options_end"] - graphic["start"]
             new_graphic = include_graphic[:bracket_pos] + f',width={target_width}' + include_graphic[bracket_pos:]
         else:
             # 没有可选参数，添加
-            new_graphic = include_graphic.replace(
-                '\\includegraphics',
-                f'\\includegraphics[width={target_width}]'
-            )
+            insert_at = graphic["command_end"] - graphic["start"]
+            new_graphic = include_graphic[:insert_at] + f'[width={target_width}]' + include_graphic[insert_at:]
 
-    updated_block = block.replace(include_graphic, new_graphic, 1)
+    updated_block = block[:graphic["start"]] + new_graphic + block[graphic["end"]:]
     modified_content = tex_content[:block_start] + updated_block + tex_content[block_end:]
 
     return modified_content, FixResult(
@@ -2199,6 +2318,7 @@ def fix_float_defects(
                     active_content,
                     figure_label=object_name,
                     template_type=template_type,
+                    visual_width_subtype=defect.get("visual_width_subtype"),
                 )
             elif is_table_like:
                 new_content, fix_result = fix_table_width_mismatch(

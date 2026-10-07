@@ -26,6 +26,28 @@ except ImportError:
 
 from transactional_patch import atomic_write_text
 
+try:
+    from skills.latex_fixers.shared_table_helpers import (
+        convert_last_text_column_to_x,
+        count_table_columns,
+        find_first_tabular_span,
+        find_resizebox_wrapping_span,
+        mask_latex_comments,
+        tighten_tabcolsep_for_overflow,
+    )
+except ModuleNotFoundError:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from skills.latex_fixers.shared_table_helpers import (
+        convert_last_text_column_to_x,
+        count_table_columns,
+        find_first_tabular_span,
+        find_resizebox_wrapping_span,
+        mask_latex_comments,
+        tighten_tabcolsep_for_overflow,
+    )
+
 
 # ============================================================
 # 数据结构定义
@@ -1032,79 +1054,72 @@ def add_hyphenation_points(word: str) -> str:
 
 
 def _count_top_level_table_columns(column_spec: str) -> int:
-    spec = column_spec.strip("{}")
-    brace_depth = 0
-    count = 0
-    idx = 0
-    while idx < len(spec):
-        char = spec[idx]
-        if char == "{":
-            brace_depth += 1
-        elif char == "}":
-            brace_depth = max(0, brace_depth - 1)
-        elif brace_depth == 0 and char in {"l", "r", "c", "X"}:
-            count += 1
-        elif brace_depth == 0 and char in {"p", "m", "b"} and idx + 1 < len(spec) and spec[idx + 1] == "{":
-            count += 1
-        idx += 1
-    return count
+    return count_table_columns(column_spec)
 
 
-def _tighten_table_block_layout(block: str) -> Tuple[str, List[str]]:
+def _tighten_table_block_layout(
+    block: str, overflow_amount: float = 0, initial_padding_pt: Optional[float] = 6.0,
+) -> Tuple[str, List[str]]:
     actions: List[str] = []
-    tabular_match = re.search(r"\\begin\{tabularx?\}(?:\{[^}]+\})?(\{[^}]+\})", block)
-    if not tabular_match:
+    tabular = find_first_tabular_span(block)
+    if not tabular:
         return block, actions
-
-    column_spec = tabular_match.group(1)
-    column_count = _count_top_level_table_columns(column_spec)
     updated = block
 
     # \resizebox{1.19\textwidth}{!} 之类的过宽缩放是表格溢出的直接原因；
     # resizebox 内换 tabularx 不起作用（外层已强制总宽），必须先钳制缩放系数
+    resize_span = find_resizebox_wrapping_span(block, tabular["begin_start"], tabular["end_end"])
+    resize_prefix = mask_latex_comments(block[resize_span[0]:tabular["begin_start"]]) if resize_span else ""
     over_scale = re.search(
         r"\\resizebox\{\s*([0-9]*\.?[0-9]+)\s*\\(textwidth|linewidth|columnwidth)\s*\}",
-        updated,
+        resize_prefix,
     )
     if over_scale:
         factor = float(over_scale.group(1))
         if factor > 1.0:
+            scale_start = resize_span[0] + over_scale.start()
+            scale_end = resize_span[0] + over_scale.end()
             updated = (
-                updated[: over_scale.start()]
+                updated[: scale_start]
                 + f"\\resizebox{{\\{over_scale.group(2)}}}"
-                + updated[over_scale.end() :]
+                + updated[scale_end :]
             )
             actions.append(f"clamped resizebox scale {factor} to 1.0")
+            # Recompile this isolated correction before spending more padding.
+            return updated, actions
 
-    if column_count >= 6 and r"\begin{table*}" not in updated:
-        updated = re.sub(r"\\begin\{table\}(?:\[[^\]]*\])?", r"\\begin{table*}[t]", updated, count=1)
-        updated = updated.replace(r"\end{table}", r"\end{table*}", 1)
-        updated = updated.replace(r"\linewidth", r"\textwidth")
-        actions.append("promoted wide table to table*")
-
-    if column_count >= 6 and r"\small" not in updated and r"\footnotesize" not in updated:
-        begin_match = re.search(r"\\begin\{table\*?\}(?:\[[^\]]*\])?", updated)
-        if begin_match:
-            updated = updated[: begin_match.end()] + "\n\\small" + updated[begin_match.end() :]
-            actions.append("added \\small to wide table")
-
-    tabcolsep_match = re.search(r"\\setlength\{\\tabcolsep\}\{([0-9.]+)mm\}", updated)
-    if tabcolsep_match:
-        current = float(tabcolsep_match.group(1))
-        if current > 2.0:
-            updated = (
-                updated[: tabcolsep_match.start()]
-                + r"\setlength{\tabcolsep}{2mm}"
-                + updated[tabcolsep_match.end() :]
-            )
-            actions.append("tightened \\tabcolsep to 2mm")
-    elif column_count >= 5:
-        centering_match = re.search(r"\\centering", updated)
-        insert_at = centering_match.end() if centering_match else 0
-        updated = updated[:insert_at] + "\n\\setlength{\\tabcolsep}{2mm}" + updated[insert_at:]
-        actions.append("inserted \\tabcolsep 2mm")
+    padding = tighten_tabcolsep_for_overflow(updated, overflow_amount, initial_padding_pt)
+    if padding:
+        updated = padding["updated"]
+        actions.append(f"measured table padding: {padding['before']} -> {padding['after']} ({padding['columns']} columns)")
 
     return updated, actions
+
+
+def _inherited_table_padding(tex_prefix: str) -> Optional[float]:
+    """Use known explicit padding; don't overwrite a template's unknown setting."""
+    active = mask_latex_comments(tex_prefix)
+    active = re.sub(r"\\begin\{(table\*?|sidewaystable|figure\*?)\}.*?\\end\{\1\}", "", active, flags=re.DOTALL)
+    settings = list(re.finditer(r"\\(?:setlength|addtolength)\s*\{\s*\\tabcolsep\s*\}\s*\{([^}]*)\}", active))
+    value = 6.0
+    for setting in settings:
+        # Skip macro definitions and complete local brace groups.
+        prefix = re.sub(r"\\[{}]", "", active[:setting.start()])
+        if prefix.count("{") != prefix.count("}"):
+            continue
+        dimension = re.fullmatch(r"\s*([+-]?[0-9]+(?:\.[0-9]+)?)\s*(pt|mm)\s*", setting.group(1))
+        if dimension is None:
+            value = None
+            continue
+        amount = float(dimension.group(1)) * (72.27 / 25.4 if dimension.group(2) == "mm" else 1.0)
+        if setting.group(0).startswith(r"\setlength"):
+            value = amount
+        elif value is not None:
+            value += amount
+    # Direct assignments/macros can change padding without setlength.
+    if re.search(r"\\tabcolsep\s*(?:=|[0-9])", active):
+        return None
+    return value
 
 
 # ============================================================
@@ -1115,28 +1130,28 @@ def fix_table_overflow(
     tex_content: str,
     table_label: Optional[str] = None,
     line_number: Optional[int] = None,
+    overflow_amount: float = 0,
 ) -> Tuple[str, Optional[FixResult]]:
     """
     修复表格单元格溢出
 
-    策略优先级:
-    1. 改用 tabularx 环境
-    2. 手动设置列宽 (p{宽度})
-    3. 精简表头
-    4. 调整字号
+    有量化溢出时，先修正无效的外层超宽系数，再按列数减少必要的局部
+    tabcolsep，保留至少 3pt。保留数值列对齐、字号和浮动体栏制。
+    无量化信息的旧调用保留 tabularx 兼容策略。
 
     Args:
         tex_content: .tex 文件内容
         table_label: 表格标签 (如 "tab:results")
         line_number: 溢出行号
+        overflow_amount: 日志中的溢出宽度（pt）
 
     Returns:
         (修改后的内容，修复结果)
     """
     # 定位表格环境：table+tabular 块（label 与行号在选择阶段使用）
-    pattern = r'(\\begin\{(?:table|table\*|sidewaystable)\}(?:\[[htbp]+\])?.*?)(\\begin\{tabular\})(\{[^}]+\})(.*?)(\\end\{tabular\})(.*?\\end\{(?:table|table\*|sidewaystable)\})'
-
-    matches = list(re.finditer(pattern, tex_content, re.DOTALL))
+    pattern = r'\\begin\{(table\*?|sidewaystable)\}(?:\[[^\]]*\])?.*?\\end\{\1\}'
+    matches = [match for match in re.finditer(pattern, mask_latex_comments(tex_content), re.DOTALL)
+               if find_first_tabular_span(match.group(0)) is not None]
 
     if not matches:
         return tex_content, None
@@ -1152,10 +1167,11 @@ def fix_table_overflow(
         labeled = [
             match
             for match in matches
-            if f"\\label{{{table_label}}}" in match.group(0)
+            if re.search(r"\\label\s*\{\s*" + re.escape(table_label) + r"\s*\}", match.group(0))
         ]
-        if labeled:
-            candidates = labeled
+        if not labeled:
+            return tex_content, None
+        candidates = labeled
 
     target_match = candidates[0]
     if line_number is not None:
@@ -1176,12 +1192,14 @@ def fix_table_overflow(
                 ),
             )
 
-    full_table = target_match.group(0)
-    column_spec = target_match.group(3)
+    full_table = tex_content[target_match.start():target_match.end()]
+    tabular = find_first_tabular_span(full_table)
+    column_spec = tabular["column_spec"]
 
-    tightened_table, tighten_actions = _tighten_table_block_layout(full_table)
+    inherited_padding = _inherited_table_padding(tex_content[:target_match.start()])
+    tightened_table, tighten_actions = _tighten_table_block_layout(full_table, overflow_amount, inherited_padding)
     if tighten_actions:
-        modified_content = tex_content.replace(full_table, tightened_table, 1)
+        modified_content = tex_content[:target_match.start()] + tightened_table + tex_content[target_match.end():]
         return modified_content, FixResult(
             defect_id="D1",
             object_name=table_label or "表格",
@@ -1192,33 +1210,27 @@ def fix_table_overflow(
             success=True,
         )
 
+    # Once a measured numeric table exhausts safe padding, avoid replacing a
+    # numeric alignment column with X or changing the template/font as a guess.
+    if overflow_amount:
+        return tex_content, None
+
     # 策略 1: 改用 tabularx
     # 检查是否有文本列 (l, r, c) 可以改为 X 列
     if _has_top_level_text_columns(column_spec):
         # 将 tabular 改为 tabularx，将部分列改为 X 列
         new_column_spec = convert_to_tabularx_columns(column_spec)
-        begin_pattern = re.compile(r"\\begin\{tabular\}\s*" + re.escape(column_spec))
         # 替换文本含 \linewidth / 列规格的反斜杠，必须用函数替换，
         # 走模板替换会因非法转义（如 \l）抛 re.error。
-        begin_replacement = f"\\begin{{tabularx}}{{\\linewidth}}{new_column_spec}"
-        new_table, begin_count = begin_pattern.subn(
-            lambda _match: begin_replacement,
-            full_table,
-            count=1,
-        )
-        if begin_count <= 0:
+        if new_column_spec == column_spec:
             return tex_content, None
+        width = r"\textwidth" if target_match.group(1) == "table*" else r"\linewidth"
+        begin_replacement = f"\\begin{{tabularx}}{{{width}}}{tabular.get('optional_position', '')}{new_column_spec}"
+        new_table = (full_table[:tabular["begin_start"]] + begin_replacement
+                     + full_table[tabular["column_end"]:tabular["end_start"]]
+                     + r"\end{tabularx}" + full_table[tabular["end_end"]:])
 
-        new_table, end_count = re.subn(
-            r"\\end\{tabular\}",
-            lambda _match: "\\end{tabularx}",
-            new_table,
-            count=1,
-        )
-        if end_count <= 0:
-            return tex_content, None
-
-        modified_content = tex_content.replace(full_table, new_table, 1)
+        modified_content = tex_content[:target_match.start()] + new_table + tex_content[target_match.end():]
         modified_content = _ensure_tabularx_package(modified_content)
         return modified_content, FixResult(
             defect_id="D1",
@@ -1230,42 +1242,6 @@ def fix_table_overflow(
             success=True,
         )
 
-    # 策略 2: 添加\small 字号
-    if '\\small' not in full_table and '\\footnotesize' not in full_table:
-        # 在表格环境内、tabular 之前添加 \small
-        tabular_match = re.search(r'\\begin\{tabular\}', full_table)
-        if tabular_match:
-            insert_pos = tabular_match.start()
-            new_table = full_table[:insert_pos] + "\\small\n" + full_table[insert_pos:]
-            modified_content = tex_content.replace(full_table, new_table, 1)
-            return modified_content, FixResult(
-                defect_id="D1",
-                object_name=table_label or "表格",
-                action="在表格环境内添加\\small 字号以压缩表格",
-                before=full_table[:100] + "...",
-                after=new_table[:100] + "...",
-                line_number=line_number,
-                success=True,
-            )
-
-        table_env_match = re.search(
-            r'\\begin\{(table[^}]*)\}(\[[htbp]+\])?',
-            full_table
-        )
-        if table_env_match:
-            insert_pos = table_env_match.end(0)
-            new_table = full_table[:insert_pos] + "\n\\small" + full_table[insert_pos:]
-            modified_content = tex_content.replace(full_table, new_table, 1)
-            return modified_content, FixResult(
-                defect_id="D1",
-                object_name=table_label or "表格",
-                action="在表格环境内添加\\small 字号以压缩表格",
-                before=full_table[:100] + "...",
-                after=new_table[:100] + "...",
-                line_number=line_number,
-                success=True,
-            )
-
     return tex_content, None
 
 
@@ -1275,30 +1251,7 @@ def convert_to_tabularx_columns(column_spec: str) -> str:
 
     策略：将最宽的文本列改为 X 列
     """
-    # 移除两侧的 { }
-    spec = column_spec.strip('{}')
-
-    # 统计列类型
-    text_columns = []  # l, r, c 列的位置
-    brace_depth = 0
-    for i, c in enumerate(spec):
-        if c == '{':
-            brace_depth += 1
-            continue
-        if c == '}':
-            brace_depth = max(0, brace_depth - 1)
-            continue
-        if brace_depth == 0 and c in 'lrc':
-            text_columns.append((i, c))
-
-    if not text_columns:
-        return column_spec
-
-    # 将最后一个文本列改为 X 列 (通常是描述性列)
-    last_text_idx, last_type = text_columns[-1]
-    new_spec = spec[:last_text_idx] + 'X' + spec[last_text_idx + 1:]
-
-    return '{' + new_spec + '}'
+    return convert_last_text_column_to_x(column_spec)
 
 
 def _has_top_level_text_columns(column_spec: str) -> bool:
@@ -1575,6 +1528,7 @@ def fix_overflow_defects(
                     tex_content,
                     table_label=object_name if object_name.startswith("tab:") else None,
                     line_number=line_number,
+                    overflow_amount=overflow_amount,
                 )
             elif str(defect.get("proposed_action") or "") == "remove_preamble_textheight_shrink" or _line_is_preamble_textheight_shrink(tex_content, line_number):
                 
@@ -1593,6 +1547,7 @@ def fix_overflow_defects(
                 new_content, fix_result = fix_table_overflow(
                     tex_content,
                     line_number=line_number,
+                    overflow_amount=overflow_amount,
                 )
             else:
                 new_content, fix_result = fix_paragraph_overflow(

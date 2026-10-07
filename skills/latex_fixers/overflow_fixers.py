@@ -9,6 +9,8 @@ Overflow Repair Fixers - Category D 缺陷修复
 处理 overfull hbox、公式溢出、URL 溢出等问题。
 """
 
+from __future__ import annotations
+
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple

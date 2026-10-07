@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from diagnosis_ingest import findings_to_candidates, parse_host_diagnosis
 from runtime_repair_risk import annotate_repair_candidates
+from visual_action_plan import normalized_visual_object_kind, vlm_table_size_semantics
 
 
 def _load_json(path: Optional[str]) -> Dict[str, Any]:
@@ -413,7 +414,7 @@ def _visual_b2_finding_priority_items(visual_report: Dict[str, Any]) -> List[Dic
         items.append(
             {
                 "page": int(finding.get("page") or 0),
-                "object_kind": str(metrics.get("object_kind") or "figure_like"),
+                "object_kind": normalized_visual_object_kind(metrics.get("object_kind") or "figure_like"),
                 "bbox": bbox,
                 "priority_score": priority_score,
                 "severity": str(finding.get("severity") or "major"),
@@ -1300,7 +1301,13 @@ def _build_space_candidates(
 
 
 def _build_consistency_candidates(visual_report: Dict[str, Any]) -> List[Dict[str, Any]]:
-    families = _active_visual_families(visual_report)
+    # VLM C1 means a visually undersized table, not proven resizebox/style
+    # inconsistency. Its action-plan entry requires review; do not bypass that
+    # decision by generating a global consistency repair from the raw code.
+    families = _active_visual_families({
+        "findings": [finding for finding in visual_report.get("findings") or []
+                     if vlm_table_size_semantics(finding) != "undersized_table"],
+    })
     candidates: List[Dict[str, Any]] = []
     if "C1" in families:
         candidates.append(
@@ -1550,13 +1557,22 @@ def _promote_visual_action_plan(visual_signal_report: str) -> List[Dict[str, Any
             extra_fields["current_pages"] = page or 0
         elif family == "A4":
             extra_fields["height_difference"] = 0.15  # 默认值
+        elif family == "B2" and entry.get("visual_width_subtype") in {"overflow_width", "underfilled_width"}:
+            # The float executor requires an explicit width subtype. Preserve
+            # the resolved action-plan evidence instead of dropping the route.
+            extra_fields["visual_width_subtype"] = entry["visual_width_subtype"]
+            for key in ("source_taxonomy_defect_id", "source_defect_type", "routing_reason"):
+                if entry.get(key) is not None:
+                    extra_fields[key] = entry[key]
 
+        evidence = entry.get("evidence") or []
+        description = str(evidence[0]) if isinstance(evidence, (list, tuple)) and evidence else str(evidence or "")
         candidates.append({
             "candidate_type": "visual_plan",
             "page": page,
             "target": {
                 "label": label,
-                "object_kind": entry.get("object_type"),
+                "object_kind": normalized_visual_object_kind(entry.get("object_type")),
                 "bbox": entry.get("bbox"),
             },
             "defect_family": family,
@@ -1564,7 +1580,7 @@ def _promote_visual_action_plan(visual_signal_report: str) -> List[Dict[str, Any
             "severity": severity,
             "proposed_action": proposed_action,
             "rationale": f"visual_action_plan[{finding_id}]: {entry.get('defect_type', family)}",
-            "description": str(entry.get("evidence") or [""])[0:1][0] if entry.get("evidence") else "",
+            "description": description,
             "finding_id": finding_id,
             "anchor_status": entry.get("anchor_status"),
             "visual_confidence": confidence,

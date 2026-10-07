@@ -365,6 +365,7 @@ def build_runtime_status(
         "visual": {
             "total_findings": int((visual_report.get("summary") or {}).get("total_findings") or 0),
             "b2_width_findings": (visual_report.get("summary") or {}).get("b2_width_findings"),
+            "vlm_diagnosis": visual_report.get("vlm_diagnosis") or {},
         },
         "defect_summary": {
             "initial_total": int(defect_summary.get("initial_total") or 0),
