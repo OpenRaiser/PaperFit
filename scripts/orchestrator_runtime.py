@@ -1416,18 +1416,41 @@ class OrchestratorRuntime:
                                 attribution or {},
                             )
                         else:
-                            state = self._rollback_after_post_repair_hard_guard_failure(
+                            
+                            
+                            
+                            
+                            
+                            
+                            heal = self._heal_endmatter_float_intrusion(
                                 project_root=project_root,
-                                rollback_target=str(snapshot.get("rollback_target") or ""),
-                                failure=post_repair_hard_guard_failure,
+                                task_spec=task_spec,
+                                post_observe=post_observe,
                                 emit_event=emit_runtime_event,
                                 runtime_actions=runtime_actions,
                             )
-                            self._annotate_round_record_rollback(
-                                round_execution_records,
-                                attribution,
-                                fallback_scope="full_round",
-                            )
+                            if heal.get("applied"):
+                                post_observe = self._run_visual_only_observe_actions(
+                                    task_spec=task_spec,
+                                    emit_event=emit_runtime_event,
+                                )
+                                post_repair_hard_guard_failure = self._post_repair_hard_guard_failure(
+                                    post_observe=post_observe,
+                                    rollback_target=str(snapshot.get("rollback_target") or ""),
+                                )
+                            if post_repair_hard_guard_failure is not None:
+                                state = self._rollback_after_post_repair_hard_guard_failure(
+                                    project_root=project_root,
+                                    rollback_target=str(snapshot.get("rollback_target") or ""),
+                                    failure=post_repair_hard_guard_failure,
+                                    emit_event=emit_runtime_event,
+                                    runtime_actions=runtime_actions,
+                                )
+                                self._annotate_round_record_rollback(
+                                    round_execution_records,
+                                    attribution,
+                                    fallback_scope="full_round",
+                                )
                         runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "artifacts_observed")
                         emit_runtime_event(
                             "phase_completed",
@@ -1754,6 +1777,69 @@ class OrchestratorRuntime:
             return result_payload
         finally:
             os.chdir(cwd_before)
+
+    def _heal_endmatter_float_intrusion(
+        self,
+        *,
+        project_root: Path,
+        task_spec: TaskSpec,
+        post_observe: Dict[str, Any],
+        emit_event: Callable[..., Dict[str, Any]],
+        runtime_actions: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """硬门禁检出的 endmatter 浮动入侵：先治疗再复检，而不是直接整轮回滚。
+
+        入侵的根源是文档级放置问题（浮动体滞留到文献区），常规候选级归因
+        找不到"致害候选"——谁都没害，是布局本身放不下。fix_float_defects 的
+        B1 去堆叠（[p]→[htbp] + 参数放宽 + 文献前 clearpage 冲刷）针对的
+        正是这一层。治疗幂等（标记防重入），复检由调用方重跑 post observe。
+        """
+        guards = post_observe.get("visual_hard_guards") or {}
+        intrusions = guards.get("intrusions") or []
+        if not intrusions:
+            return {"applied": False, "reason": "no intrusions in guard evidence"}
+        try:
+            from float_fixers import fix_float_defects
+
+            defects = [
+                {
+                    "defect_id": "B1",
+                    "page": int(item.get("page") or 0),
+                    "severity": "major",
+                    "object": None,
+                    "description": f"endmatter float intrusion: {', '.join(item.get('captions') or [])}",
+                }
+                for item in intrusions
+                if isinstance(item, dict)
+            ]
+            main_tex_path = project_root / task_spec.main_tex
+            before = main_tex_path.read_text(encoding="utf-8", errors="replace") if main_tex_path.is_file() else ""
+            report = fix_float_defects(str(main_tex_path), defects)
+            changes = report.to_dict().get("changes") if hasattr(report, "to_dict") else None
+            applied = bool(changes) or (main_tex_path.is_file() and main_tex_path.read_text(encoding="utf-8", errors="replace") != before)
+            self._record_runtime_action(
+                "endmatter_destack_heal",
+                {
+                    "success": bool(applied),
+                    "input_artifacts": {"main_tex": task_spec.main_tex, "intrusions": intrusions},
+                    "changes": len(changes or []),
+                },
+                phase="verify",
+                state="VERIFYING",
+                emit_event=emit_event,
+                runtime_actions=runtime_actions,
+            )
+            return {"applied": bool(applied), "changes": len(changes or [])}
+        except Exception as exc:  # 治疗失败不改变原回滚语义
+            self._record_runtime_action(
+                "endmatter_destack_heal",
+                {"success": False, "error": f"{type(exc).__name__}: {exc}"},
+                phase="verify",
+                state="VERIFYING",
+                emit_event=emit_event,
+                runtime_actions=runtime_actions,
+            )
+            return {"applied": False, "error": f"{type(exc).__name__}: {exc}"}
 
     def _post_repair_hard_guard_failure(
         self,
