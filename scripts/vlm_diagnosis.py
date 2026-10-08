@@ -152,6 +152,59 @@ class VLMResponseError(ValueError):
     """A response is unusable as layout evidence, rather than defect-free."""
 
 
+class VLMTransportError(RuntimeError):
+    """Typed HTTP failure; safe metadata contains no remote text or credentials."""
+
+    def __init__(self, status_code: int, *, response_error_code: Optional[str] = None):
+        self.status_code = status_code
+        self.response_error_code = response_error_code
+        self.error_kind = _SERVICE_ERROR_CODES.get(response_error_code) or {
+            401: "authentication", 402: "payment_or_quota", 403: "forbidden",
+        }.get(status_code, "http_error")
+        # Unknown 403s may reject one image rather than the whole account.
+        self.non_retryable = status_code in {401, 402} or (
+            status_code == 403 and self.error_kind in {"authentication", "permission"}
+        )
+        super().__init__(f"VLM API returned HTTP {status_code} ({self.error_kind})")
+
+    def as_report(self) -> Dict[str, Any]:
+        return {"status_code": self.status_code, "error_kind": self.error_kind,
+                "response_error_code": self.response_error_code,
+                "non_retryable": self.non_retryable}
+
+
+_SERVICE_ERROR_CODES = {
+    "invalid_api_key": "authentication", "authentication_error": "authentication",
+    "unauthorized": "authentication", "permission_denied": "permission",
+    "permission_error": "permission", "access_denied": "permission",
+    "insufficient_permissions": "permission", "account_disabled": "permission",
+    "account_suspended": "permission", "insufficient_balance": "payment_or_quota",
+    "insufficient_quota": "payment_or_quota", "quota_exceeded": "payment_or_quota",
+    "credit_balance_too_low": "payment_or_quota", "payment_required": "payment_or_quota",
+}
+
+
+def _http_transport_error(exc: HTTPError) -> VLMTransportError:
+    code = None
+    if exc.code in {401, 402, 403}:
+        # Inspect a bounded body only to recognize known service error codes.
+        # Never preserve arbitrary remote messages, headers or response bodies.
+        try:
+            body = json.loads(exc.read(8192).decode("utf-8"))
+            error = body.get("error") if isinstance(body, dict) else None
+            if isinstance(error, dict):
+                for field in ("code", "type", "message"):
+                    value = error.get(field)
+                    if isinstance(value, str):
+                        value = re.sub(r"[\s-]+", "_", value.strip().lower())
+                        if value in _SERVICE_ERROR_CODES:
+                            code = value
+                            break
+        except (ValueError, UnicodeError, OSError, AttributeError, TypeError):
+            pass
+    return VLMTransportError(exc.code, response_error_code=code)
+
+
 def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
     if not text:
         return None
@@ -347,8 +400,7 @@ class _OpenAICompatibleDiagnosisClient:
                 with direct_opener.open(_build_request(), timeout=self.timeout) as response:
                     result = json.load(response)
         except HTTPError as exc:
-            # Never include remote bodies, headers, request images or keys in logs.
-            raise RuntimeError(f"VLM API returned HTTP {exc.code}") from None
+            raise _http_transport_error(exc) from None
         except URLError:
             raise RuntimeError("VLM API network connection failed") from None
         if not isinstance(result, dict) or not isinstance(result.get("choices"), list) or not result["choices"]:
@@ -544,6 +596,12 @@ def run_vlm_diagnosis(
             except Exception as exc:
                 batch_report["error"] = _safe_error(exc)
                 errors.append(batch_report["error"])
+                if isinstance(exc, VLMTransportError):
+                    batch_report["transport_failure"] = exc.as_report()
+                    report["transport_failure"] = exc.as_report()
+                    if exc.non_retryable:
+                        report["stopped_reason"] = "non_retryable_transport_failure"
+                        break
             finally:
                 for image in images:
                     image.close()
