@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 for _entry in (str(REPO_ROOT / "evaluator"), str(REPO_ROOT / "evaluator" / "lib")):
@@ -319,12 +319,23 @@ class _OpenAICompatibleDiagnosisClient:
         body = json.dumps(payload).encode("utf-8")
         if len(body) > 48 * 1024 * 1024:
             raise ValueError("VLM request exceeds the 48 MiB inline body limit; reduce pages per batch")
-        request = Request(endpoint, data=body, headers={
-            "Authorization": "Bearer " + self.config["api_key"], "Content-Type": "application/json",
-        }, method="POST")
+        def _build_request() -> Request:
+            return Request(endpoint, data=body, headers={
+                "Authorization": "Bearer " + self.config["api_key"], "Content-Type": "application/json",
+            }, method="POST")
+
         try:
-            with urlopen(request, timeout=self.timeout) as response:
-                result = json.load(response)
+            try:
+                with urlopen(_build_request(), timeout=self.timeout) as response:
+                    result = json.load(response)
+            except URLError:
+                # Windows 上 urlopen 会读注册表里的 WinINET 系统代理；代理已停用
+                # 时表现为本地 10061 拒绝连接。退回无代理直连重试一次——工作代理
+                # 仍被优先尊重。注意：代理尝试会 set_proxy 原地改写 Request（host
+                # 被指向代理），直连必须重建请求对象，否则仍会连到本地代理端口。
+                direct_opener = build_opener(ProxyHandler({}))
+                with direct_opener.open(_build_request(), timeout=self.timeout) as response:
+                    result = json.load(response)
         except HTTPError as exc:
             # Never include remote bodies, headers, request images or keys in logs.
             raise RuntimeError(f"VLM API returned HTTP {exc.code}") from None
