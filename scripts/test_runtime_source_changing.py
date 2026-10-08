@@ -15,7 +15,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import orchestrator_runtime  # noqa: E402
-from pdf_test_support import write_test_pdf  # noqa: E402
+from pdf_test_support import write_test_pdf, write_test_png  # noqa: E402
 from orchestrator_runtime import OrchestratorRuntime  # noqa: E402
 from runtime_types import TaskSpec  # noqa: E402
 
@@ -53,7 +53,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 defect_report = root / "data" / "defect_report.json"
                 gatekeeper_report = root / "data" / "gatekeeper_decision.json"
                 page = page_dir / "page_001.png"
-                page.write_bytes(b"png")
+                write_test_png(page)
                 visual_report.write_text(json.dumps({"summary": {"pages_analyzed": 8}}), encoding="utf-8")
                 defect_report.write_text("{}", encoding="utf-8")
                 gatekeeper_report.write_text("{}", encoding="utf-8")
@@ -156,7 +156,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 main_tex.write_text(
                     "\\documentclass{article}\n"
                     "\\begin{document}\n"
-                    "Mutated by fake repair.\n"
+                    "\\noindent Source changing fixture.\n% Mutated by fake repair.\n"
                     "\\end{document}\n",
                     encoding="utf-8",
                 )
@@ -284,7 +284,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 defect_report = root / "data" / "defect_report.json"
                 gatekeeper_report = root / "data" / "gatekeeper_decision.json"
                 repair_plan = root / "data" / "repair_plan.json"
-                page.write_bytes(b"png")
+                write_test_png(page)
                 visual_report.write_text(json.dumps({"summary": {"pages_analyzed": 8}}), encoding="utf-8")
                 defect_report.write_text("{}", encoding="utf-8")
                 gatekeeper_report.write_text(json.dumps({"decision": "CONTINUE"}), encoding="utf-8")
@@ -613,7 +613,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 visual_report = root / "data" / "visual_signal_report.json"
                 defect_report = root / "data" / "defect_report.json"
                 gatekeeper_report = root / "data" / "gatekeeper_decision.json"
-                page.write_bytes(b"png")
+                write_test_png(page)
                 visual_report.write_text(json.dumps({"summary": {"pages_analyzed": 8}}), encoding="utf-8")
                 defect_report.write_text("{}", encoding="utf-8")
                 gatekeeper_report.write_text(json.dumps({"decision": decision}), encoding="utf-8")
@@ -700,7 +700,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 main_tex.write_text(
                     "\\documentclass{article}\n"
                     "\\begin{document}\n"
-                    f"Mutated by fake repair round {execute_calls['count']}.\n"
+                    f"\\noindent Round zero fixture.\n% Mutated by fake repair round {execute_calls['count']}.\n"
                     "\\end{document}\n",
                     encoding="utf-8",
                 )
@@ -800,7 +800,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 visual_report = root / "data" / "visual_signal_report.json"
                 defect_report = root / "data" / "defect_report.json"
                 gatekeeper_report = root / "data" / "gatekeeper_decision.json"
-                page.write_bytes(b"png")
+                write_test_png(page)
                 visual_report.write_text(json.dumps({"summary": {"pages_analyzed": 8}}), encoding="utf-8")
                 defect_report.write_text("{}", encoding="utf-8")
                 gatekeeper_report.write_text(json.dumps({"decision": "CONTINUE"}), encoding="utf-8")
@@ -893,7 +893,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 main_tex.write_text(
                     "\\documentclass{article}\n"
                     "\\begin{document}\n"
-                    "First bounded repair applied.\n"
+                    "\\noindent Scope gate fixture.\n% First bounded repair applied.\n"
                     "\\end{document}\n",
                     encoding="utf-8",
                 )
@@ -993,7 +993,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 page_dir = root / "data" / "pages"
                 page_dir.mkdir(parents=True, exist_ok=True)
                 page = page_dir / "page_001.png"
-                page.write_bytes(b"png")
+                write_test_png(page)
                 visual_report = root / "data" / "visual_signal_report.json"
                 defect_report = root / "data" / "defect_report.json"
                 gatekeeper_report = root / "data" / "gatekeeper_decision.json"

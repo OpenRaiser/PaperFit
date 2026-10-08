@@ -6,8 +6,12 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import struct
+import zlib
+from unittest import mock
 
 import fitz
+from PIL import Image
 
 from scripts.runtime_artifacts import collect_artifact_manifest
 
@@ -18,7 +22,7 @@ from orchestrator_runtime import OrchestratorRuntime
 
 
 class RuntimeRenderCoverageTest(unittest.TestCase):
-    def _manifest(self, root, names, *, readable=True):
+    def _manifest(self, root, names, *, readable=True, corrupt_page=None):
         pages = root / "data/pages"
         pages.mkdir(parents=True)
         main = root / "main.tex"
@@ -32,6 +36,9 @@ class RuntimeRenderCoverageTest(unittest.TestCase):
                 document.save(pdf)
                 for name in names:
                     document[0].get_pixmap().save(pages / name)
+            if corrupt_page:
+                path = pages / corrupt_page
+                path.write_bytes(path.read_bytes()[:64])
         else:
             pdf.write_bytes(b"not a readable PDF")
             for name in names:
@@ -91,6 +98,78 @@ class RuntimeRenderCoverageTest(unittest.TestCase):
         self.assertIsNone(manifest["artifacts"]["pdf"]["page_count"])
         self.assertIn("pdf_page_count_available", manifest["freshness"]["blocking_checks"])
         self.assertIn("page_images_complete", manifest["freshness"]["blocking_checks"])
+
+    def test_corrupt_page_cannot_hide_behind_complete_coverage_and_completed_vision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = self._manifest(root, ["page_001.png", "page_002.png", "page_003.png"],
+                                      corrupt_page="page_002.png")
+            failure = OrchestratorRuntime(state_path=str(root / "data/state.json"))._terminal_visual_evidence_failure(
+                decision="DONE", artifact_manifest=manifest,
+            )
+        self.assertTrue(manifest["freshness"]["checks"]["page_images_complete"]["pass"])
+        self.assertEqual(manifest["vision_diagnosis"]["status"], "completed")
+        self.assertIn("page_images_readable", manifest["freshness"]["blocking_checks"])
+        self.assertEqual(manifest["artifacts"]["page_images"]["invalid_page_images"], [
+            {"page": 2, "filename": "page_002.png", "reason": "decode_failed"},
+        ])
+        self.assertEqual(failure["failure_type"], "terminal_success_without_fresh_visual_evidence")
+
+    def test_readable_grayscale_or_blank_page_is_not_an_image_validity_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            names = ["page_001.png", "page_002.png", "page_003.png"]
+            self._manifest(root, names)
+            for index, name in enumerate(names):
+                path = root / "data/pages" / name
+                Image.new("L", (24, 24), (255, 127, 0)[index]).save(path)
+                os.utime(path, (1700000002, 1700000002))
+            manifest = collect_artifact_manifest(root, "main.tex", {
+                "page_images_dir": "data/pages", "visual_signal_report": "data/visual_signal_report.json",
+                "defect_report": "data/defect_report.json", "gatekeeper_decision": "data/gatekeeper_decision.json",
+            })
+        self.assertTrue(manifest["freshness"]["checks"]["page_images_readable"]["pass"])
+        self.assertEqual(manifest["freshness"]["status"], "pass")
+
+    def test_valid_png_container_with_incomplete_pixels_is_rejected(self):
+        def chunk(kind, data):
+            return (struct.pack(">I", len(data)) + kind + data
+                    + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            names = ["page_001.png", "page_002.png", "page_003.png"]
+            self._manifest(root, names)
+            path = root / "data/pages/page_002.png"
+            path.write_bytes(b"\x89PNG\r\n\x1a\n"
+                             + chunk(b"IHDR", struct.pack(">IIBBBBB", 24, 24, 8, 2, 0, 0, 0))
+                             + chunk(b"IDAT", zlib.compress(b"too few pixels"))
+                             + chunk(b"IEND", b""))
+            os.utime(path, (1700000002, 1700000002))
+            with Image.open(path) as image:
+                image.verify()  # Correct chunks/CRCs alone do not prove the page decodes.
+            manifest = collect_artifact_manifest(root, "main.tex", {
+                "page_images_dir": "data/pages", "visual_signal_report": "data/visual_signal_report.json",
+                "defect_report": "data/defect_report.json", "gatekeeper_decision": "data/gatekeeper_decision.json",
+            })
+        self.assertIn("page_images_readable", manifest["freshness"]["blocking_checks"])
+        self.assertEqual(manifest["artifacts"]["page_images"]["invalid_page_images"], [
+            {"page": 2, "filename": "page_002.png", "reason": "decode_failed"},
+        ])
+
+    def test_unavailable_image_decoder_cannot_establish_valid_visual_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            names = ["page_001.png", "page_002.png", "page_003.png"]
+            self._manifest(root, names)
+            with mock.patch.dict(sys.modules, {"PIL": None}):
+                manifest = collect_artifact_manifest(root, "main.tex", {
+                    "page_images_dir": "data/pages", "visual_signal_report": "data/visual_signal_report.json",
+                    "defect_report": "data/defect_report.json", "gatekeeper_decision": "data/gatekeeper_decision.json",
+                })
+        self.assertIn("page_images_readable", manifest["freshness"]["blocking_checks"])
+        self.assertEqual({item["reason"] for item in manifest["artifacts"]["page_images"]["invalid_page_images"]},
+                         {"dependency_unavailable"})
 
 
 if __name__ == "__main__":

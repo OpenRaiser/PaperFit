@@ -22,6 +22,7 @@ except ImportError:
 
 from state_schema import normalize_state, validate_state
 from transactional_patch import atomic_write_text
+from layout_policy import snapshot_source_edit_checks
 
 
 DEFAULT_GATEKEEPER_RULES: Dict[str, Any] = {
@@ -281,6 +282,7 @@ def make_decision(
     strict_mode: bool,
     semantic_report_path: Path | None,
     vlm_gated_score: float | None = None,
+    layout_policy_approvals: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     rules = (_load_layout_rules().get("gatekeeper") or DEFAULT_GATEKEEPER_RULES)
     checks: Dict[str, Dict[str, Any]] = {}
@@ -404,6 +406,52 @@ def make_decision(
         decision = "CONTINUE"
         reasons.append("content_integrity missing for semantic round")
 
+    # Recompute from the verified baseline and live sources, including includes.
+    # A past clean policy report cannot authorize a later host edit.
+    rollback_target = ci.get("rollback_target")
+    if not rollback_target:
+        snapshot = artifacts.get("pre_repair_snapshot") or {}
+        if isinstance(snapshot, dict):
+            rollback_target = snapshot.get("rollback_target")
+    mutation_used = repair_used or str(ci.get("validation_status") or "").startswith("mutation")
+    if rollback_target:
+        source_checks = snapshot_source_edit_checks(Path.cwd(), rollback_target, approvals=layout_policy_approvals or ())
+        policy = source_checks["layout_policy"]
+        prose = source_checks["layout_prose"]
+        scientific = source_checks["scientific_payload"]
+    elif mutation_used:
+        policy = {"checked": False, "status": "manual_review", "findings": [], "reason": "source-changing acceptance requires a verified policy baseline"}
+        prose = dict(policy)
+        scientific = dict(policy)
+    else:
+        policy = {"checked": False, "status": "not_used", "findings": []}
+        prose = dict(policy)
+        scientific = dict(policy)
+    policy_pass = policy.get("status") in {"pass", "not_used"}
+    checks["layout_policy"] = {"pass": policy_pass, **policy}
+    if policy.get("status") == "blocked":
+        decision = "BLOCKED"
+        reasons.append("new or changed forbidden layout operation")
+    elif not policy_pass and decision != "BLOCKED":
+        decision = "CONTINUE"
+        reasons.append("layout policy requires independent review or a valid baseline")
+    prose_pass = prose.get("status") in {"pass", "not_used"}
+    checks["layout_prose"] = {"pass": prose_pass, **prose}
+    if prose.get("status") == "blocked":
+        decision = "BLOCKED"
+        reasons.append("ordinary prose changed during layout-only repair")
+    elif not prose_pass and decision != "BLOCKED":
+        decision = "CONTINUE"
+        reasons.append("layout-only prose preservation requires a valid baseline")
+    scientific_pass = scientific.get("status") in {"pass", "not_used"}
+    checks["scientific_payload"] = {"pass": scientific_pass, **scientific}
+    if scientific.get("status") == "blocked":
+        decision = "BLOCKED"
+        reasons.append("protected scientific payload changed in current source")
+    elif not scientific_pass and decision != "BLOCKED":
+        decision = "CONTINUE"
+        reasons.append("scientific payload preservation requires a valid baseline")
+
     defect_summary = _summarize_defects(state, defects_payload)
     page_budget_defect = _page_budget_defect_from_state(state)
     if page_budget_defect is not None:
@@ -504,6 +552,9 @@ def make_decision(
             "category_D": checks["category_D"]["pass"],
             "category_E": checks["category_E"]["pass"],
             "content_integrity": checks["content_integrity"]["pass"],
+            "layout_policy": checks["layout_policy"]["pass"],
+            "layout_prose": checks["layout_prose"]["pass"],
+            "scientific_payload": checks["scientific_payload"]["pass"],
             "repair_execution": checks["repair_execution"]["pass"],
             "semantic_report": checks["semantic_report"]["pass"],
         },
@@ -517,6 +568,10 @@ def main() -> None:
     parser.add_argument("--strict", action="store_true", help="Strict mode: minor defects block DONE")
     parser.add_argument(
         "--semantic-report", default=None, help="Path to semantic_patch_report.json"
+    )
+    parser.add_argument(
+        "--layout-policy-approvals", default=None,
+        help="Host-reviewed exact spacing/endmatter approvals JSON; never inferred from VLM findings",
     )
     parser.add_argument(
         "--output",
@@ -541,6 +596,7 @@ def main() -> None:
         defects_payload=defects_payload,
         strict_mode=args.strict or bool(((state.get("task") or {}).get("strict_mode"))),
         semantic_report_path=Path(args.semantic_report) if args.semantic_report else None,
+        layout_policy_approvals=(_load_json(Path(args.layout_policy_approvals)).get("approvals") or []) if args.layout_policy_approvals else None,
     )
 
     out_path = Path(args.output)

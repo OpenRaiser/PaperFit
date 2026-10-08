@@ -188,7 +188,7 @@ def collect_evidence(
 ) -> RoundEvidenceSnapshot:
     """从最新编译产物收集门禁证据（页数/严重溢出/保护对象计数）。"""
     root = Path(project_root)
-    log_path = root / Path(main_tex).with_suffix(".log").name
+    log_path = root / Path(main_tex).with_suffix(".log")
     log_text = ""
     if log_path.is_file():
         try:
@@ -204,7 +204,7 @@ def collect_evidence(
                 protected[name] += len(pattern.findall(text))
     except Exception:
         pass
-    page_count = page_count_fn(root / Path(main_tex).with_suffix(".pdf").name)
+    page_count = page_count_fn(root / Path(main_tex).with_suffix(".pdf"))
     return RoundEvidenceSnapshot(
         page_count=page_count,
         severe_overfull=sum(1 for w in widths if w >= 100.0),

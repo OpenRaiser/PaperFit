@@ -8,7 +8,7 @@ import unittest
 
 from scripts.runtime_artifacts import collect_artifact_manifest
 from scripts.runtime_status import build_runtime_status
-from scripts.pdf_test_support import write_test_pdf
+from scripts.pdf_test_support import write_test_pdf, write_test_png
 
 
 class RuntimeStatusRevalidationTest(unittest.TestCase):
@@ -27,6 +27,8 @@ class RuntimeStatusRevalidationTest(unittest.TestCase):
             path = root / name
             if name == "main.pdf":
                 write_test_pdf(path)
+            elif name.endswith(".png"):
+                write_test_png(path)
             else:
                 path.write_text(text, encoding="utf-8")
             os.utime(path, (1700000000 + index, 1700000000 + index))

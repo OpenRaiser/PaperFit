@@ -2257,6 +2257,7 @@ class OrchestratorRuntime:
     ) -> Any:
         """刷新 latest 轮指标的 *_after 字段并返回统一验收证据（RoundEvidence）。"""
         from regression.round_acceptance import RoundEvidence
+        from layout_policy import snapshot_source_edit_checks
 
         visual_report = self._load_optional_json(
             Path.cwd() / str((state.get("artifacts") or {}).get("visual_signal_report") or "data/visual_signal_report.json")
@@ -2289,6 +2290,16 @@ class OrchestratorRuntime:
         phased_summary = state.get("repair_execution_summary") or {}
         latest["accepted_candidates"] = int(phased_summary.get("accepted_count") or 0)
         latest["rejected_candidates"] = int(phased_summary.get("rejected_count") or 0)
+        integrity_state = state.get("content_integrity") or {}
+        integrity_status = str(integrity_state.get("validation_status") or "")
+        prerequisite = integrity_status.startswith("mutation") or integrity_status in {"snapshot_created", "candidate_level_rollback"}
+        rollback_target = integrity_state.get("rollback_target")
+        if not rollback_target:
+            snapshot = (state.get("artifacts") or {}).get("pre_repair_snapshot") or {}
+            if isinstance(snapshot, dict):
+                rollback_target = snapshot.get("rollback_target")
+        source_checks = snapshot_source_edit_checks(Path.cwd(), rollback_target) if rollback_target else {"checked": False, "status": "manual_review", "reason": "source-changing acceptance requires a verified baseline"}
+        latest["source_edit_checks_after"] = source_checks
         return RoundEvidence(
             page_count_before=latest.get("page_count_before"),
             # 页数证据缺失时传 None：验收函数 fail-closed，绝不回退旧值放行
@@ -2310,11 +2321,7 @@ class OrchestratorRuntime:
             undefined_refs_after=latest.get("undefined_refs_after") or 0,
             undefined_citations_before=latest.get("undefined_citations_before") or 0,
             undefined_citations_after=latest.get("undefined_citations_after") or 0,
-            content_integrity_pass=bool(
-                ((state.get("content_integrity") or {}).get("validation_status") or "").startswith("mutation")
-                or (state.get("content_integrity") or {}).get("validation_status") == "snapshot_created"
-                or (state.get("content_integrity") or {}).get("validation_status") == "candidate_level_rollback"
-            ),
+            content_integrity_pass=prerequisite and source_checks.get("checked") is True and source_checks.get("status") == "pass",
         )
 
     def _terminal_visual_evidence_failure(

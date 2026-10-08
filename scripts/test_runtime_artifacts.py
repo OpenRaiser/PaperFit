@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from scripts.runtime_artifacts import collect_artifact_manifest
-from scripts.pdf_test_support import write_test_pdf
+from scripts.pdf_test_support import write_test_pdf, write_test_png
 
 
 class RuntimeArtifactsTest(unittest.TestCase):
@@ -24,7 +24,7 @@ class RuntimeArtifactsTest(unittest.TestCase):
             main.write_text("tex", encoding="utf-8")
             write_test_pdf(pdf)
             page = pages / "page_001.png"
-            page.write_bytes(b"png")
+            write_test_png(page)
             visual.write_text("{}", encoding="utf-8")
             defects.write_text("{}", encoding="utf-8")
             gatekeeper.write_text("{}", encoding="utf-8")
@@ -68,7 +68,7 @@ class RuntimeArtifactsTest(unittest.TestCase):
             main.write_text("tex", encoding="utf-8")
             write_test_pdf(pdf)
             page = pages / "page_001.png"
-            page.write_bytes(b"png")
+            write_test_png(page)
             visual.write_text("{}", encoding="utf-8")
             defects.write_text("{}", encoding="utf-8")
             gatekeeper.write_text("{}", encoding="utf-8")
@@ -113,7 +113,7 @@ class RuntimeArtifactsTest(unittest.TestCase):
             main.write_text("tex", encoding="utf-8")
             write_test_pdf(pdf)
             page = pages / "page_001.png"
-            page.write_bytes(b"png")
+            write_test_png(page)
             visual.write_text("{}", encoding="utf-8")
             defects.write_text("{}", encoding="utf-8")
             gatekeeper.write_text("{}", encoding="utf-8")
@@ -159,7 +159,7 @@ class RuntimeArtifactsTest(unittest.TestCase):
             intro.write_text("body", encoding="utf-8")
             write_test_pdf(pdf)
             page = pages / "page_001.png"
-            page.write_bytes(b"png")
+            write_test_png(page)
             visual.write_text("{}", encoding="utf-8")
             defects.write_text("{}", encoding="utf-8")
             gatekeeper.write_text("{}", encoding="utf-8")

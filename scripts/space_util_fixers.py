@@ -25,6 +25,7 @@ except ImportError:
     scientific_regression_reasons = None
 
 from transactional_patch import atomic_write_text
+from source_map import masked_tex
 
 
 # ============================================================
@@ -284,6 +285,60 @@ def _remove_project_discretionary_pagebreaks(project_root: Path) -> List[tuple[P
 # A1：孤行/寡行修复
 # ============================================================
 
+def _paragraph_span(tex_content: str, paragraph_start: int) -> Optional[Tuple[int, int]]:
+    """Locate one complete active paragraph; an inline offset is not a safe target."""
+    if not 0 <= paragraph_start < len(tex_content):
+        return None
+    active = masked_tex(tex_content)
+    while paragraph_start < len(tex_content) and tex_content[paragraph_start] in ' \t':
+        paragraph_start += 1
+    if paragraph_start >= len(tex_content) or active[paragraph_start].isspace():
+        return None
+    blank = re.compile(r'\r?\n[ \t]*\r?\n')
+    boundaries = [0]
+    boundaries.extend(match.end() for match in blank.finditer(tex_content[:paragraph_start]))
+    boundaries.extend(match.end() for match in re.finditer(
+        r'\\par(?![A-Za-z@])|\\begin\s*\{document\}', active[:paragraph_start]))
+    if active[max(boundaries):paragraph_start].strip():
+        return None
+
+    separator = blank.search(tex_content, paragraph_start)
+    end = separator.start() if separator else len(tex_content)
+    document_end = re.search(r'\\end\s*\{document\}', active[paragraph_start:end])
+    if document_end:
+        end = paragraph_start + document_end.start()
+    # Do not close a local group inside a macro argument or an environment.
+    depth = 0
+    for token in re.finditer(r'\\[A-Za-z@]+|\\.|[{}]', active[paragraph_start:end]):
+        value = token.group()
+        if value == '{':
+            depth += 1
+        elif value == '}':
+            depth -= 1
+            if depth < 0:
+                return None
+        elif value == r'\par' and depth == 0:
+            end = paragraph_start + token.end()
+            break
+        elif value in {r'\begin', r'\end', r'\looseness', r'\[', r'\]',
+                       r'\section', r'\subsection', r'\subsubsection', r'\paragraph'}:
+            return None
+    if depth or not active[paragraph_start:end].strip():
+        return None
+    return paragraph_start, end
+
+
+def _wrap_paragraph_looseness(tex_content: str, span: Tuple[int, int], value: int) -> str:
+    start, end = span
+    paragraph = tex_content[start:end]
+    # TeX applies paragraph parameters at \par. End the paragraph while the
+    # assignment is still in scope, with a newline so a trailing comment is safe.
+    terminated = re.search(r'\\par(?![A-Za-z@])\s*$', masked_tex(paragraph))
+    ending = '' if terminated else '\n\\par'
+    wrapped = f"{{\\looseness={value} {paragraph}{ending}}}"
+    return tex_content[:start] + wrapped + tex_content[end:]
+
+
 def fix_widow_orphan(
     tex_content: str,
     paragraph_start_line: Optional[int] = None,
@@ -308,29 +363,25 @@ def fix_widow_orphan(
     """
     # 策略 1: 使用 \looseness=-1 收缩段落
     if paragraph_text:
-        # 精确定位段落
-        # 清理文本中的特殊字符用于匹配
-        escaped_text = re.escape(paragraph_text[:50])  # 取前 50 字符定位
-        pattern = r'(\n|\A)\s*(' + escaped_text + r'[^\n]*\n(?:[^\n]*\n)*?)(?=\n\n|\Z)'
-        for match in re.finditer(pattern, tex_content, re.MULTILINE):
-            prefix = tex_content[max(0, match.start() - 32):match.start()]
-            if re.search(r'\\looseness\s*=\s*[-0-9]+\s*$', prefix):
+        spans = []
+        for match in re.finditer(re.escape(paragraph_text[:50]), tex_content):
+            if paragraph_start_line is not None and tex_content.count('\n', 0, match.start()) + 1 != paragraph_start_line:
                 continue
-
-            paragraph_full = match.group(0)
-            # 用花括号包裹并添加 \looseness=-1
-            wrapped = f"{{\\looseness=-1 {paragraph_full.strip()}}}"
-            modified_content = tex_content.replace(paragraph_full, wrapped, 1)
-
+            span = _paragraph_span(tex_content, match.start())
+            if span is not None:
+                spans.append(span)
+        if len(spans) == 1:
+            modified_content = _wrap_paragraph_looseness(tex_content, spans[0], -1)
             return modified_content, FixResult(
                 defect_id="A1",
                 object_name=f"第 {paragraph_start_line} 行段落",
                 action="添加 \\looseness=-1 以收缩段落消除孤行",
                 before=paragraph_text[:40] + "..." if len(paragraph_text) > 40 else paragraph_text,
-                after=f"{{\\looseness=-1 {paragraph_text[:40]}...}}",
+                after=f"{{\\looseness=-1 {paragraph_text[:40]}...\\par}}",
                 line_number=paragraph_start_line,
                 success=True,
             )
+        return tex_content, None
 
     # 策略 2: 如果无法精确定位，尝试在导言区添加全局设置
     return add_widow_orphan_penalty(tex_content)
@@ -385,23 +436,20 @@ def fix_paragraph_looseness(
     Returns:
         (修改后的内容，修复结果)
     """
-    # 找到段落结束 (下一个空行或文件结束)
-    paragraph_end = tex_content.find('\n\n', paragraph_start)
-    if paragraph_end == -1:
-        paragraph_end = len(tex_content)
-
-    paragraph_text = tex_content[paragraph_start:paragraph_end]
-
-    # 添加 \looseness
-    wrapped = f"{{\\looseness={looseness_value} {paragraph_text.strip()}}}"
-    modified_content = tex_content[:paragraph_start] + wrapped + tex_content[paragraph_end:]
+    span = _paragraph_span(tex_content, paragraph_start)
+    if span is None:
+        return tex_content, None
+    paragraph_text = tex_content[span[0]:span[1]]
+    modified_content = _wrap_paragraph_looseness(tex_content, span, looseness_value)
+    start_line = tex_content.count('\n', 0, span[0]) + 1
 
     return modified_content, FixResult(
         defect_id="A1",
-        object_name=f"段落 (行 {paragraph_start})",
+        object_name=f"段落 (行 {start_line})",
         action=f"添加 \\looseness={looseness_value}",
         before=paragraph_text[:40] + "..." if len(paragraph_text) > 40 else paragraph_text,
-        after=f"{{\\looseness={looseness_value} ...}}",
+        after=f"{{\\looseness={looseness_value} ...\\par}}",
+        line_number=start_line,
         success=True,
     )
 

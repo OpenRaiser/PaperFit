@@ -14,7 +14,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import orchestrator_runtime  # noqa: E402
-from pdf_test_support import write_test_pdf  # noqa: E402
+from pdf_test_support import write_test_pdf, write_test_png  # noqa: E402
 from orchestrator_runtime import OrchestratorRuntime  # noqa: E402
 from runtime_types import TaskSpec  # noqa: E402
 
@@ -44,7 +44,7 @@ class RoundMetricsTest(unittest.TestCase):
                 page_dir = root / "data" / "pages"
                 page_dir.mkdir(parents=True, exist_ok=True)
                 page = page_dir / "page_001.png"
-                page.write_bytes(b"png")
+                write_test_png(page)
                 visual_report = root / "data" / "visual_signal_report.json"
                 defect_report = root / "data" / "defect_report.json"
                 gatekeeper_report = root / "data" / "gatekeeper_decision.json"

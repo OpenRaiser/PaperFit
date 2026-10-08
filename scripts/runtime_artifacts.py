@@ -79,6 +79,33 @@ def _page_files(page_dir: Optional[Path]) -> list[Path]:
     )
 
 
+def _page_image_entry(path: Path, project_root: Path) -> Dict[str, Any]:
+    """Verify both PNG structure and decoded pixels before counting visual evidence."""
+    entry = _file_entry(path, project_root)
+    entry["image_status"] = "missing"
+    if not entry["exists"]:
+        return entry
+    try:
+        from PIL import Image
+    except ImportError:
+        entry["image_status"] = "dependency_unavailable"
+        return entry
+    try:
+        with Image.open(path) as image:
+            if image.format != "PNG":
+                entry["image_status"] = "invalid_format"
+                return entry
+            image.verify()
+        # verify() checks the container; load() also checks compressed pixel data.
+        with Image.open(path) as image:
+            image.load()
+            entry.update({"image_status": "available", "width": image.width,
+                          "height": image.height})
+    except (OSError, ValueError, SyntaxError, EOFError, Image.DecompressionBombError):
+        entry["image_status"] = "decode_failed"
+    return entry
+
+
 def _hash_page_set(paths: Iterable[Path], project_root: Path) -> Dict[str, Any]:
     pages = []
     aggregate = hashlib.sha256()
@@ -86,9 +113,10 @@ def _hash_page_set(paths: Iterable[Path], project_root: Path) -> Dict[str, Any]:
     oldest_mtime: Optional[float] = None
     page_numbers: list[int] = []
     invalid_names: list[str] = []
+    invalid_images: list[Dict[str, Any]] = []
 
     for path in paths:
-        entry = _file_entry(path, project_root)
+        entry = _page_image_entry(path, project_root)
         match = re.fullmatch(r"page_([0-9]+)\.png", path.name, re.IGNORECASE)
         number = int(match.group(1)) if match else None
         entry["page_number"] = number
@@ -96,6 +124,9 @@ def _hash_page_set(paths: Iterable[Path], project_root: Path) -> Dict[str, Any]:
             invalid_names.append(path.name)
         else:
             page_numbers.append(number)
+        if entry.get("image_status") != "available":
+            invalid_images.append({"page": number, "filename": path.name,
+                                   "reason": entry.get("image_status")})
         pages.append(entry)
         rel = str(entry.get("path") or path.name)
         sha = str(entry.get("sha256") or "")
@@ -113,6 +144,7 @@ def _hash_page_set(paths: Iterable[Path], project_root: Path) -> Dict[str, Any]:
         "count": len(pages),
         "page_numbers": sorted(page_numbers),
         "invalid_page_names": invalid_names,
+        "invalid_page_images": invalid_images,
         "aggregate_sha256": aggregate.hexdigest() if pages else None,
         "oldest_mtime": oldest_mtime,
         "newest_mtime": newest_mtime,
@@ -179,6 +211,12 @@ def _freshness_checks(entries: Dict[str, Any]) -> Dict[str, Any]:
         "rendered_page_count": int(pages.get("count") or 0),
         "page_numbers": numbers,
         "invalid_page_names": pages.get("invalid_page_names") or [],
+    }
+    checks["page_images_readable"] = {
+        "pass": bool(pages.get("exists") and not pages.get("invalid_page_images")
+                     and all(page.get("image_status") == "available"
+                             for page in pages.get("pages") or [])),
+        "invalid_page_images": pages.get("invalid_page_images") or [],
     }
     checks["page_images_not_older_than_pdf"] = {
         "pass": bool(page_oldest is not None and pdf_mtime is not None and page_oldest >= pdf_mtime),

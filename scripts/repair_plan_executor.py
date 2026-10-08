@@ -24,6 +24,9 @@ from fixer_registry import (
 from transactional_patch import atomic_write_text
 from visual_action_plan import document_scope_b1_authorized
 from source_map import masked_tex, within
+from layout_policy import combine_policy_reports, compare_layout_policy
+from runtime_snapshots import discover_source_files
+from scientific_integrity import scientific_payload_diff
 
 
 _DISPLAY_MATH_BEGIN_RE = re.compile(r"\\begin\{(equation\*?|align\*?|multline\*?|gather\*?)\}")
@@ -792,6 +795,8 @@ def _enforce_structure_integrity(
     original_tex: str,
     report: Dict[str, Any],
     original_bytes: Optional[bytes] = None,
+    original_sources: Optional[Dict[Path, bytes]] = None,
+    layout_policy_approvals: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     tex_path = Path(main_tex)
     if not tex_path.is_file():
@@ -804,7 +809,51 @@ def _enforce_structure_integrity(
         return report
 
     final_tex = tex_path.read_text(encoding="utf-8")
-    diff = compute_content_diff(original_tex, final_tex)
+    root = Path.cwd().resolve() if within(tex_path.resolve(), Path.cwd().resolve()) else tex_path.resolve().parent
+    diff = compute_content_diff(original_tex, final_tex, layout_policy_approvals=layout_policy_approvals or (), file=tex_path.resolve().relative_to(root).as_posix(), layout_only=True)
+    sources = original_sources or {tex_path.resolve(): original_bytes if original_bytes is not None else original_tex.encode("utf-8")}
+    policy_reports = []
+    prose_reports = []
+    scientific_reports = []
+    from layout_prose_integrity import compare_layout_prose
+    for source, baseline_bytes in sources.items():
+        if source.suffix.lower() != ".tex":
+            continue
+        if not within(source.resolve(), root):
+            raise ValueError(f"tracked source outside project root: {source}")
+        relative = source.resolve().relative_to(root).as_posix()
+        if not source.is_file():
+            unavailable = {"file": relative, "checked": False, "status": "manual_review", "reason": "tracked TeX source unavailable"}
+            policy_reports.append({**unavailable, "findings": [{"file": relative, "status": "manual_review", "rule": "tracked_source_unavailable", "reason": unavailable["reason"]}]})
+            prose_reports.append(dict(unavailable))
+            scientific_reports.append(dict(unavailable))
+            continue
+        repaired_bytes = source.read_bytes()
+        before_source = baseline_bytes.decode("utf-8", errors="surrogateescape")
+        after_source = repaired_bytes.decode("utf-8", errors="surrogateescape")
+        policy_reports.append(compare_layout_policy(
+            before_source, after_source,
+            approvals=layout_policy_approvals or (), file=relative,
+        ))
+        prose_reports.append({"file": relative, **compare_layout_prose(before_source, after_source)})
+        if source.resolve() == tex_path.resolve():
+            scientific_result = diff["scientific_payload"]
+        elif baseline_bytes == repaired_bytes:
+            scientific_result = {"checked": True, "status": "pass", "comparison": "unchanged_source"}
+        else:
+            scientific_result = scientific_payload_diff(before_source, after_source)
+        scientific_reports.append({"file": relative, **scientific_result})
+    policy = combine_policy_reports(policy_reports)
+    policy["rollback_performed"] = False
+    report["layout_policy"] = policy
+    prose_findings = [item for item in prose_reports if item.get("status") != "pass"]
+    prose_checked = bool(prose_reports) and all(item.get("checked") is True for item in prose_reports)
+    prose = {"checked": prose_checked, "status": "manual_review" if not prose_checked else "blocked" if prose_findings else "pass", "findings": prose_findings, "rollback_performed": False}
+    report["layout_prose"] = prose
+    scientific_findings = [item for item in scientific_reports if item.get("status") != "pass"]
+    scientific_checked = bool(scientific_reports) and all(item.get("checked") is True for item in scientific_reports)
+    scientific = {"checked": scientific_checked, "status": "manual_review" if not scientific_checked else "blocked" if scientific_findings else "pass", "findings": scientific_findings, "rollback_performed": False}
+    report["scientific_payload"] = scientific
     integrity = {
         "checked": True,
         "status": "pass",
@@ -812,14 +861,27 @@ def _enforce_structure_integrity(
         "diff": diff,
     }
 
-    if final_tex != original_tex and (_has_structure_regression(diff) or has_scientific_regression(diff)):
+    scientific_failed = (final_tex != original_tex and (_has_structure_regression(diff) or has_scientific_regression(diff))) or scientific["status"] != "pass"
+    policy_failed = policy["status"] != "pass"
+    prose_failed = prose["status"] != "pass"
+    if scientific_failed or policy_failed or prose_failed:
         if original_bytes is not None:
             tex_path.write_bytes(original_bytes)
         else:
             atomic_write_text(tex_path, original_tex, backup_dir=tex_path.parent / "data" / "backups")
-        integrity["status"] = "failed"
-        integrity["rollback_performed"] = True
-        integrity["failure_reasons"] = (diff.get("violation") or {}).get("reasons") or ["structure regression detected"]
+        for source, baseline_bytes in sources.items():
+            if not within(source.resolve(), root):
+                raise ValueError(f"refusing rollback outside project root: {source}")
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes(baseline_bytes)
+        if policy_failed or prose_failed:
+            policy["rollback_performed"] = policy_failed
+            prose["rollback_performed"] = prose_failed
+        if scientific_failed:
+            scientific["rollback_performed"] = True
+            integrity["status"] = "failed"
+            integrity["rollback_performed"] = True
+            integrity["failure_reasons"] = [f"{item['file']}: {reason}" for item in scientific_findings for reason in item.get("regression_reasons", [])] or (diff.get("violation") or {}).get("reasons") or ["scientific validation or structure regression detected"]
         report["status"] = "failed"
         report["applied_count"] = 0
         report["fix_report"] = {
@@ -838,7 +900,7 @@ def _enforce_structure_integrity(
             **(report.get("global_report") or {}),
             "status": "failed" if report.get("global_report") else "noop",
         }
-        report["rollback_reason"] = "scientific_integrity_violation" if has_scientific_regression(diff) else "structure_integrity_violation"
+        report["rollback_reason"] = "layout_policy_violation" if policy_failed and not scientific_failed else "layout_prose_changed" if prose_failed and not scientific_failed else "scientific_integrity_violation" if scientific_findings or has_scientific_regression(diff) else "structure_integrity_violation"
 
     report["content_integrity"] = integrity
     return report
@@ -891,12 +953,15 @@ def execute_repair_plan(
     column_type: Optional[str] = None,
     target_pages: Optional[int] = None,
     max_candidates: int = 5,
+    layout_policy_approvals: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     plan = _load_json(repair_plan_path)
     review_skipped = len((plan.get("candidates") or [])) - len(_actionable_candidates(plan))
     tex_path = Path(main_tex)
     original_bytes = tex_path.read_bytes() if tex_path.is_file() else b""
     original_tex = original_bytes.decode("utf-8")
+    source_root = Path.cwd().resolve() if within(tex_path.resolve(), Path.cwd().resolve()) else tex_path.resolve().parent
+    original_sources = {source: source.read_bytes() for source in discover_source_files(source_root, str(tex_path.resolve()))}
     if _plan_uses_conflict_batch(plan):
         
         
@@ -1085,6 +1150,8 @@ def execute_repair_plan(
         original_tex=original_tex,
         report=report,
         original_bytes=original_bytes,
+        original_sources=original_sources,
+        layout_policy_approvals=layout_policy_approvals,
     )
 
     out = Path(output_path)
@@ -1101,6 +1168,7 @@ def main() -> None:
     parser.add_argument("--column-type", default=None)
     parser.add_argument("--target-pages", type=int, default=None)
     parser.add_argument("--max-candidates", type=int, default=5)
+    parser.add_argument("--layout-policy-approvals", default=None, help="Separate host-reviewed exact spacing/endmatter evidence JSON")
     args = parser.parse_args()
 
     report = execute_repair_plan(
@@ -1110,6 +1178,7 @@ def main() -> None:
         column_type=args.column_type,
         target_pages=args.target_pages,
         max_candidates=args.max_candidates,
+        layout_policy_approvals=(_load_json(args.layout_policy_approvals).get("approvals") or []) if args.layout_policy_approvals else None,
     )
     print(json.dumps(report, indent=2, ensure_ascii=False))
 

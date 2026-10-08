@@ -25,7 +25,55 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Set
 from datetime import datetime
 
-from scientific_integrity import scientific_payload_diff
+from scientific_integrity import TEXT_WRAPPERS, _command, _group, _optional, _strip_layout, scientific_payload_diff
+from layout_policy import compare_layout_policy
+from layout_prose_integrity import compare_layout_prose
+
+
+def _unwrap_supported_text_wrappers(text: str) -> str:
+    """Keep supported wrapper text before the legacy command remover runs."""
+    output = []
+    i = 0
+    while i < len(text):
+        if text[i] != "\\":
+            output.append(text[i])
+            i += 1
+            continue
+        name, command_end = _command(text, i)
+        argument = command_end + int(command_end < len(text) and text[command_end] == "*")
+        argument = _optional(text, argument)
+        while argument < len(text) and text[argument].isspace():
+            argument += 1
+        if name in TEXT_WRAPPERS | {"shortstack"} and argument < len(text) and text[argument] == "{":
+            _, end = _group(text, argument)
+            if end > argument:
+                wrapper = text[i:end]
+                normalized = _strip_layout(wrapper, text_wrappers=True)
+                if normalized != wrapper:
+                    # A TeX cell line break separates words in plain text. The
+                    # scientific normalizer ignores whitespace, so preserve
+                    # this boundary before reusing its wrapper handling.
+                    parts = []
+                    cursor = 0
+                    while cursor < len(wrapper):
+                        if wrapper[cursor] == "\\":
+                            control, stop = _command(wrapper, cursor)
+                            if control == "\\":
+                                parts.append(" ")
+                                cursor = _optional(wrapper, stop)
+                                continue
+                            parts.append(wrapper[cursor:stop])
+                            cursor = stop
+                        else:
+                            parts.append(wrapper[cursor])
+                            cursor += 1
+                    normalized = _strip_layout("".join(parts), text_wrappers=True)
+                output.append(normalized)
+                i = end
+                continue
+        output.append(text[i:command_end])
+        i = command_end
+    return "".join(output)
 
 
 def extract_academic_content(tex_content: str) -> str:
@@ -53,6 +101,10 @@ def extract_academic_content(tex_content: str) -> str:
     # Remove remaining \begin{} and \end{} markers not caught by math environment pattern
     text = re.sub(r'\\begin\{[^}]+\}', ' ', text)
     text = re.sub(r'\\end\{[^}]+\}', ' ', text)
+
+    # Known text wrappers retain their grouped words. Unsupported makecell
+    # forms remain opaque under the same bounded scientific normalization.
+    text = _unwrap_supported_text_wrappers(text)
 
     # Remove LaTeX commands with optional arguments
     # Handles: \command, \command[opt]{req}, \command{req}
@@ -358,7 +410,7 @@ def classify_content_type(tex_content: str) -> Dict:
     return result
 
 
-def compute_content_diff(original_tex: str, repaired_tex: str) -> Dict:
+def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_approvals=(), file: str = "", layout_only: bool = False) -> Dict:
     """
     Compute the difference between original and repaired content.
 
@@ -390,6 +442,8 @@ def compute_content_diff(original_tex: str, repaired_tex: str) -> Dict:
     post_hash = semantic_hash(repaired_tex)
 
     scientific_payload = scientific_payload_diff(original_tex, repaired_tex)
+    layout_policy = compare_layout_policy(original_tex, repaired_tex, approvals=layout_policy_approvals, file=file)
+    layout_prose = compare_layout_prose(original_tex, repaired_tex)
 
     # Determine violation level and required action
     violation_level = 0
@@ -432,9 +486,18 @@ def compute_content_diff(original_tex: str, repaired_tex: str) -> Dict:
             violation_reasons.append(f"Word count changed by {word_count_change_pct:.1f}% (<5%)")
             action_required = 'log_only'
 
+    # A layout shortcut can preserve all scientific content and still violate
+    # repair policy. Keep its evidence separate from content violation levels.
+    if layout_policy["status"] == "blocked" or (layout_only and layout_prose.get("checked") is True and layout_prose["status"] != "pass"):
+        action_required = "auto_rollback"
+    elif (layout_policy["status"] == "manual_review" or (layout_only and layout_prose.get("checked") is not True)) and action_required != "auto_rollback":
+        action_required = "manual_review"
+
     return {
         'timestamp': datetime.now().isoformat(),
         'scientific_payload': scientific_payload,
+        'layout_policy': layout_policy,
+        'layout_prose': layout_prose,
         'hash_comparison': {
             'pre_hash': pre_hash,
             'post_hash': post_hash,
@@ -648,7 +711,7 @@ def cmd_post(args):
     original_content = full_content
     repaired_content = get_line_range_content(file_path, line_start, line_end)
 
-    diff_result = compute_content_diff(original_content, repaired_content)
+    diff_result = compute_content_diff(original_content, repaired_content, layout_only=True)
     diff_result['file'] = file_path
     diff_result['line_range'] = [line_start, line_end]
     diff_result['baseline_file'] = args.baseline
@@ -656,15 +719,17 @@ def cmd_post(args):
 
     # Determine action required
     violation_level = diff_result['violation']['level']
-    if baseline_truncated:
+    if (diff_result.get('layout_policy') or {}).get('status') == 'blocked':
+        diff_result['action_required'] = 'auto_rollback'
+    elif baseline_truncated:
         diff_result['action_required'] = 'manual_review'
         diff_result['action_note'] = (
             'baseline lacks full_content; word-drift levels are computed against a '
             'truncated reference and cannot support auto_rollback'
         )
-    elif violation_level >= 3:
+    elif violation_level >= 3 or ((diff_result.get('layout_prose') or {}).get('checked') is True and (diff_result.get('layout_prose') or {}).get('status') != 'pass'):
         diff_result['action_required'] = 'auto_rollback'
-    elif violation_level >= 2:
+    elif violation_level >= 2 or (diff_result.get('layout_policy') or {}).get('status') == 'manual_review' or (diff_result.get('layout_prose') or {}).get('checked') is not True:
         diff_result['action_required'] = 'manual_review'
     elif violation_level >= 1:
         diff_result['action_required'] = 'log_only'
@@ -689,7 +754,7 @@ def cmd_diff(args):
     with open(args.repaired, 'r', encoding='utf-8') as f:
         repaired = f.read()
 
-    result = compute_content_diff(original, repaired)
+    result = compute_content_diff(original, repaired, layout_only=True)
     result['original_file'] = args.original
     result['repaired_file'] = args.repaired
 

@@ -13,7 +13,7 @@ MATH_WRAPPERS=MATH_ENVS|{'aligned','alignedat','split','multlined','gathered'}
 TABLE_ENVS={'tabular','tabular*','tabularx','longtable'}
 FLOAT_ENVS={'figure','figure*','table','table*','wrapfigure','wraptable','sidewaysfigure','sidewaystable'}
 FONT_DECL={'tiny','scriptsize','footnotesize','small','normalsize','large','Large','LARGE','huge','Huge','bfseries','mdseries','itshape','upshape','slshape','scshape','rmfamily','sffamily','ttfamily','normalfont','centering','raggedright','raggedleft','raggedbottom','flushleft','flushright','FloatBarrier','clearpage','newpage','pagebreak','nopagebreak','noindent','medskip','smallskip','bigskip','hfill','vfill','par','arraybackslash'}
-TEXT_WRAPPERS={'textbf','textit','texttt','textrm','textsf','textnormal','emph','underline','mbox'}
+TEXT_WRAPPERS={'textbf','textit','texttt','textrm','textsf','textnormal','emph','underline','mbox','makecell'}
 ID_COMMANDS={'label','ref','eqref','pageref','autoref','cref','Cref','vref','nameref','cite','citep','citet','citealp','citealt','citeauthor','citeyear','citeyearpar','nocite'}
 PROTECTED_ARGS={'caption','subcaption','section','subsection','subsubsection','paragraph','title','author','affiliation','thanks','footnote','footnotetext'}
 LAYOUT_ONE={'vspace','hspace','vskip','hskip','fontsize','linespread','color','cellcolor','rowcolor','cline','cmidrule','addlinespace','bibliographystyle'}
@@ -182,6 +182,11 @@ def _strip_layout(s:str,*,text_wrappers:bool=False)->str:
   if s[i]!='\\':out.append(s[i]);i+=1;continue
   name,j=_command(s,i);star=j<len(s) and s[j]=='*';j+=int(star)
   opt=_optional(s,j)
+  if name=='looseness' and not star:
+   # Only the bounded literal paragraph adjustments used by A1 are layout.
+   # Dynamic values and larger changes remain visible to preservation checks.
+   value=re.match(r'\s*(?:=\s*)?([+-]?[01])(?=\s|}|$)',s[j:])
+   if value:i=j+value.end();continue
   if name in FONT_DECL|RULES:i=opt;continue
   if name=='captionsetup':
    body,end=_group(s,opt)
@@ -223,6 +228,22 @@ def _strip_layout(s:str,*,text_wrappers:bool=False)->str:
    _,end=_group(s,opt);i=end if end>opt else opt;continue
   if name in {'footnotemark'}:i=opt;continue
   if name in {'footnotetext','footnote'}:out.append('\\'+name);i=opt;continue
+  if text_wrappers and name=='makecell':
+   # Standard makecell alignment only changes presentation. Keep dynamic or
+   # complex column specifications (and unsupported starred forms) opaque.
+   pos=j
+   while pos<len(s) and s[pos].isspace():pos+=1
+   known=not star
+   if pos<len(s) and s[pos]=='[':
+    alignment,end=_group(s,pos,'[',']')
+    known=known and end>pos and bool(re.fullmatch(r'(?:[lcrtb]|[tb][lcr]|[lcr][tb]|cc)',alignment))
+    if end>pos:pos=end
+   while pos<len(s) and s[pos].isspace():pos+=1
+   body,end=_group(s,pos)
+   if end>pos:
+    out.append(_strip_layout(body,text_wrappers=True) if known else s[i:end])
+    i=end;continue
+   out.append(s[i:j]);i=j;continue
   if text_wrappers and name in TEXT_WRAPPERS|{'shortstack'}:
    body,end=_group(s,opt)
    if end>opt:out.append(_strip_layout(body,text_wrappers=True));i=end;continue
