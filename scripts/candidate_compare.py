@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 try:
@@ -15,7 +16,9 @@ def _measure(path: Path) -> dict[str, Any]:
     complete = raw.get('checked') is True and raw.get('complete_document') is True
     count = raw.get('page_count')
     outside = raw.get('summary', {}).get('outside_glyph_count')
-    valid = complete and type(count) is int and count > 0 and type(outside) is int and outside >= 0
+    identity = raw.get('pdf_sha256')
+    valid = (complete and type(count) is int and count > 0 and type(outside) is int and outside >= 0
+             and isinstance(identity, str) and re.fullmatch(r'[0-9a-f]{64}', identity) is not None)
     return {'pdf_path': str(path.resolve()), 'pdf_sha256': raw.get('pdf_sha256'),
             'measurement_available': valid, 'page_count': count if valid else None,
             'painted_outside_glyphs': outside if valid else None,

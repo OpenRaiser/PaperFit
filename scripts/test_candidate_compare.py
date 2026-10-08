@@ -69,6 +69,13 @@ class CandidateComparisonTest(unittest.TestCase):
         compare_candidates(x, y)
         self.assertEqual((digest(x), digest(y)), old)
 
+    def test_complete_counts_without_pdf_identity_are_unavailable(self):
+        with mock.patch('candidate_compare.check_pdf_visibility', return_value={'checked': True, 'complete_document': True, 'page_count': 1, 'summary': {'outside_glyph_count': 0}}):
+            r = compare_candidates('x.pdf', 'y.pdf')
+        self.assertEqual(r['status'], 'unavailable')
+        self.assertIsNone(r['before']['page_count'])
+        self.assertNotIn('same_pdf_identity', r)
+
     def test_cli_cannot_overwrite_input_or_existing_evidence(self):
         x, y = self.pdf('x.pdf'), self.pdf('y.pdf')
         before = x.read_bytes();script = Path(__file__).with_name('candidate_compare.py')
@@ -78,6 +85,7 @@ class CandidateComparisonTest(unittest.TestCase):
             r = subprocess.run(base+['--output', str(output)], capture_output=True)
             self.assertNotEqual(r.returncode, 0)
         self.assertEqual(x.read_bytes(), before)
+        self.assertEqual((self.root / 'report.json').read_text(encoding='utf-8'), 'historical evidence')
 
     def test_page_policy_needs_explicit_positive_target(self):
         for target in [None, 0, True]:
