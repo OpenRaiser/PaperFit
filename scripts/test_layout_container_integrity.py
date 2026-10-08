@@ -10,6 +10,50 @@ def document(body):
 
 
 class LayoutContainerIntegrityTest(unittest.TestCase):
+    def test_inherited_shadowed_wrapper_transfer_between_labelled_captions_is_rejected(self):
+        token = 'BenchmarkOverflowTokenWithoutBreakpoints1234567890'
+        definition = r'\renewcommand{\nolinkurl}[1]{DifferentScientificIdentifier}'
+        def figure(label, wrapped):
+            value = r'\nolinkurl{' + token + '}' if wrapped else token
+            return r'\begin{figure}\caption{Identifier ' + value + r'}\label{' + label + r'}\end{figure}'
+        before = definition + '\n' + document(figure('fig:a', True) + figure('fig:b', False))
+        after = definition + '\n' + document(figure('fig:a', False) + figure('fig:b', True))
+        diff = compute_content_diff(before, after, layout_only=True)
+        self.assertNotIn('shadowed_literal_url_invocations', diff['scientific_payload']['changed_components'])
+        self.assertIn('protected_arguments', diff['scientific_payload']['changed_components'])
+        self.assertEqual(diff['action_required'], 'auto_rollback', diff)
+
+    def test_inherited_shadowed_wrapper_transfer_between_fields_of_same_float_is_rejected(self):
+        token = 'BenchmarkOverflowTokenWithoutBreakpoints1234567890'
+        definition = r'\renewcommand{\nolinkurl}[1]{DifferentScientificIdentifier}'
+        wrapped = r'\textbf{\nolinkurl{' + token + '}}'
+        plain = r'\textbf{' + token + '}'
+        def figure(caption, note):
+            return (r'\begin{figure}\caption{Identifier ' + caption + r'}\label{fig:r}' +
+                    r'\footnote{Identifier ' + note + r'}\end{figure}')
+        before = definition + '\n' + document(figure(wrapped, plain))
+        after = definition + '\n' + document(figure(plain, wrapped))
+        diff = compute_content_diff(before, after, layout_only=True)
+        self.assertNotIn('shadowed_literal_url_invocations', diff['scientific_payload']['changed_components'])
+        self.assertIn('protected_arguments', diff['scientific_payload']['changed_components'])
+        self.assertEqual(diff['action_required'], 'auto_rollback', diff)
+
+    def test_inherited_shadowed_wrapper_transfer_between_table_cells_is_rejected(self):
+        token = 'BenchmarkOverflowTokenWithoutBreakpoints1234567890'
+        for command, invocation in [('nolinkurl', r'\nolinkurl{' + token + '}'),
+                                    ('urlstyle', r'\urlstyle{same}' + token)]:
+            with self.subTest(command=command):
+                definition = '\\renewcommand{\\' + command + '}[1]{DifferentScientificIdentifier}'
+                def table(first, second):
+                    return (r'\begin{table}\label{tab:r}\begin{tabular}{ll}' +
+                            r'\makecell{' + first + r'}&\makecell{' + second + r'}\\\end{tabular}\end{table}')
+                before = definition + '\n' + document(table(invocation, token))
+                after = definition + '\n' + document(table(token, invocation))
+                diff = compute_content_diff(before, after, layout_only=True)
+                self.assertNotIn('shadowed_literal_url_invocations', diff['scientific_payload']['changed_components'])
+                self.assertIn('tables', diff['scientific_payload']['changed_components'])
+                self.assertEqual(diff['action_required'], 'auto_rollback', diff)
+
     def test_shadowed_url_commands_cannot_hide_new_rendered_content(self):
         token = 'BenchmarkOverflowTokenWithoutBreakpointsAntibodyDesignerLayoutRegressionSequenceColumnWidthStressCase'
         for definition, wrapper in (

@@ -221,7 +221,7 @@ def _safe_caption_setup(argument:str)->bool:
 def _safe_float_counter(name:str,value:str)->bool:
  return name.strip() in {'topnumber','bottomnumber','totalnumber','dbltopnumber'} and bool(re.fullmatch(r'\s*\d+\s*',value))
 
-def _strip_layout(s:str,*,text_wrappers:bool=False)->str:
+def _strip_layout(s:str,*,text_wrappers:bool=False,opaque_commands:frozenset[str]=frozenset())->str:
  s=re.sub(r'\\tabcolsep\s*(?:=\s*)?[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*(?:pt|em|ex|cm|mm|in)\b','',s)
  s=re.sub(r'\\(?:widowpenalty|clubpenalty|displaywidowpenalty|brokenpenalty|interlinepenalty)\s*(?:=\s*)?[+-]?\d+\b','',s)
  s=re.sub(r'\\(?:linebreak|nolinebreak)\s*(?:\[[0-4]\])?','',s)
@@ -229,6 +229,19 @@ def _strip_layout(s:str,*,text_wrappers:bool=False)->str:
  while i<len(s):
   if s[i]!='\\':out.append(s[i]);i+=1;continue
   name,j=_command(s,i);star=j<len(s) and s[j]=='*';j+=int(star)
+  if name in opaque_commands:
+   # The complete source has directly redefined this presentation command.
+   # Preserve its literal invocation in each caption/cell/argument context,
+   # including nested arguments; an unanchored inventory alone misses moves.
+   last=j
+   while True:
+    pos=last
+    while pos<len(s) and s[pos].isspace():pos+=1
+    if pos<len(s) and s[pos] in '[{':
+     opening=s[pos];_,end=_group(s,pos,opening,']' if opening=='[' else '}')
+     if end>pos:last=end;continue
+    break
+   out.append(s[i:last]);i=last;continue
   opt=_optional(s,j)
   if name=='looseness' and not star:
    # Only the bounded literal paragraph adjustments used by A1 are layout.
@@ -264,7 +277,7 @@ def _strip_layout(s:str,*,text_wrappers:bool=False)->str:
    if name=='resizebox':_,k=_group(s,k)
    if name=='raisebox':k=_optional(s,k);k=_optional(s,k)
    body,end=_group(s,k)
-   if end>k:out.append(_strip_layout(body,text_wrappers=text_wrappers));i=end;continue
+   if end>k:out.append(_strip_layout(body,text_wrappers=text_wrappers,opaque_commands=opaque_commands));i=end;continue
   if name in {'includegraphics'}:
    _,end=_group(s,opt);i=end if end>opt else opt;continue
   if name in {'begin','end'}:
@@ -299,7 +312,7 @@ def _strip_layout(s:str,*,text_wrappers:bool=False)->str:
    while pos<len(s) and s[pos].isspace():pos+=1
    body,end=_group(s,pos)
    if end>pos:
-    out.append(_strip_layout(body,text_wrappers=True) if known else s[i:end])
+    out.append(_strip_layout(body,text_wrappers=True,opaque_commands=opaque_commands) if known else s[i:end])
     i=end;continue
    out.append(s[i:j]);i=j;continue
   if name=='nolinkurl':
@@ -310,20 +323,20 @@ def _strip_layout(s:str,*,text_wrappers:bool=False)->str:
    out.append(s[i:j]);i=j;continue
   if text_wrappers and name in TEXT_WRAPPERS|{'shortstack'}:
    body,end=_group(s,opt)
-   if end>opt:out.append(_strip_layout(body,text_wrappers=True));i=end;continue
+   if end>opt:out.append(_strip_layout(body,text_wrappers=True,opaque_commands=opaque_commands));i=end;continue
   if text_wrappers and name in {'multirow','multicolumn'}:
    span,k=_group(s,opt);spec,k=_group(s,k);body,end=_group(s,k)
    if end>k:
-    insertion=_colspec_payload(spec) if name=='multicolumn' else ()
+    insertion=_colspec_payload(spec,opaque_commands=opaque_commands) if name=='multicolumn' else ()
     marker='\\'+name+'{'+span+'}'
     if insertion:marker+=repr(insertion)
-    out.append(marker+'{'+_strip_layout(body,text_wrappers=True)+'}');i=end;continue
+    out.append(marker+'{'+_strip_layout(body,text_wrappers=True,opaque_commands=opaque_commands)+'}');i=end;continue
   if text_wrappers and name=='\\':i=opt;continue
   out.append(s[i:j]);i=j
  return ''.join(out)
 
-def _text_tokens(s:str)->Tuple[Any,...]:
- s=_strip_layout(s,text_wrappers=True);envs=_envs(s);math=_math_spans(s,envs);out=[];cursor=0
+def _text_tokens(s:str,*,opaque_commands:frozenset[str]=frozenset())->Tuple[Any,...]:
+ s=_strip_layout(s,text_wrappers=True,opaque_commands=opaque_commands);envs=_envs(s);math=_math_spans(s,envs);out=[];cursor=0
  for m in math:
   out.extend(c for c in s[cursor:m['start']] if not c.isspace());out.append(('math',_math_tokens(m['text'])));cursor=m['end']
  out.extend(c for c in s[cursor:] if not c.isspace())
@@ -337,7 +350,7 @@ def _text_tokens(s:str)->Tuple[Any,...]:
   out=out[1:-1]
  return tuple(out)
 
-def _colspec_payload(spec:str)->Tuple[Any,...]:
+def _colspec_payload(spec:str,*,opaque_commands:frozenset[str]=frozenset())->Tuple[Any,...]:
  # Column alignment/width are layout; @/! insertions can render scientific text.
  out=[];i=0;column=0
  while i<len(spec):
@@ -349,23 +362,23 @@ def _colspec_payload(spec:str)->Tuple[Any,...]:
    body,end=_group(spec,i+1)
    if end==i+1:out.append((column,c));i+=1;continue
    body=re.sub(r'\\extracolsep\s*\{\s*\\fill\s*\}', '', body)
-   payload=_text_tokens(body)
+   payload=_text_tokens(body,opaque_commands=opaque_commands)
    if payload:out.append((column,c,payload))
    i=end;continue
   if c=='*':
    count,j=_group(spec,i+1);body,end=_group(spec,j)
    if count.isdigit() and end>j and int(count)<=100:
     # Preserve insertions in repeated column specs without treating widths as data.
-    repeated=_colspec_payload(body)
+    repeated=_colspec_payload(body,opaque_commands=opaque_commands)
     if repeated:out.append((column,'repeat',count,repeated))
     column+=int(count)*next((v[1] for v in repeated if v[0]=='columns'),0);i=end;continue
   if c=='\\':name,j=_command(spec,i);out.append((column,'unknown','\\'+name));i=j;continue
   out.append((column,'unknown',c));i+=1
  return (('columns',column),)+tuple(out)
 
-def _table_rows(body:str)->Tuple[Any,...]:
- return tuple(tuple(_text_tokens(cell) for cell in _split_top(row,'&'))
-              for row in _split_top(body,'\\\\') if _text_tokens(row))
+def _table_rows(body:str,*,opaque_commands:frozenset[str]=frozenset())->Tuple[Any,...]:
+ return tuple(tuple(_text_tokens(cell,opaque_commands=opaque_commands) for cell in _split_top(row,'&'))
+              for row in _split_top(body,'\\\\') if _text_tokens(row,opaque_commands=opaque_commands))
 
 def _split_top(s:str,delimiter:str)->List[str]:
  parts=[];start=0;depth=0;i=0
@@ -395,7 +408,7 @@ def _ids(s:str)->Tuple[Any,...]:
   i=j
  return tuple(sorted(Counter(facts).items()))
 
-def _configuration_payload(s:str)->Tuple[Any,...]:
+def _configuration_payload(s:str,*,opaque_commands:frozenset[str]=frozenset())->Tuple[Any,...]:
  records=[];i=0
  while i<len(s):
   if s[i]!='\\':i+=1;continue
@@ -403,12 +416,12 @@ def _configuration_payload(s:str)->Tuple[Any,...]:
   if name=='captionsetup':
    j=_optional(s,j);arg,end=_group(s,j)
    if end>j:
-    if not _safe_caption_setup(arg):records.append((name,_text_tokens(arg)))
+    if not _safe_caption_setup(arg):records.append((name,_text_tokens(arg,opaque_commands=opaque_commands)))
     i=end;continue
   if name=='setcounter':
    arg,k=_group(s,j);value,end=_group(s,k)
    if end>k:
-    if not _safe_float_counter(arg,value):records.append((name,arg,_text_tokens(value)))
+    if not _safe_float_counter(arg,value):records.append((name,arg,_text_tokens(value,opaque_commands=opaque_commands)))
     i=end;continue
   i=j
  return tuple(records)
@@ -472,7 +485,7 @@ def _macro_definitions(s:str)->Tuple[Any,...]:
  return tuple(records)
 
 def _payload(s:str)->Dict[str,Any]:
- s=active_source(s);envs=_envs(s);floats=[e for e in envs if e['name'] in FLOAT_ENVS];tables=[e for e in envs if e['name'] in TABLE_ENVS];math=_math_spans(s,envs)
+ s=active_source(s);opaque_commands=shadowed_literal_url_commands(s);envs=_envs(s);floats=[e for e in envs if e['name'] in FLOAT_ENVS];tables=[e for e in envs if e['name'] in TABLE_ENVS];math=_math_spans(s,envs)
  def context(start):
   parents=[e for e in floats+[t for t in tables if t['name']=='longtable'] if e['start']<=start<e['end']]
   if not parents:return None
@@ -504,21 +517,21 @@ def _payload(s:str)->Dict[str,Any]:
     if caption:
      _,caption_end=_group(first,caption.end()-1)
      first=first[:caption.start()]+first[caption_end:]
-    first_rows=_table_rows(first);repeat_rows=_table_rows(match.group(1))
-    footer=_text_tokens(match.group(2));last_footer=_text_tokens(match.group(3))
+    first_rows=_table_rows(first,opaque_commands=opaque_commands);repeat_rows=_table_rows(match.group(1),opaque_commands=opaque_commands)
+    footer=_text_tokens(match.group(2),opaque_commands=opaque_commands);last_footer=_text_tokens(match.group(3),opaque_commands=opaque_commands)
     generated_footer=re.fullmatch(r'\s*\\multicolumn\{\d+\}\{r\}\{Continued on next page\}\s*(?:\\\\)?\s*',match.group(2))
     if repeat_rows!=first_rows:table_records.append((key,('repeated_head',repeat_rows)))
     if footer and not generated_footer:table_records.append((key,('footer',footer)))
     if last_footer:table_records.append((key,('last_footer',last_footer)))
     body=first+body[match.end():]
-  rows=_table_rows(body)
-  table_records.append((key,rows,_colspec_payload(spec)))
+  rows=_table_rows(body,opaque_commands=opaque_commands)
+  table_records.append((key,rows,_colspec_payload(spec,opaque_commands=opaque_commands)))
  # Numeric payload outside protected math/table blocks, preserving body order.
  excluded=sorted([(e['start'],e['end']) for e in tables]+[(m['start'],m['end']) for m in math])
  chars=list(s)
  for start,end in excluded:chars[start:end]=' '*(end-start)
  remainder=''.join(chars);numeric_body=[];numeric_float=[];arguments=[]
- def numbers(text):return tuple(re.findall(r'(?<![A-Za-z])[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?',_strip_layout(text)))
+ def numbers(text):return tuple(re.findall(r'(?<![A-Za-z])[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?',_strip_layout(text,opaque_commands=opaque_commands)))
  body_parts=[];cursor=0
  for e in floats:
   if e['start']<cursor:continue
@@ -532,9 +545,9 @@ def _payload(s:str)->Dict[str,Any]:
   name,j=_command(s,i)
   if name in PROTECTED_ARGS:
    j=_optional(s,j);arg,end=_group(s,j)
-   if end>j:arguments.append((context(i),name,_text_tokens(arg)));i=end;continue
+   if end>j:arguments.append((context(i),name,_text_tokens(arg,opaque_commands=opaque_commands)));i=end;continue
   i=j
- return {'configuration_arguments':_configuration_payload(s),'macro_definitions':_macro_definitions(s),'shadowed_literal_url_invocations':_shadowed_literal_url_payload(s),'math_body':tuple(math_body),'math_floats':tuple(sorted(Counter(math_float).items(),key=repr)),'tables':tuple(sorted(Counter(table_records).items(),key=repr)),'identifiers':_ids(s),'numbers_body':numeric_body,'numbers_floats':tuple(sorted(Counter(numeric_float).items(),key=repr)),'protected_arguments':tuple(sorted(Counter(arguments).items(),key=repr))}
+ return {'configuration_arguments':_configuration_payload(s,opaque_commands=opaque_commands),'macro_definitions':_macro_definitions(s),'shadowed_literal_url_invocations':_shadowed_literal_url_payload(s),'math_body':tuple(math_body),'math_floats':tuple(sorted(Counter(math_float).items(),key=repr)),'tables':tuple(sorted(Counter(table_records).items(),key=repr)),'identifiers':_ids(s),'numbers_body':numeric_body,'numbers_floats':tuple(sorted(Counter(numeric_float).items(),key=repr)),'protected_arguments':tuple(sorted(Counter(arguments).items(),key=repr))}
 
 def scientific_payload_diff(original:str,repaired:str)->Dict[str,Any]:
  before=_payload(original);after=_payload(repaired);changed=[key for key in before if before[key]!=after[key]]
