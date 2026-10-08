@@ -35,7 +35,14 @@
     "install.sh",
     "docs/",
     "protocols/",
-    "plugin.json"
+    "plugin.json",
+    "!**/__pycache__/**",
+    "!**/*.pyc",
+    "!**/*.pyo",
+    "!**/.env",
+    "!**/.env.*",
+    "!regression_runs/**",
+    "!data/**"
   ],
   "repository": {
     "type": "git",
