@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Set
 from datetime import datetime
 
-from scientific_integrity import TEXT_WRAPPERS, _command, _group, _optional, _strip_layout, scientific_payload_diff
+from scientific_integrity import TEXT_WRAPPERS, FLOAT_ENVS, _command, _group, _optional, _strip_layout, _envs, active_source, minipage_layout_end, scientific_payload_diff
 from layout_policy import compare_layout_policy
 from layout_prose_integrity import compare_layout_prose
 
@@ -91,6 +91,16 @@ def extract_academic_content(tex_content: str) -> str:
     # Remove comments
     text = re.sub(r'%.*$', '', text, flags=re.MULTILINE)
 
+    # Consume only known literal minipage headers before stripping markers.
+    # Their optional alignment and width must not leak into academic words.
+    spans = []
+    for match in re.finditer(r'\\begin\s*\{minipage\}', text):
+        end = minipage_layout_end(text, match.end())
+        if end is not None:
+            spans.append((match.start(), end))
+    for start, end in reversed(spans):
+        text = text[:start] + ' ' + text[end:]
+
     # Remove math environments (including content) - MUST run before generic LaTeX command removal
     text = re.sub(r'\\begin\{(equation|align|align\*|gather|gather\*|multline|multline\*|displaymath)\}.*?\\end\{\1\}', ' ', text, flags=re.DOTALL)
     text = re.sub(r'\$\$.*?\$\$', ' ', text, flags=re.DOTALL)
@@ -150,8 +160,13 @@ def semantic_hash(tex_content: str) -> str:
 
 
 def _extract_float_blocks(tex_content: str, env_name: str) -> List[str]:
-    pattern = rf'\\begin\{{{env_name}\*?\}}.*?\\end\{{{env_name}\*?\}}'
-    return re.findall(pattern, tex_content, flags=re.DOTALL)
+    families = {
+        'figure': {'figure', 'figure*', 'wrapfigure', 'sidewaysfigure'},
+        'table': {'table', 'table*', 'wraptable', 'sidewaystable'},
+    }
+    source = active_source(tex_content)
+    return [source[env['start']:env['end']] for env in _envs(source)
+            if env['name'] in families.get(env_name, {env_name})]
 
 
 def _find_bibliography_start(tex_content: str) -> Optional[int]:
@@ -174,21 +189,14 @@ def _extract_float_labels_after_offset(tex_content: str, start_offset: Optional[
         return []
 
     labels: List[str] = []
-    tail = tex_content[start_offset:]
-    pattern = re.compile(r'\\begin\{(figure\*?|table\*?)\}(?:\[[^\]]*\])?')
-    for match in pattern.finditer(tail):
-        env_name = match.group(1)
-        end_match = re.search(
-            r'\\end\{' + re.escape(env_name) + r'\}',
-            tail[match.end():],
-            re.DOTALL,
-        )
-        if not end_match:
+    tail = active_source(tex_content[start_offset:])
+    for env in _envs(tail):
+        if env['name'] not in FLOAT_ENVS:
             continue
-        block_end = match.end() + end_match.end()
-        block = tail[match.start():block_end]
+        block = tail[env['start']:env['end']]
         label_match = re.search(r'\\label\{([^}]+)\}', block)
-        labels.append(label_match.group(1) if label_match else env_name)
+        family = 'figure' if 'figure' in env['name'] else 'table'
+        labels.append(label_match.group(1) if label_match else family)
     return sorted(set(labels))
 
 
@@ -211,6 +219,7 @@ def _extract_bibliography_structure(tex_content: str) -> Dict[str, object]:
 
 
 def _extract_layout_structure(tex_content: str) -> Dict[str, object]:
+    tex_content = active_source(tex_content)
     figure_blocks = _extract_float_blocks(tex_content, "figure")
     table_blocks = _extract_float_blocks(tex_content, "table")
     includegraphics = re.findall(r'\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}', tex_content)

@@ -42,6 +42,26 @@ def _optional(s:str,i:int)->int:
  if i<len(s) and s[i]=='[':_,j=_group(s,i,'[',']');return j
  return i
 
+def _literal_dimension(value:str)->bool:
+ # A bounded spelling of a TeX length, not arbitrary macros or expressions.
+ number=r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)'
+ return bool(re.fullmatch(r'\s*(?:'+number+r'\s*(?:pt|em|ex|cm|mm|in|bp|pc|dd|cc|sp)|(?:'+number+r'\s*)?\\(?:linewidth|columnwidth|textwidth|textheight))\s*',value))
+
+def minipage_layout_end(s:str,i:int)->int|None:
+ """End of known minipage presentation arguments; unknown forms stay opaque."""
+ options=[];pos=i
+ for _ in range(3):
+  while pos<len(s) and s[pos].isspace():pos+=1
+  if pos>=len(s) or s[pos]!='[':break
+  value,end=_group(s,pos,'[',']')
+  if end==pos:return None
+  options.append(value.strip());pos=end
+ if options and options[0] not in {'t','c','b'}:return None
+ if len(options)>1 and options[1] and not _literal_dimension(options[1]):return None
+ if len(options)>2 and options[2] not in {'t','c','b','s'}:return None
+ width,end=_group(s,pos)
+ return end if end>pos and _literal_dimension(width) else None
+
 def active_source(s:str)->str:
  chars=list(s);i=0
  while i<len(s):
@@ -216,6 +236,11 @@ def _strip_layout(s:str,*,text_wrappers:bool=False)->str:
    _,end=_group(s,opt);i=end if end>opt else opt;continue
   if name in {'begin','end'}:
    env,end=_group(s,j)
+   if name=='begin' and env=='minipage':
+    stop=minipage_layout_end(s,end)
+    if stop is not None:i=stop;continue
+    # Do not discard a dynamic or malformed environment header.
+    out.append(s[i:end]);i=end;continue
    if env and env not in TABLE_ENVS:
     i=end
     if name=='begin' and env in FLOAT_ENVS:

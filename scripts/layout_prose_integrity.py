@@ -163,6 +163,16 @@ def _opaque_end(source: str, pos: int) -> int:
 
 def _prose_tokens(source: str) -> tuple[str, ...]:
     body = _ordinary_body(source)
+    # Literal minipage dimensions/alignment change presentation. Preserve the
+    # complete body; dynamic headers and unbalanced environments stay opaque.
+    container_markers = []
+    for env in scientific._envs(body):
+        if env['name'] == 'minipage':
+            end = scientific.minipage_layout_end(body, env['body'])
+            if end is not None and end <= env['tail']:
+                container_markers.extend(((env['start'], end), (env['tail'], env['end'])))
+    for start, end in sorted(container_markers, reverse=True):
+        body = body[:start] + ' ' + body[end:]
     pieces = []
     opaque: dict[str, str] = {}
     index = 0
