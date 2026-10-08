@@ -23,6 +23,7 @@ except ImportError:
 from state_schema import normalize_state, validate_state
 from transactional_patch import atomic_write_text
 from layout_policy import snapshot_source_edit_checks
+from visibility_review import review_pdf_visibility
 
 
 DEFAULT_GATEKEEPER_RULES: Dict[str, Any] = {
@@ -325,6 +326,21 @@ def make_decision(
         decision = "CONTINUE"
         reasons.append("visual signal evidence missing/incomplete")
 
+    # Recheck the live physical PDF. A stale report or an empty VLM diagnosis
+    # must not hide off-page glyphs. This requests review, not source rollback.
+    main_tex = state.get("main_tex")
+    if isinstance(main_tex, str) and main_tex.strip() and compile_success:
+        main_path = (Path.cwd() / main_tex).resolve()
+        visibility = review_pdf_visibility(main_path.with_suffix('.pdf'), root=Path.cwd(),
+                               reviews_path=Path.cwd() / 'data/pdf_visibility_reviews.json')
+    else:
+        visibility = {"pass": True, "status": "not_used", "checked": False,
+                      "reason": "no_compiled_main_in_state", "findings": []}
+    checks["pdf_visibility"] = visibility
+    if not visibility["pass"]:
+        decision = "CONTINUE"
+        reasons.append("physical PDF text visibility requires current evidence or host review")
+
     semantic_summary = state.get("semantic_budget_summary")
     semantic_used = semantic_summary is not None or artifacts.get("semantic_patch_report") is not None
     if semantic_used:
@@ -546,6 +562,7 @@ def make_decision(
             "compile": checks["compile_success"]["pass"],
             "page_images": checks["page_images_rendered"]["pass"],
             "visual_inspection": checks["visual_inspection"]["pass"],
+            "pdf_visibility": checks["pdf_visibility"]["pass"],
             "category_A": checks["category_A"]["pass"],
             "category_B": checks["category_B"]["pass"],
             "category_C": checks["category_C"]["pass"],

@@ -3394,6 +3394,7 @@ class OrchestratorRuntime:
         pdf_path = ((state.get("artifacts") or {}).get("pdf_path"))
         if pdf_path:
             cmd.extend(["--pdf", str(pdf_path)])
+            cmd.extend(["--project-root", str(Path.cwd())])
         try:
             subprocess.run(cmd, check=True, cwd=Path.cwd(), capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         except subprocess.CalledProcessError:

@@ -7,9 +7,11 @@ from typing import Any
 try:
     from source_map import build_source_map, within
     from runtime_artifacts import collect_artifact_manifest
+    from visibility_review import review_pdf_visibility
 except ImportError:
     from .source_map import build_source_map, within
     from .runtime_artifacts import collect_artifact_manifest
+    from .visibility_review import review_pdf_visibility
 
 def load_report(path: Path) -> tuple[dict[str, Any], str]:
     if not path.is_file():
@@ -213,6 +215,8 @@ def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path |
     if freshness["vision_status"] != "current":
         vision["clean"] = None
     # Provider completion describes its snapshot; freshness describes this project now.
+    visibility = review_pdf_visibility(main.with_suffix('.pdf'), root=root,
+                           reviews_path=data_dir / 'pdf_visibility_reviews.json')
     return {
         "schema_version": "1.0", "main": sources["main"],
         "project_root": str(root), "project_root_resolution": root_resolution,
@@ -220,12 +224,14 @@ def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path |
                     "full_action_plan": str(data_dir / "visual_action_plan.json"),
                     "full_visual_report": str(data_dir / "visual_signal_report.json")},
         "vision": vision, "vision_source": vision_source,
+        "pdf_visibility": visibility,
         "artifact_freshness": freshness,
         "source_navigation_coverage": sources["object_marker_coverage"],
         "finding_counts": {"total": len(compact), "shown": min(limit, len(compact)), "omitted": max(0, len(compact)-limit)},
         "findings": compact[:limit], "source_map": sources,
         "host_tasks": [
             "Inspect rendered pages, including pages without machine findings.",
+            "Review painted-text bounds in pdf_visibility even when VLM reports no defects; intentional clipping needs current-PDF and inspected-page evidence.",
             "Review freshness blocking checks; stale or unknown vision is not a clean current PDF.",
             "Treat recommendations as evidence; verify the target before editing.",
             "Use exact source files and lines, not flattened include-expansion line numbers.",

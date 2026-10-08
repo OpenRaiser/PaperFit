@@ -18,6 +18,8 @@ ID_COMMANDS={'label','ref','eqref','pageref','autoref','cref','Cref','vref','nam
 PROTECTED_ARGS={'caption','subcaption','section','subsection','subsubsection','paragraph','title','author','affiliation','thanks','footnote','footnotetext'}
 LAYOUT_ONE={'vspace','hspace','vskip','hskip','fontsize','linespread','color','cellcolor','rowcolor','cline','cmidrule','addlinespace','bibliographystyle'}
 RULES={'toprule','midrule','bottomrule','hline','hlineB'}
+DELIMITER_SIZE_COMMANDS={'left','right'}|{size+suffix for size in ('big','Big','bigg','Bigg') for suffix in ('','l','r','m')}
+DELIMITER_COMMANDS={'{','}','|','lbrace','rbrace','langle','rangle','lvert','rvert','lVert','rVert','vert','Vert','lfloor','rfloor','lceil','rceil','backslash'}
 
 def _command(s:str,i:int)->Tuple[str,int]:
  m=re.match(r'\\([A-Za-z@]+|.)',s[i:],re.S)
@@ -75,6 +77,16 @@ def shadowed_literal_url_commands(source:str)->frozenset[str]:
   target=record[1] if record[0] in {'def','gdef','edef','xdef','let'} else record[2]
   name=target.lstrip('\\')
   if name in {'nolinkurl','urlstyle'}:names.add(name)
+ return frozenset(names)
+
+def _shadowed_presentation_commands(source:str)->frozenset[str]:
+ # Newly normalized controls must keep their literal invocation when the
+ # source directly defines them. This is not macro expansion or alias tracing.
+ names=set(shadowed_literal_url_commands(source))
+ for record in _macro_definitions(source):
+  target=record[1] if record[0] in {'def','gdef','edef','xdef','let'} else record[2]
+  name=target.lstrip('\\')
+  if name in DELIMITER_SIZE_COMMANDS|{'parbox'}:names.add(name)
  return frozenset(names)
 
 def _shadowed_literal_url_payload(source:str)->tuple[Any,...]:
@@ -166,7 +178,18 @@ def _roman_stack(s:str)->str:
   return '_{\\mathrm{'+word+'}}' if len(word)>=40 else m.group(0)
  return re.sub(pattern,replace,s)
 
-def _math_tokens(s:str)->Tuple[str,...]:
+def _presentation_delimiter(s:str,i:int,name:str)->Tuple[str,int]|None:
+ while i<len(s) and s[i].isspace():i+=1
+ if i>=len(s):return None
+ if s[i] in '()[]|':return s[i],i+1
+ # The dot is an invisible delimiter only in explicit left/right syntax.
+ if s[i]=='.' and name in {'left','right'}:return '',i+1
+ if s[i]=='\\':
+  delimiter,end=_command(s,i)
+  if delimiter in DELIMITER_COMMANDS:return '\\'+delimiter,end
+ return None
+
+def _math_tokens(s:str,*,opaque_commands:frozenset[str]=frozenset())->Tuple[str,...]:
  s=_roman_stack(s)
  s=re.sub(r'([_^])\{([A-Za-z0-9]|\\[A-Za-z]+)\}',r'\1\2',s)
  s=re.sub(r'(?<=[=+\-<>])\{\}', '', s)
@@ -175,9 +198,15 @@ def _math_tokens(s:str)->Tuple[str,...]:
   if s[i].isspace():i+=1;continue
   if s[i]=='\\':
    name,j=_command(s,i)
+   if not protected and name in DELIMITER_SIZE_COMMANDS and name not in opaque_commands:
+    delimiter=_presentation_delimiter(s,j,name)
+    if delimiter is not None:
+     token,end=delimiter
+     if token:out.append(token)
+     i=end;continue
    if name=='ensuremath' and not protected:
     arg,end=_group(s,j)
-    if end>j:out.extend(_math_tokens(arg));i=end;continue
+    if end>j:out.extend(_math_tokens(arg,opaque_commands=opaque_commands));i=end;continue
    if name in {'begin','end'}:
     env,k=_group(s,j)
     if env in MATH_WRAPPERS:
@@ -272,7 +301,17 @@ def _strip_layout(s:str,*,text_wrappers:bool=False,opaque_commands:frozenset[str
    _,end=_group(s,opt);i=end if end>opt else opt
    if name=='fontsize':_,i=_group(s,i)
    continue
-  if name in {'resizebox','scalebox','rotatebox','parbox','raisebox'}:
+  if name=='parbox' and not star:
+   # The standard [pos][height][inner-pos]{width}{body} header is layout.
+   # Dynamic lengths and unsupported options retain their literal payload.
+   stop=minipage_layout_end(s,j)
+   if stop is not None:
+    pos=stop
+    while pos<len(s) and s[pos].isspace():pos+=1
+    body,end=_group(s,pos)
+    if pos<len(s) and s[pos]=='{' and end>pos:out.append(_strip_layout(body,text_wrappers=text_wrappers,opaque_commands=opaque_commands));i=end;continue
+   out.append(s[i:j]);i=j;continue
+  if name in {'resizebox','scalebox','rotatebox','raisebox'}:
    _,k=_group(s,opt)
    if name=='resizebox':_,k=_group(s,k)
    if name=='raisebox':k=_optional(s,k);k=_optional(s,k)
@@ -338,7 +377,7 @@ def _strip_layout(s:str,*,text_wrappers:bool=False,opaque_commands:frozenset[str
 def _text_tokens(s:str,*,opaque_commands:frozenset[str]=frozenset())->Tuple[Any,...]:
  s=_strip_layout(s,text_wrappers=True,opaque_commands=opaque_commands);envs=_envs(s);math=_math_spans(s,envs);out=[];cursor=0
  for m in math:
-  out.extend(c for c in s[cursor:m['start']] if not c.isspace());out.append(('math',_math_tokens(m['text'])));cursor=m['end']
+  out.extend(c for c in s[cursor:m['start']] if not c.isspace());out.append(('math',_math_tokens(m['text'],opaque_commands=opaque_commands)));cursor=m['end']
  out.extend(c for c in s[cursor:] if not c.isspace())
  while len(out)>=2 and out[0]=='{' and out[-1]=='}':
   depth=0;whole=True
@@ -485,7 +524,7 @@ def _macro_definitions(s:str)->Tuple[Any,...]:
  return tuple(records)
 
 def _payload(s:str)->Dict[str,Any]:
- s=active_source(s);opaque_commands=shadowed_literal_url_commands(s);envs=_envs(s);floats=[e for e in envs if e['name'] in FLOAT_ENVS];tables=[e for e in envs if e['name'] in TABLE_ENVS];math=_math_spans(s,envs)
+ s=active_source(s);opaque_commands=_shadowed_presentation_commands(s);envs=_envs(s);floats=[e for e in envs if e['name'] in FLOAT_ENVS];tables=[e for e in envs if e['name'] in TABLE_ENVS];math=_math_spans(s,envs)
  def context(start):
   parents=[e for e in floats+[t for t in tables if t['name']=='longtable'] if e['start']<=start<e['end']]
   if not parents:return None
@@ -494,7 +533,7 @@ def _payload(s:str)->Dict[str,Any]:
   return (labels,graphics)
  math_body=[];math_float=[]
  for m in math:
-  record=('opaque_math_environment',m['name'],re.sub(r'\s+',' ',m['text']).strip()) if m.get('opaque') else (m['numbered'],_math_tokens(m['text']));key=context(m['start'])
+  record=('opaque_math_environment',m['name'],re.sub(r'\s+',' ',m['text']).strip()) if m.get('opaque') else (m['numbered'],_math_tokens(m['text'],opaque_commands=opaque_commands));key=context(m['start'])
   if key is None:math_body.append(record)
   else:math_float.append((key,record))
  table_records=[]
@@ -550,7 +589,41 @@ def _payload(s:str)->Dict[str,Any]:
  return {'configuration_arguments':_configuration_payload(s,opaque_commands=opaque_commands),'macro_definitions':_macro_definitions(s),'shadowed_literal_url_invocations':_shadowed_literal_url_payload(s),'math_body':tuple(math_body),'math_floats':tuple(sorted(Counter(math_float).items(),key=repr)),'tables':tuple(sorted(Counter(table_records).items(),key=repr)),'identifiers':_ids(s),'numbers_body':numeric_body,'numbers_floats':tuple(sorted(Counter(numeric_float).items(),key=repr)),'protected_arguments':tuple(sorted(Counter(arguments).items(),key=repr))}
 
 def scientific_payload_diff(original:str,repaired:str)->Dict[str,Any]:
- before=_payload(original);after=_payload(repaired);changed=[key for key in before if before[key]!=after[key]]
+ limits='Conservative token invariants, not mathematical equivalence; No macro expansion or mathematical equivalence proof; exotic TeX definitions/restructuring require host review. Cross-file checking requires callers to compare every modified source file.'
  def summary(value):
   return {'sha256':hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False).encode('utf-8')).hexdigest(),'component_counts':{k:len(v) for k,v in value.items()}}
- return {'checked':True,'status':'failed' if changed else 'pass','before':summary(before),'after':summary(after),'changed_components':changed,'regression_reasons':['Scientific payload changed: '+k for k in changed],'limits':'Conservative token invariants, not mathematical equivalence; No macro expansion or mathematical equivalence proof; exotic TeX definitions/restructuring require host review. Cross-file checking requires callers to compare every modified source file.'}
+ try:
+  before=_payload(original);after=_payload(repaired);changed=[key for key in before if before[key]!=after[key]]
+  before_summary=summary(before);after_summary=summary(after)
+ except Exception as exc:
+  # Checker failure is neither a successful check nor confirmed damage. Keep
+  # legacy callers fail closed via checked=False, with a separate diagnosis.
+  return {'checked':False,'status':'unavailable','before':None,'after':None,'changed_components':[],
+          'regression_reasons':['Scientific checker did not complete: '+type(exc).__name__],
+          'assessment':{'classification':'checker_error','scope':'protected_token_invariants',
+                        'semantic_damage_proven':False,'requires_host_review':True,
+                        'confirmed_changed_components':[],'review_changed_components':[]},
+          'limits':limits}
+ def supported_math_records(value):
+  if isinstance(value,tuple):
+   if len(value)==2 and isinstance(value[0],bool):return [value]
+   if value and value[0]=='opaque_math_environment':return []
+   return [record for item in value for record in supported_math_records(item)]
+  return []
+ review=[]
+ for key in changed:
+  if key in {'macro_definitions','configuration_arguments','shadowed_literal_url_invocations'}:
+   review.append(key)
+  elif key in {'math_body','math_floats'} and supported_math_records(before[key])==supported_math_records(after[key]):
+   review.append(key)
+ confirmed=[key for key in changed if key not in review]
+ # A confirmed literal invariant change is not a mathematical damage proof.
+ # Unsupported declarations/opaque environments retain a separate review
+ # diagnosis; neither diagnosis relaxes the legacy failed status.
+ classification='confirmed_payload_change' if confirmed else 'manual_review' if changed else 'supported_preservation'
+ return {'checked':True,'status':'failed' if changed else 'pass','before':before_summary,'after':after_summary,
+         'changed_components':changed,'regression_reasons':['Scientific payload changed: '+k for k in changed],
+         'assessment':{'classification':classification,'scope':'protected_token_invariants',
+                       'semantic_damage_proven':False,'requires_host_review':bool(changed),
+                       'confirmed_changed_components':confirmed,'review_changed_components':review},
+         'limits':limits}

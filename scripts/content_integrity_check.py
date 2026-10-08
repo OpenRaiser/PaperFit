@@ -18,19 +18,21 @@ Usage:
 
 import argparse
 import hashlib
+import difflib
 import json
 import re
 import sys
-from pathlib import Path
+import tarfile
+from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Tuple, Set
 from datetime import datetime
 
-from scientific_integrity import TEXT_WRAPPERS, FLOAT_ENVS, _command, _group, _optional, _strip_layout, _envs, active_source, minipage_layout_end, scientific_payload_diff
+from scientific_integrity import TEXT_WRAPPERS, FLOAT_ENVS, _command, _group, _optional, _strip_layout, _envs, _literal_dimension, _macro_definitions, _shadowed_presentation_commands, active_source, minipage_layout_end, scientific_payload_diff
 from layout_policy import compare_layout_policy
 from layout_prose_integrity import compare_layout_prose
 
 
-def _unwrap_supported_text_wrappers(text: str) -> str:
+def _unwrap_supported_text_wrappers(text: str, *, opaque_commands: frozenset = frozenset()) -> str:
     """Keep supported wrapper text before the legacy command remover runs."""
     output = []
     i = 0
@@ -40,15 +42,22 @@ def _unwrap_supported_text_wrappers(text: str) -> str:
             i += 1
             continue
         name, command_end = _command(text, i)
-        argument = command_end + int(command_end < len(text) and text[command_end] == "*")
+        star = command_end < len(text) and text[command_end] == "*"
+        argument = command_end + int(star)
         argument = _optional(text, argument)
+        supported = name in TEXT_WRAPPERS | {"shortstack"}
+        if name == "parbox" and not star and name not in opaque_commands:
+            header_end = minipage_layout_end(text, command_end)
+            if header_end is not None:
+                argument = header_end
+                supported = True
         while argument < len(text) and text[argument].isspace():
             argument += 1
-        if name in TEXT_WRAPPERS | {"shortstack"} and argument < len(text) and text[argument] == "{":
+        if supported and argument < len(text) and text[argument] == "{":
             _, end = _group(text, argument)
             if end > argument:
                 wrapper = text[i:end]
-                normalized = _strip_layout(wrapper, text_wrappers=True)
+                normalized = _strip_layout(wrapper, text_wrappers=True, opaque_commands=opaque_commands)
                 if normalized != wrapper:
                     # A TeX cell line break separates words in plain text. The
                     # scientific normalizer ignores whitespace, so preserve
@@ -67,7 +76,7 @@ def _unwrap_supported_text_wrappers(text: str) -> str:
                         else:
                             parts.append(wrapper[cursor])
                             cursor += 1
-                    normalized = _strip_layout("".join(parts), text_wrappers=True)
+                    normalized = _strip_layout("".join(parts), text_wrappers=True, opaque_commands=opaque_commands)
                 output.append(normalized)
                 i = end
                 continue
@@ -114,7 +123,7 @@ def extract_academic_content(tex_content: str) -> str:
 
     # Known text wrappers retain their grouped words. Unsupported makecell
     # forms remain opaque under the same bounded scientific normalization.
-    text = _unwrap_supported_text_wrappers(text)
+    text = _unwrap_supported_text_wrappers(text, opaque_commands=_shadowed_presentation_commands(active_source(tex_content)))
 
     # Remove LaTeX commands with optional arguments
     # Handles: \command, \command[opt]{req}, \command{req}
@@ -251,6 +260,9 @@ def structure_regression_reasons(diff: Dict) -> List[str]:
     structure = diff.get("structure_changes") or {}
     before = structure.get("before") or {}
     after = structure.get("after") or {}
+    restoration = diff.get("source_restoration") or {}
+    restored_asset = (restoration.get("asset") if restoration.get("checked") is True
+                      and restoration.get("status") == "verified" else None)
     reasons: List[str] = []
 
     if before.get("figure_count") != after.get("figure_count"):
@@ -261,15 +273,19 @@ def structure_regression_reasons(diff: Dict) -> List[str]:
         reasons.append(
             f"Table environment count changed: {before.get('table_count')} -> {after.get('table_count')}"
         )
-    if before.get("includegraphics_count") != after.get("includegraphics_count"):
+    checked_graphics_count = before.get("includegraphics_count")
+    if restored_asset and isinstance(checked_graphics_count, int):
+        checked_graphics_count -= 1
+    if checked_graphics_count != after.get("includegraphics_count"):
         reasons.append(
             "includegraphics count changed: "
-            f"{before.get('includegraphics_count')} -> {after.get('includegraphics_count')}"
+            f"{checked_graphics_count} -> {after.get('includegraphics_count')}"
         )
 
     removed_figure_labels = structure.get("removed_figure_labels") or []
     removed_table_labels = structure.get("removed_table_labels") or []
-    removed_graphics_files = structure.get("removed_graphics_files") or []
+    removed_graphics_files = [asset for asset in structure.get("removed_graphics_files") or []
+                             if asset != restored_asset]
     before_bibliography = before.get("bibliography") or {}
     after_bibliography = after.get("bibliography") or {}
     if removed_figure_labels:
@@ -419,7 +435,182 @@ def classify_content_type(tex_content: str) -> Dict:
     return result
 
 
-def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_approvals=(), file: str = "", layout_only: bool = False) -> Dict:
+def _literal_graphic_line(line: str) -> Optional[str]:
+    """One standard static invocation; macros and graphics search rules stay opaque."""
+    match = re.fullmatch(r'\s*\\includegraphics\s*(?:\[([^\[\]]*)\])?\s*\{([^{}]+)\}\s*', line)
+    if not match:
+        return None
+    asset = match.group(2)
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./ -]*\.(?:pdf|png|jpg|jpeg|eps)', asset):
+        return None
+    for option in (match.group(1) or '').split(','):
+        if not option.strip():
+            continue
+        if '=' not in option:
+            return None
+        key, value = (part.strip() for part in option.split('=', 1))
+        if key in {'width', 'height', 'totalheight'} and _literal_dimension(value):
+            continue
+        if key == 'keepaspectratio' and value in {'true', 'false'}:
+            continue
+        return None
+    return asset
+
+
+def _inactive_figure_context(source: str, line_number: int, *, active_line: bool) -> str:
+    lines = source.splitlines()
+    index = line_number - 1
+    if type(line_number) is not int or not 0 <= index < len(lines):
+        raise ValueError('source_line_out_of_range')
+    start = next((i for i in range(index - 1, max(-1, index - 61), -1)
+                  if re.fullmatch(r'\s*%\s*\\begin\{figure\*?\}(?:\[[^\]]*\])?\s*', lines[i])), None)
+    end = next((i for i in range(index + 1, min(len(lines), index + 61))
+                if re.fullmatch(r'\s*%\s*\\end\{figure\*?\}\s*', lines[i])), None)
+    if start is None or end is None:
+        raise ValueError('commented_figure_context_missing')
+    body = []
+    for i in range(start, end + 1):
+        line = lines[i].lstrip()
+        if i == index and active_line:
+            if _literal_graphic_line(line) is None:
+                raise ValueError('graphic_invocation_not_static')
+            body.append(line)
+        elif line and not line.startswith('%'):
+            raise ValueError('figure_context_contains_active_content')
+        else:
+            body.append(line[1:] if line.startswith('%') else '')
+    return '\n'.join(body)
+
+
+def _commented_figure_signature(context: str) -> Tuple:
+    """Compare the actual commented figure/caption/label, ignoring prose comments."""
+    records = []
+    i = 0
+    while i < len(context):
+        if context[i] != '\\':
+            i += 1
+            continue
+        name, end = _command(context, i)
+        if name in {'begin', 'end', 'caption', 'label'}:
+            argument, stop = _group(context, _optional(context, end))
+            if stop <= end:
+                raise ValueError('malformed_comment_context')
+            records.append((name, re.sub(r'\s+', ' ', argument).strip()))
+            i = stop
+        else:
+            i = end
+    if ([name for name, _ in records].count('caption') != 1 or
+            [name for name, _ in records].count('label') != 1 or
+            records[0][0] != 'begin' or records[-1][0] != 'end' or
+            records[0][1] not in {'figure', 'figure*'} or records[-1][1] != records[0][1]):
+        raise ValueError('complete_comment_figure_caption_label_required')
+    return tuple(records)
+
+
+def verify_missing_graphic_restoration(original: str, repaired: str, evidence_path: str,
+                                       *, scientific_payload: Dict, layout_prose: Dict,
+                                       layout_policy: Dict) -> Dict:
+    """Verify a local archived original, never a caller-supplied approval boolean.
+
+    URL metadata records provenance, not network authenticity. Other changes
+    still undergo the full independent content/policy and structure checks.
+    """
+    result = {'checked': False, 'status': 'manual_review', 'evidence_path': str(evidence_path),
+              'limits': 'Local byte/hash consistency and exact inactive-source restoration; no network-origin authentication or rendered-quality proof.'}
+    try:
+        evidence_file = Path(evidence_path).resolve()
+        evidence = json.loads(evidence_file.read_text(encoding='utf-8'))
+        if not isinstance(evidence, dict) or evidence.get('schema') != 'paperfit_source_restoration_evidence.v1':
+            raise ValueError('unsupported_evidence_schema')
+        result['evidence_sha256'] = hashlib.sha256(evidence_file.read_bytes()).hexdigest()
+        project = Path(evidence['project_root']).resolve(strict=True)
+        if not project.is_dir():
+            raise ValueError('project_root_not_directory')
+        loaded = {}
+        for role in ('before', 'after', 'reference'):
+            path = Path(evidence[role + '_source_path']).resolve(strict=True)
+            data = path.read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
+            if path.suffix.lower() not in {'.tex', '.ltx'} or digest != evidence[role + '_source_sha256']:
+                raise ValueError(role + '_source_hash_mismatch')
+            loaded[role] = data.decode('utf-8').replace('\r\n', '\n').replace('\r', '\n')
+            result[role + '_source_sha256'] = digest
+            if role == 'after' and not path.is_relative_to(project):
+                raise ValueError('after_source_outside_project')
+            if role == 'after':
+                after_directory = path.parent
+        if loaded['before'] != original or loaded['after'] != repaired:
+            raise ValueError('evidence_does_not_bind_current_source_pair')
+        if not all(report.get('checked') is True and report.get('status') == 'pass'
+                   for report in (scientific_payload, layout_prose, layout_policy)):
+            raise ValueError('independent_protection_did_not_pass')
+        probe_path = Path(evidence['provenance_probe_path']).resolve(strict=True)
+        probe_data = probe_path.read_bytes()
+        if hashlib.sha256(probe_data).hexdigest() != evidence['provenance_probe_sha256']:
+            raise ValueError('provenance_record_hash_mismatch')
+        probe = json.loads(probe_data)
+        if not isinstance(probe, dict):
+            raise ValueError('provenance_record_not_object')
+        archive = Path(probe['download']).resolve(strict=True)
+        if hashlib.sha256(archive.read_bytes()).hexdigest() != probe['sha256']:
+            raise ValueError('reference_archive_hash_mismatch')
+        member = evidence['reference_archive_member']
+        if PurePosixPath(member).is_absolute() or '..' in PurePosixPath(member).parts:
+            raise ValueError('unsafe_archive_member')
+        with tarfile.open(archive, 'r:*') as bundle:
+            entry = bundle.getmember(member)
+            if not entry.isfile() or entry.size > 5_000_000:
+                raise ValueError('reference_member_not_bounded_regular_source')
+            reference_bytes = bundle.extractfile(entry).read()
+            if hashlib.sha256(reference_bytes).hexdigest() != evidence['reference_source_sha256']:
+                raise ValueError('reference_source_not_archive_member_bytes')
+            archive_names = [entry.name for entry in bundle.getmembers()]
+        before_line, after_line, reference_line = (evidence[role + '_line'] for role in ('before', 'after', 'reference'))
+        contexts = [_inactive_figure_context(loaded[role], number, active_line=role == 'before')
+                    for role, number in zip(('before', 'after', 'reference'), (before_line, after_line, reference_line))]
+        signatures = [_commented_figure_signature(context) for context in contexts]
+        if signatures[0] != signatures[1] or signatures[1] != signatures[2]:
+            raise ValueError('original_comment_context_mismatch')
+        lines = {role: loaded[role].splitlines()[number - 1]
+                 for role, number in zip(('before', 'after', 'reference'), (before_line, after_line, reference_line))}
+        if lines['after'] != lines['reference'] or not lines['reference'].lstrip().startswith('%'):
+            raise ValueError('after_line_not_exact_original_comment')
+        # Bind the active invocation to this changed line, rather than finding
+        # an identical inactive block elsewhere after deleting the original.
+        changes = difflib.SequenceMatcher(None, original.splitlines(), repaired.splitlines(), autojunk=False).get_opcodes()
+        if not any(tag == 'replace' and old_start <= before_line - 1 < old_end
+                   and new_start <= after_line - 1 < new_end
+                   for tag, old_start, old_end, new_start, new_end in changes):
+            raise ValueError('restoration_line_not_matched_change')
+        asset = _literal_graphic_line(lines['before'])
+        if asset is None or _literal_graphic_line(lines['reference'].lstrip()[1:]) != asset:
+            raise ValueError('static_asset_reference_mismatch')
+        if any(name == asset or name.endswith('/' + asset) for name in archive_names):
+            raise ValueError('asset_present_in_reference_archive')
+        asset_path = (after_directory / asset).resolve()
+        if not asset_path.is_relative_to(project) or asset_path.exists() or asset_path.is_symlink():
+            raise ValueError('asset_not_confirmed_absent_inside_project')
+        if re.search(r'\\(?:graphicspath|DeclareGraphicsExtensions)\b', active_source(original) + active_source(repaired)):
+            raise ValueError('graphics_search_configuration_requires_review')
+        for record in _macro_definitions(active_source(original)):
+            target = record[1] if record[0] in {'def', 'gdef', 'edef', 'xdef', 'let'} else record[2]
+            if target.lstrip('\\') == 'includegraphics':
+                raise ValueError('includegraphics_redefinition_requires_review')
+        if probe.get('schema') != 'paperfit_asset_recovery_probe.v1' or probe.get('asset') != asset:
+            raise ValueError('provenance_record_asset_mismatch')
+        if not any(isinstance(row, dict) and row.get('line') == reference_line and row.get('text') == lines['reference']
+                   for row in probe.get('main_tex_asset_reference', [])):
+            raise ValueError('provenance_reference_line_mismatch')
+        result.update(checked=True, status='verified', asset=asset,
+                      before_line=before_line, after_line=after_line, reference_line=reference_line,
+                      provenance={'requested_url': probe.get('requested_url'), 'final_url': probe.get('final_url'),
+                                  'archive_sha256': probe['sha256'], 'probe_sha256': evidence['provenance_probe_sha256']})
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, IndexError, AttributeError, tarfile.TarError) as exc:
+        result['reason'] = str(exc) if isinstance(exc, ValueError) else 'restoration_evidence_unavailable:' + type(exc).__name__
+    return result
+
+
+def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_approvals=(), file: str = "", layout_only: bool = False, source_restoration_evidence_path: Optional[str] = None) -> Dict:
     """
     Compute the difference between original and repaired content.
 
@@ -453,6 +644,9 @@ def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_
     scientific_payload = scientific_payload_diff(original_tex, repaired_tex)
     layout_policy = compare_layout_policy(original_tex, repaired_tex, approvals=layout_policy_approvals, file=file)
     layout_prose = compare_layout_prose(original_tex, repaired_tex)
+    source_restoration = (verify_missing_graphic_restoration(original_tex, repaired_tex, source_restoration_evidence_path,
+                          scientific_payload=scientific_payload, layout_prose=layout_prose, layout_policy=layout_policy)
+                          if source_restoration_evidence_path else {'checked': False, 'status': 'not_used'})
 
     # Determine violation level and required action
     violation_level = 0
@@ -468,7 +662,7 @@ def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_
         'removed_table_labels': removed_table_labels,
         'removed_graphics_files': removed_graphics_files,
     }
-    structure_reasons = structure_regression_reasons({"structure_changes": structure_changes})
+    structure_reasons = structure_regression_reasons({"structure_changes": structure_changes, "source_restoration": source_restoration})
     layout_structure_changed = bool(structure_reasons)
 
     if scientific_payload["regression_reasons"]:
@@ -501,12 +695,15 @@ def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_
         action_required = "auto_rollback"
     elif (layout_policy["status"] == "manual_review" or (layout_only and layout_prose.get("checked") is not True)) and action_required != "auto_rollback":
         action_required = "manual_review"
+    if source_restoration_evidence_path and source_restoration['status'] != 'verified' and action_required != 'auto_rollback':
+        action_required = 'manual_review'
 
     return {
         'timestamp': datetime.now().isoformat(),
         'scientific_payload': scientific_payload,
         'layout_policy': layout_policy,
         'layout_prose': layout_prose,
+        'source_restoration': source_restoration,
         'hash_comparison': {
             'pre_hash': pre_hash,
             'post_hash': post_hash,
@@ -763,7 +960,8 @@ def cmd_diff(args):
     with open(args.repaired, 'r', encoding='utf-8') as f:
         repaired = f.read()
 
-    result = compute_content_diff(original, repaired, layout_only=True)
+    result = compute_content_diff(original, repaired, layout_only=True,
+                                  source_restoration_evidence_path=getattr(args, 'source_restoration_evidence', None))
     result['original_file'] = args.original
     result['repaired_file'] = args.repaired
 
@@ -817,6 +1015,7 @@ def main():
     diff_parser.add_argument('original', help='Original .tex file')
     diff_parser.add_argument('repaired', help='Repaired .tex file')
     diff_parser.add_argument('--output', '-o', help='Output JSON file')
+    diff_parser.add_argument('--source-restoration-evidence', help='Hash-bound local original-source/archive evidence for one inactive missing graphic restoration')
     diff_parser.set_defaults(func=cmd_diff)
 
     # 'critical' command

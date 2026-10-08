@@ -119,6 +119,20 @@ class TokenVerificationTest(unittest.TestCase):
         truncated = split_safe_additive_terms(original)[:2]
         self.assertFalse(verify_split_preserves_tokens(original, truncated))
 
+    def test_changed_additive_sign_rejected(self):
+        self.assertFalse(verify_split_preserves_tokens("a + b - c", ["a", "- b", "+ c"]))
+
+    def test_missing_additive_operator_rejected(self):
+        self.assertFalse(verify_split_preserves_tokens("a + b + c", ["a", "b", "+ c"]))
+
+    def test_unary_minus_preserved(self):
+        original = "-a + b - c"
+        self.assertTrue(verify_split_preserves_tokens(original, split_safe_additive_terms(original)))
+        self.assertFalse(verify_split_preserves_tokens(original, ["a", "+ b", "- c"]))
+
+    def test_sign_inside_fraction_is_not_layout(self):
+        self.assertFalse(verify_split_preserves_tokens(r"x + \frac{a-b}{c}", ["x", r"+ \frac{a+b}{c}"]))
+
     def test_math_token_extraction(self):
         tokens = count_math_tokens(r"\alpha + \beta_1 = 3.14")
         self.assertIn("\\alpha", tokens)

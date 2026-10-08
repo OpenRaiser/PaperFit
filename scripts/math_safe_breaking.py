@@ -169,8 +169,7 @@ def verify_split_preserves_tokens(original: str, terms: List[str]) -> bool:
     joined = " ".join(terms)
     split_tokens = count_math_tokens(joined)
 
-    # 切分会在项边界产生 +/- 重复，过滤掉纯粹的符号变化：比较去符号后的序列
-    # 更准确的做法：去掉 + 和 - 后比较（因为切分点就是 +/-）
-    original_core = [t for t in original_tokens if t not in {"+", "-"}]
-    split_core = [t for t in split_tokens if t not in {"+", "-"}]
-    return original_core == split_core
+    # The splitter retains the operator at the start of each following term.
+    # Line breaks change spacing, not signs: dropping +/- here would approve
+    # a subtraction changed to addition, a missing unary minus, or lost terms.
+    return original_tokens == split_tokens

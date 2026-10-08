@@ -34,6 +34,7 @@ except ImportError:
     Image = None
 
 from cv_detector import BatchCVDetector
+from visibility_review import review_pdf_visibility, finding_id
 
 
 # Caption block header: "Figure 3:", "Fig. 12:", "Table 4:" at block start
@@ -740,6 +741,7 @@ def aggregate_visual_signals(
     column_void_report: Optional[str] = None,
     log_report: Optional[str] = None,
     crossrefs_report: Optional[str] = None,
+    project_root: Optional[str] = None,
 ) -> Dict[str, Any]:
     pages_path = Path(pages_dir)
     taxonomy = _load_taxonomy(Path(taxonomy_path))
@@ -751,6 +753,16 @@ def aggregate_visual_signals(
         pages_path=pages_path,
         taxonomy=taxonomy,
     )
+    pdf_visibility = review_pdf_visibility(Path(pdf_path), root=Path(project_root).resolve() if project_root else Path(pdf_path).resolve().parent,
+                         reviews_path=Path(output_path).resolve().parent / 'pdf_visibility_reviews.json') if pdf_path else {
+        "checked": False, "status": "unavailable", "reason": "pdf_path_not_provided", "findings": []}
+    # When texttrace is available it owns physical text-boundary evidence.
+    # Extraction substitutes ActualText and ignores clip intent; emitting that
+    # legacy duplicate would re-block an exactly reviewed intentional crop.
+    # Object/table geometry and all other native signals remain independent.
+    if pdf_visibility.get("checked"):
+        pymupdf_native["findings"] = [entry for entry in pymupdf_native.get("findings", [])
+                                    if not str(entry.get("defect_id") or "").startswith("D1-native-")]
     column_void = _load_json(column_void_report)
     log_data = _load_json(log_report)
     crossrefs = _load_json(crossrefs_report)
@@ -761,6 +773,25 @@ def aggregate_visual_signals(
     hinted_pages: Dict[int, List[str]] = {}
     by_skill: Dict[str, int] = {}
     object_clusters: List[Dict[str, Any]] = []
+
+    # ActualText can replace clipped glyphs with accessible TeX source. Inspect
+    # painted placements independently of extraction and VLM confidence.
+    for measured in pdf_visibility.get("findings") or []:
+        entry = {"source": "pymupdf_texttrace", "page": measured["page"],
+                 "finding_id": finding_id(measured), "defect_id": "D1-painted-text-outside-page",
+                 "taxonomy_defect_id": "D1", "category": "D", "severity": "major",
+                 "confidence": 1.0, "bbox": measured.get("bbox"),
+                 "description": "Painted text extends beyond physical page bounds; inspect the page and source before repair.",
+                 "metrics": measured, "suggested_skill": "overflow-repair",
+                 "status": "requires_host_review", "semantic_damage_proven": False,
+                 "pdf_sha256": pdf_visibility.get("pdf_sha256")}
+        if measured.get("review_status") == "reviewed_intentional_clipping":
+            entry.update(status="reviewed_intentional_clipping", severity="minor")
+            hints.append(entry)
+        else:
+            findings.append(entry)
+            pages_flagged.setdefault(measured["page"], []).append("D1")
+            by_skill["overflow-repair"] = by_skill.get("overflow-repair", 0) + 1
 
     for page_result in cv_report.get("page_results") or []:
         page_num = int(page_result.get("page_number") or 0)
@@ -1055,6 +1086,7 @@ def aggregate_visual_signals(
             ),
         },
         "machine_sources": {
+            "pdf_visibility": pdf_visibility,
             "cv_detector": {
                 "page_results_count": len(cv_report.get("page_results") or []),
                 "total_detections": cv_report.get("total_detections", 0),
@@ -1100,6 +1132,7 @@ def main() -> None:
     parser.add_argument("--output", default="data/visual_signal_report.json")
     parser.add_argument("--taxonomy", default=str(Path(__file__).resolve().parent.parent / "config" / "vto_taxonomy.yaml"))
     parser.add_argument("--pdf", default=None, help="Optional compiled PDF path for PyMuPDF native geometry checks")
+    parser.add_argument("--project-root", default=None, help="Compilation root for nested main files and geometry review evidence")
     parser.add_argument("--column-void-report", default=None)
     parser.add_argument("--log-report", default=None)
     parser.add_argument("--crossrefs-report", default=None)
@@ -1110,6 +1143,7 @@ def main() -> None:
         output_path=args.output,
         taxonomy_path=args.taxonomy,
         pdf_path=args.pdf,
+        project_root=args.project_root,
         column_void_report=args.column_void_report,
         log_report=args.log_report,
         crossrefs_report=args.crossrefs_report,
