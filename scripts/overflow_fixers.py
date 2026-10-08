@@ -26,6 +26,7 @@ except ImportError:
     from math_safe_breaking import split_safe_additive_terms, verify_split_preserves_tokens
 
 from transactional_patch import atomic_write_text
+from source_map import masked_tex
 
 try:
     from skills.latex_fixers.shared_table_helpers import (
@@ -117,6 +118,25 @@ _DISPLAY_MATH_ENV_RE = re.compile(r"\\begin\{(equation\*?|align\*?|multline\*?|g
 
 
 _BRACKET_DISPLAY_RE = re.compile(r"(?<!\\)\\\[ *(\S.*?) *(?<!\\)\\\]", re.DOTALL)
+
+
+class _SourceDisplayMatch:
+    """Expose original text groups for a position-preserving masked match."""
+
+    def __init__(self, match: "re.Match[str]", source: str) -> None:
+        self._match = match
+        self._source = source
+
+    def group(self, index: int) -> Optional[str]:
+        if self._match.group(index) is None:
+            return None
+        return self._source[self._match.start(index):self._match.end(index)]
+
+    def start(self) -> int:
+        return self._match.start()
+
+    def end(self) -> int:
+        return self._match.end()
 
 
 class _BracketDisplayMatch:
@@ -347,11 +367,8 @@ def _remove_preamble_textheight_shrink(
     return tex_content, None
 
 
-def _resolve_overfull_files(project_root: Path, main_tex_name: str) -> Dict[int, Path]:
-    """解析日志，把 overfull 行号映射到实际源文件。
-
-    返回 {line_number: actual_file_path}。不在映射里的行号属于 main.tex。
-    """
+def _resolve_overfull_file_candidates(project_root: Path, main_tex_name: str) -> Dict[int, List[Path]]:
+    """Keep all files reporting a local line; a collision needs a source anchor."""
     try:
         from multi_file_overfull import find_file_in_project, resolve_overfull_to_source
         log_path = project_root / f"{Path(main_tex_name).stem}.log"
@@ -359,16 +376,24 @@ def _resolve_overfull_files(project_root: Path, main_tex_name: str) -> Dict[int,
             return {}
         log_text = log_path.read_text(encoding="utf-8", errors="replace")
         resolutions = resolve_overfull_to_source(log_text, project_root, main_tex_name)
-        mapping: Dict[int, Path] = {}
+        mapping: Dict[int, List[Path]] = {}
         for r in resolutions:
-            if r["file"] == main_tex_name:
-                continue  # main.tex 本身的溢出不需要映射
             actual = find_file_in_project(project_root, r["file"])
             if actual is not None:
-                mapping[r["line_start"]] = actual
+                candidates = mapping.setdefault(r["line_start"], [])
+                actual = actual.resolve()
+                if actual not in candidates:
+                    candidates.append(actual)
         return mapping
     except Exception:
         return {}
+
+
+def _resolve_overfull_files(project_root: Path, main_tex_name: str) -> Dict[int, Path]:
+    """Legacy unique-line lookup; never silently overwrite an include collision."""
+    main_path = (project_root / main_tex_name).resolve()
+    return {line: files[0] for line, files in _resolve_overfull_file_candidates(project_root, main_tex_name).items()
+            if len(files) == 1 and files[0] != main_path}
 
 
 def _fix_overfull_in_included_file(
@@ -778,8 +803,10 @@ def _find_display_math_match(
     equation_label: Optional[str] = None,
     tolerance: int = 2,
 ):
-    matches: List[Any] = list(_DISPLAY_MATH_ENV_RE.finditer(tex_content))
-    matches.extend(_BracketDisplayMatch(m) for m in _BRACKET_DISPLAY_RE.finditer(tex_content))
+    active = masked_tex(tex_content)
+    matches: List[Any] = [_SourceDisplayMatch(m, tex_content) for m in _DISPLAY_MATH_ENV_RE.finditer(active)]
+    matches.extend(_BracketDisplayMatch(_SourceDisplayMatch(m, tex_content))
+                   for m in _BRACKET_DISPLAY_RE.finditer(active))
     if not matches:
         return None
 
@@ -1357,8 +1384,10 @@ def fix_equation_overflow(
     starred = env_name is None or env_name.endswith("*")
     rewritten_equation = _rewrite_equation_to_multline(equation_body, starred=starred)
     if rewritten_equation is None:
-        fallback_env = "multline*" if starred else "multline"
-        rewritten_equation = f"\\begin{{{fallback_env}}}\n{equation_body.strip()}\n\\end{{{fallback_env}}}"
+        # Renaming an unsplit/already aligned equation to multline does not
+        # create a break and can add horizontal spacing, worsening overflow.
+        # Unsupported structures need a host-selected mathematical layout.
+        return tex_content, None
 
     modified_content = tex_content[:match.start()] + rewritten_equation + tex_content[match.end():]
     
@@ -1504,7 +1533,13 @@ def fix_overflow_defects(
     Returns:
         OverflowFixReport: 修复报告
     """
-    tex_path = Path(tex_file_path)
+    tex_path = Path(tex_file_path).resolve()
+    project_root = Path.cwd().resolve()
+    try:
+        main_tex_name = tex_path.relative_to(project_root).as_posix()
+    except ValueError:
+        project_root = tex_path.parent
+        main_tex_name = tex_path.name
     if not tex_path.exists():
         return OverflowFixReport(
             status="failed",
@@ -1518,11 +1553,12 @@ def fix_overflow_defects(
             status="failed",
             unresolved=[f"无法读取文件 {tex_file_path}: {e}"]
         )
-    original_tex_content = tex_content
+    original_contents = {tex_path: tex_content}
+    source_contents = dict(original_contents)
 
     # 多文件解析：确定 D1 溢出实际发生在哪个 \input 的子文件
     # LaTeX 日志的行号属于最近打开的子文件，不是 main.tex
-    multi_file_map = _resolve_overfull_files(tex_path.parent, tex_path.name)
+    multi_file_map = _resolve_overfull_file_candidates(project_root, main_tex_name)
 
     modified_files = set()
     changes = []
@@ -1535,28 +1571,42 @@ def fix_overflow_defects(
         object_name = defect.get("object", "")
         overflow_amount = defect.get("overflow_amount", 0)
 
+        # A source line is meaningful only together with its file. Preserve the
+        # host/plan's explicit identity; a legacy line-only collision is unsafe.
+        anchor = defect.get("source_anchor") or {}
+        anchor_file = anchor.get("file")
+        explicit_file = defect.get("source_file") or anchor_file
+        working_path = tex_path
+        if line_number is None:
+            line_number = anchor.get("start_line")
+        if explicit_file:
+            working_path = (project_root / str(explicit_file)).resolve()
+            if anchor_file and (project_root / str(anchor_file)).resolve() != working_path:
+                unresolved.append(f"{defect_id}: source_file and source_anchor disagree")
+                continue
+            try:
+                working_path.relative_to(project_root)
+            except ValueError:
+                unresolved.append(f"{defect_id}: source anchor is outside the paper project")
+                continue
+        elif defect_id in {"D1", "D2"} and line_number is not None:
+            possible_files = multi_file_map.get(line_number, [])
+            if len(possible_files) > 1:
+                unresolved.append(f"{defect_id} L{line_number}: ambiguous source file; provide source_anchor")
+                continue
+            if possible_files:
+                working_path = possible_files[0]
+
+        if working_path not in source_contents:
+            try:
+                source_contents[working_path] = working_path.read_text(encoding="utf-8")
+                original_contents[working_path] = source_contents[working_path]
+            except (OSError, UnicodeDecodeError) as e:
+                unresolved.append(f"{defect_id}: cannot read source {working_path}: {e}")
+                continue
+        tex_content = source_contents[working_path]
         new_content = tex_content
         fix_result = None
-
-        # 多文件批量修复：同一子文件的多个溢出一次性全修
-        if defect_id == "D1" and line_number is not None and multi_file_map:
-            included_path = multi_file_map.get(line_number)
-            if included_path is not None and included_path.is_file():
-                # 收集同一子文件的所有 D1 行号
-                all_lines_for_file = [
-                    ln for ln, fp in multi_file_map.items() if fp == included_path
-                ]
-                batch_result = _batch_fix_included_file_overfull(
-                    included_path,
-                    all_lines_for_file,
-                    overflow_amount,
-                )
-                if batch_result is not None:
-                    file_path_str, batch_fix = batch_result
-                    changes.append(batch_fix)
-                    modified_files.add(file_path_str)
-                    # 跳过同文件的其他 D1 候选（已批量修复）
-                    continue
 
         if defect_id == "D1":
             # 判断是段落溢出还是表格溢出
@@ -1611,11 +1661,24 @@ def fix_overflow_defects(
 
         # 检查修复是否成功
         if fix_result and new_content != tex_content:
-            tex_content = new_content
+            source_contents[working_path] = new_content
+            if working_path != tex_path:
+                # Dependencies belong in the real document preamble, never in
+                # an included section after \begin{document}.
+                main_content = source_contents[tex_path]
+                if _uses_amsmath_envs(new_content) and not _amsmath_loaded(main_content):
+                    insert_at = main_content.find(r"\begin{document}")
+                    if insert_at > 0:
+                        main_content = main_content[:insert_at] + "\\usepackage{amsmath}\n" + main_content[insert_at:]
+                if r"\begin{tabularx}" in new_content:
+                    main_content = _ensure_tabularx_package(main_content)
+                if main_content != source_contents[tex_path]:
+                    source_contents[tex_path] = main_content
+                    modified_files.add(str(tex_path))
             fix_result.page = page
             fix_result.line_number = line_number
             changes.append(fix_result)
-            modified_files.add(str(tex_path))
+            modified_files.add(str(working_path))
         else:
             unresolved.append(
                 f"{defect_id} ({object_name or '未知对象'}): 无法自动修复，可能需要语义改写或人工调整"
@@ -1623,17 +1686,20 @@ def fix_overflow_defects(
 
     # 写入修改后的内容
     if modified_files:
-        gate_passed, gate_reason = _passes_structure_write_gate(original_tex_content, tex_content)
-        if not gate_passed:
-            unresolved.append(f"图表结构硬门禁拦截：{gate_reason}")
-            return OverflowFixReport(
-                status="failed",
-                modified_files=[],
-                changes=[],
-                unresolved=unresolved,
-            )
+        # Check every changed include before writing any of them. Included
+        # tables/equations use the same scoped repair and payload gate as main.
+        for file_name in sorted(modified_files):
+            source_path = Path(file_name)
+            gate_passed, gate_reason = _passes_structure_write_gate(
+                original_contents[source_path], source_contents[source_path])
+            if not gate_passed:
+                unresolved.append(f"图表结构硬门禁拦截 ({source_path.name})：{gate_reason}")
+                return OverflowFixReport(
+                    status="failed", modified_files=[], changes=[], unresolved=unresolved)
         try:
-            atomic_write_text(tex_path, tex_content, backup_dir=tex_path.parent / "data" / "backups")
+            for file_name in sorted(modified_files):
+                source_path = Path(file_name)
+                atomic_write_text(source_path, source_contents[source_path], backup_dir=project_root / "data" / "backups")
         except OSError as e:
             unresolved.append(f"无法写入文件 {tex_path}: {e}")
             return OverflowFixReport(

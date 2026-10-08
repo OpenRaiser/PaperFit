@@ -15,6 +15,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import orchestrator_runtime  # noqa: E402
+from pdf_test_support import write_test_pdf  # noqa: E402
 from orchestrator_runtime import OrchestratorRuntime  # noqa: E402
 from phased_repair import (  # noqa: E402
     attribute_and_rollback_round_failure,
@@ -136,7 +137,7 @@ class _CandidateRollbackHarness:
         self.root = root
         self.main_tex_name = "main.tex"
         (root / "main.tex").write_text(MAIN_TEX, encoding="utf-8")
-        (root / "main.pdf").write_bytes(b"%PDF fixture\n")
+        write_test_pdf(root / "main.pdf")
         self.core_calls = {"count": 0}
         self.compile_calls = {"count": 0}
         self.mode = executor_mode

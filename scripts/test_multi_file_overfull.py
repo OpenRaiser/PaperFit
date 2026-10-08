@@ -23,12 +23,15 @@ LOG = """This is pdfTeX.
 (sections/intro.tex
 Overfull \\hbox (30.23892pt too wide) in paragraph at lines 31--32
 []\\OT1/ptm/m/n/10 The remarkable success of Large Language Models
+
 Overfull \\hbox (24.21783pt too wide) in paragraph at lines 31--32
 []\\OT1/ptm/m/n/10 re-
+
 )
 (sections/method.tex
 Overfull \\hbox (15.5pt too wide) in paragraph at lines 8--10
 []\\OT1/ptm/m/n/10 methodology paragraph
+
 )
 Overfull \\hbox (5.2pt too wide) in paragraph at lines 5--6
 []\\OT1/ptm/m/n/10 main tex paragraph
@@ -137,6 +140,7 @@ class MultiFileFixIntegrationTest(unittest.TestCase):
                 "(sections/intro.tex\n"
                 "Overfull \\hbox (15.0pt too wide) in paragraph at lines 5--5\n"
                 "[]\\OT1/ptm/m/n/10 paragraph text\n"
+                "\n"
                 ")\n",
                 encoding="utf-8",
             )

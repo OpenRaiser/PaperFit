@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from scripts.runtime_artifacts import collect_artifact_manifest
+from scripts.pdf_test_support import write_test_pdf
 
 
 class RuntimeArtifactsTest(unittest.TestCase):
@@ -21,7 +22,7 @@ class RuntimeArtifactsTest(unittest.TestCase):
             gatekeeper = root / "data" / "gatekeeper_decision.json"
 
             main.write_text("tex", encoding="utf-8")
-            pdf.write_bytes(b"pdf")
+            write_test_pdf(pdf)
             page = pages / "page_001.png"
             page.write_bytes(b"png")
             visual.write_text("{}", encoding="utf-8")
@@ -65,7 +66,7 @@ class RuntimeArtifactsTest(unittest.TestCase):
             gatekeeper = root / "data" / "gatekeeper_decision.json"
 
             main.write_text("tex", encoding="utf-8")
-            pdf.write_bytes(b"pdf")
+            write_test_pdf(pdf)
             page = pages / "page_001.png"
             page.write_bytes(b"png")
             visual.write_text("{}", encoding="utf-8")
@@ -110,7 +111,7 @@ class RuntimeArtifactsTest(unittest.TestCase):
             gatekeeper = root / "data" / "gatekeeper_decision.json"
 
             main.write_text("tex", encoding="utf-8")
-            pdf.write_bytes(b"pdf")
+            write_test_pdf(pdf)
             page = pages / "page_001.png"
             page.write_bytes(b"png")
             visual.write_text("{}", encoding="utf-8")
@@ -156,7 +157,7 @@ class RuntimeArtifactsTest(unittest.TestCase):
 
             main.write_text("\\input{sections/intro}\n", encoding="utf-8")
             intro.write_text("body", encoding="utf-8")
-            pdf.write_bytes(b"pdf")
+            write_test_pdf(pdf)
             page = pages / "page_001.png"
             page.write_bytes(b"png")
             visual.write_text("{}", encoding="utf-8")

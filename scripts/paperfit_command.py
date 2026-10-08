@@ -214,7 +214,7 @@ def _default_target_pages(template_key: Optional[str], page_budget: str) -> Opti
 
 
 def _infer_pdf_page_count(project_root: Path, main_tex: Path) -> Optional[int]:
-    pdf_path = project_root / f"{main_tex.stem}.pdf"
+    pdf_path = main_tex.with_suffix(".pdf")
     if not pdf_path.is_file():
         return None
     result = _run(["pdfinfo", str(pdf_path)], cwd=project_root)
@@ -301,6 +301,9 @@ def _install_missing_sty(names: List[str]) -> List[str]:
 
 
 def _compile(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
+    project_root = project_root.resolve()
+    main_tex = (main_tex if main_tex.is_absolute() else project_root / main_tex).resolve()
+    build_root = main_tex.parent
     timeout_sec = int(os.environ.get("PAPERFIT_COMPILE_TIMEOUT_SEC", "240"))
     if os.environ.get("PAPERFIT_BOUNDED_COMPILE") == "1":
         bounded = _compile_bounded(project_root, main_tex=main_tex, timeout_sec=timeout_sec)
@@ -314,13 +317,13 @@ def _compile(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
         "-halt-on-error",
         main_tex.name,
     ]
-    pdf_path = project_root / f"{main_tex.stem}.pdf"
+    pdf_path = main_tex.with_suffix(".pdf")
     _clean_main_build_artifacts(project_root, main_tex=main_tex)
     try:
         pdf_path.unlink()
     except FileNotFoundError:
         pass
-    result = _run(cmd, cwd=project_root, timeout=timeout_sec)
+    result = _run(cmd, cwd=build_root, timeout=timeout_sec)
     compile_log = project_root / "data" / "logs" / "paperfit_compile.log"
     _mkdir(compile_log)
     compile_log.write_text((result.stdout or "") + ("\n" + result.stderr if result.stderr else ""), encoding="utf-8")
@@ -340,7 +343,7 @@ def _compile(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
         if missing_sty:
             installed = _install_missing_sty(missing_sty)
             if installed:
-                result = _run(cmd, cwd=project_root, timeout=timeout_sec)
+                result = _run(cmd, cwd=build_root, timeout=timeout_sec)
                 combined_log = (result.stdout or "") + "\n" + (result.stderr or "")
                 compile_log.write_text(combined_log, encoding="utf-8")
                 timed_out = result.returncode == 124
@@ -354,6 +357,7 @@ def _compile(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
         "missing_sty": case["missing_sty"],
         "missing_images": case["missing_images"],
         "command": cmd,
+        "cwd": str(build_root),
         "returncode": result.returncode,
         "timeout": timed_out,
         "timeout_sec": timeout_sec,
@@ -361,13 +365,14 @@ def _compile(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
         "fatal_error": fatal_error,
         "stdout_tail": (result.stdout or "")[-4000:],
         "stderr_tail": (result.stderr or "")[-4000:],
-        "log_file": f"{main_tex.stem}.log",
+        "log_file": main_tex.with_suffix(".log").relative_to(project_root).as_posix(),
         "pdf_path": str(pdf_path) if success else None,
         "compile_log": str(compile_log),
     }
 
 
 def _clean_main_build_artifacts(project_root: Path, *, main_tex: Path) -> None:
+    main_path = main_tex if main_tex.is_absolute() else project_root / main_tex
     for suffix in [
         ".aux",
         ".bbl",
@@ -381,7 +386,7 @@ def _clean_main_build_artifacts(project_root: Path, *, main_tex: Path) -> None:
         ".toc",
     ]:
         try:
-            (project_root / f"{main_tex.stem}{suffix}").unlink()
+            main_path.with_suffix(suffix).unlink()
         except FileNotFoundError:
             pass
 
@@ -402,11 +407,14 @@ def _pdf_page_count(pdf_path: Path) -> Optional[int]:
 
 
 def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) -> Dict[str, Any]:
+    project_root = project_root.resolve()
+    main_tex = (main_tex if main_tex.is_absolute() else project_root / main_tex).resolve()
+    build_root = main_tex.parent
     pdflatex = shutil.which("pdflatex")
     if not pdflatex:
         return {"available": False}
-    pdf_path = project_root / f"{main_tex.stem}.pdf"
-    good_pdf_path = project_root / f"{main_tex.stem}.paperfit-good.pdf"
+    pdf_path = main_tex.with_suffix(".pdf")
+    good_pdf_path = main_tex.with_suffix(".paperfit-good.pdf")
     _clean_main_build_artifacts(project_root, main_tex=main_tex)
     for path in (pdf_path, good_pdf_path):
         try:
@@ -448,7 +456,7 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) ->
     def _run_pdflatex() -> subprocess.CompletedProcess[str]:
         return _run(
             [pdflatex, "-interaction=nonstopmode", "-halt-on-error", "-recorder", main_tex.name],
-            cwd=project_root,
+            cwd=build_root,
             timeout=pass_timeout,
         )
 
@@ -456,12 +464,12 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) ->
     _record(result)
     have_good_pdf = _snapshot_if_readable()
 
-    aux_path = project_root / f"{main_tex.stem}.aux"
+    aux_path = main_tex.with_suffix(".aux")
     bibtex = shutil.which("bibtex")
     if aux_path.exists() and bibtex:
         aux_text = aux_path.read_text(encoding="utf-8", errors="replace")
         if r"\bibdata{" in aux_text:
-            result = _run([bibtex, main_tex.stem], cwd=project_root, timeout=max(60, min(timeout_sec, 180)))
+            result = _run([bibtex, main_tex.stem], cwd=build_root, timeout=max(60, min(timeout_sec, 180)))
             _record(result)
 
     for _ in range(2):
@@ -500,6 +508,7 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) ->
         "available": True,
         "success": success,
         "command": [item.get("command") for item in passes],
+        "cwd": str(build_root),
         "returncode": 0 if success else (124 if timed_out else int((passes[-1] if passes else {}).get("returncode") or 1)),
         "timeout": timed_out,
         "timeout_sec": timeout_sec,
@@ -510,14 +519,14 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) ->
         "passes": passes,
         "stdout_tail": "\n".join(str(item.get("stdout_tail") or "") for item in passes)[-4000:],
         "stderr_tail": "\n".join(str(item.get("stderr_tail") or "") for item in passes)[-4000:],
-        "log_file": f"{main_tex.stem}.log",
+        "log_file": main_tex.with_suffix(".log").relative_to(project_root).as_posix(),
         "pdf_path": str(pdf_path) if success else None,
         "compile_log": str(compile_log),
     }
 
 
 def _sanitize_precompile_sources(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
-    tex_path = (project_root / main_tex.name).resolve()
+    tex_path = (main_tex if main_tex.is_absolute() else project_root / main_tex).resolve()
     if not tex_path.is_file():
         return {"changed": False, "main_tex": str(tex_path), "reasons": ["main_tex_not_found"]}
 
@@ -763,7 +772,7 @@ def _run_round(
         os.chdir(project_root)
         state = runtime.run_round(
             main_tex=str(main_tex.relative_to(project_root)),
-            log_file=f"{main_tex.stem}.log",
+            log_file=main_tex.with_suffix(".log").relative_to(project_root).as_posix(),
             page_dir=page_dir,
             template=template,
             target_pages=target_pages,
@@ -1101,7 +1110,7 @@ def _run_visual_only(
         template=template,
         target_pages=target_pages,
         page_dir=page_dir,
-        log_file=f"{main_tex.stem}.log",
+        log_file=main_tex.with_suffix(".log").relative_to(project_root).as_posix(),
         column_void_report="data/column_void_report.json"
         if (project_root / "data" / "column_void_report.json").is_file()
         else None,
@@ -1409,7 +1418,7 @@ def _run_typed_source_changing(
         template=template,
         target_pages=target_pages,
         page_dir="data/pages",
-        log_file=f"{main_tex.stem}.log",
+        log_file=main_tex.with_suffix(".log").relative_to(project_root).as_posix(),
         column_void_report="data/column_void_report.json"
         if (project_root / "data" / "column_void_report.json").is_file()
         else None,
@@ -1655,7 +1664,7 @@ def _handle_paperfit_request(
         working_root = project_root
         if save_as:
             working_root = _copy_project(project_root, save_as.resolve())
-            main_tex = _detect_main_tex(working_root, main_tex.name)
+            main_tex = _detect_main_tex(working_root, main_tex.relative_to(project_root).as_posix())
         if working_root != project_root:
             _build_portrait(
                 working_root,
@@ -1919,7 +1928,7 @@ def main() -> None:
         working_root = project_root
         if args.save_as:
             working_root = _copy_project(project_root, Path(args.save_as).resolve())
-            main_tex = _detect_main_tex(working_root, main_tex.name)
+            main_tex = _detect_main_tex(working_root, main_tex.relative_to(project_root).as_posix())
         _build_portrait(
             working_root,
             main_tex=main_tex,

@@ -15,6 +15,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import orchestrator_runtime  # noqa: E402
+from pdf_test_support import write_test_pdf  # noqa: E402
 from orchestrator_runtime import OrchestratorRuntime  # noqa: E402
 from runtime_types import TaskSpec  # noqa: E402
 
@@ -35,7 +36,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 encoding="utf-8",
             )
             pdf = root / "main.pdf"
-            pdf.write_bytes(b"%PDF fixture\n")
+            write_test_pdf(pdf)
             core_calls = {"count": 0}
 
             def fake_core(
@@ -265,7 +266,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
             )
             main_tex.write_text(original_tex, encoding="utf-8")
             pdf = root / "main.pdf"
-            pdf.write_bytes(b"%PDF fixture\n")
+            write_test_pdf(pdf)
             core_calls = {"count": 0}
 
             def fake_core(
@@ -601,7 +602,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 encoding="utf-8",
             )
             pdf = root / "main.pdf"
-            pdf.write_bytes(b"%PDF fixture\n")
+            write_test_pdf(pdf)
             core_calls = {"count": 0}
             execute_calls = {"count": 0}
 
@@ -788,7 +789,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 encoding="utf-8",
             )
             pdf = root / "main.pdf"
-            pdf.write_bytes(b"%PDF fixture\n")
+            write_test_pdf(pdf)
             core_calls = {"count": 0}
             execute_calls = {"count": 0}
 
@@ -983,7 +984,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
             )
             original_sha = hashlib.sha256(main_tex.read_bytes()).hexdigest()
             pdf = root / "main.pdf"
-            pdf.write_bytes(b"%PDF fixture\n")
+            write_test_pdf(pdf)
 
             def fake_core(
                 self: OrchestratorRuntime,
@@ -1130,7 +1131,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
             )
             original_sha = hashlib.sha256(main_tex.read_bytes()).hexdigest()
             pdf = root / "main.pdf"
-            pdf.write_bytes(b"%PDF fixture\n")
+            write_test_pdf(pdf)
 
             def fake_core(
                 self: OrchestratorRuntime,
@@ -1261,7 +1262,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 encoding="utf-8",
             )
             pdf = root / "main.pdf"
-            pdf.write_bytes(b"%PDF fixture\n")
+            write_test_pdf(pdf)
 
             def fake_core(
                 self: OrchestratorRuntime,

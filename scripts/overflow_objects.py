@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+from collections import defaultdict, deque
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -159,7 +160,9 @@ def build_overflow_objects(
             return []
 
     # 多文件解析：日志行号 → 实际 include 文件（一次解析建索引）
-    resolution_by_line: Dict[int, Dict[str, Any]] = {}
+    # Local line numbers repeat across includes. Match each warning occurrence,
+    # not the last file that happened to report that line number.
+    resolutions_by_warning = defaultdict(deque)
     log_file = str(rule_report.get("log_file") or "")
     if log_file:
         log_path = Path(log_file)
@@ -171,7 +174,9 @@ def build_overflow_objects(
                 for resolution in resolve_overfull_to_source(log_text, project_root, main_tex) or []:
                     line_start = resolution.get("line_start")
                     if line_start is not None:
-                        resolution_by_line[int(line_start)] = resolution
+                        key = (int(line_start), int(resolution.get("line_end") or line_start),
+                               float(resolution.get("overflow_pt") or 0.0))
+                        resolutions_by_warning[key].append(resolution)
             except Exception:
                 pass
 
@@ -182,19 +187,30 @@ def build_overflow_objects(
             width_pt = 0.0
         lines_field = str(warning.get("lines") or "").strip()
         line_number: Optional[int] = None
+        line_end: Optional[int] = None
         if lines_field:
             head = lines_field.split("--", 1)[0].strip()
             try:
                 line_number = int(head)
+                line_end = int(lines_field.split("--", 1)[-1].strip())
             except ValueError:
                 line_number = None
         page = int(warning.get("page") or 0)
 
         source_file, resolved_line = main_tex, line_number
-        resolution = resolution_by_line.get(line_number) if line_number is not None else None
+        key = (line_number, line_end, width_pt)
+        matches = resolutions_by_warning.get(key)
+        resolution = matches.popleft() if matches else None
         if resolution:
             source_file = str(resolution.get("file") or main_tex)
             resolved_line = resolution.get("line_start") or line_number
+        # A parser/host may already supply the file identity. Keep it even when
+        # the legacy log navigator cannot parse that particular warning form.
+        anchor = warning.get("source_anchor") or {}
+        explicit_file = warning.get("source_file") or anchor.get("file")
+        if explicit_file:
+            source_file = str(explicit_file)
+            resolved_line = anchor.get("start_line") or resolved_line
 
         source_lines = _load_lines(source_file)
         line_text = source_lines[resolved_line - 1] if resolved_line and 0 < resolved_line <= len(source_lines) else ""
@@ -224,7 +240,7 @@ def build_overflow_objects(
                 severity=severity,
                 severity_score=round(severity_score, 2),
                 source_anchor=(
-                    {"file": source_file, "start_line": resolved_line, "end_line": None}
+                    {"file": source_file, "start_line": resolved_line, "end_line": line_end}
                     if resolved_line
                     else None
                 ),

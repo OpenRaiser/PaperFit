@@ -23,6 +23,7 @@ from fixer_registry import (
 )
 from transactional_patch import atomic_write_text
 from visual_action_plan import document_scope_b1_authorized
+from source_map import masked_tex, within
 
 
 _DISPLAY_MATH_BEGIN_RE = re.compile(r"\\begin\{(equation\*?|align\*?|multline\*?|gather\*?)\}")
@@ -42,7 +43,7 @@ def _display_math_anchor_line(main_tex: str, line_number: Optional[int], toleran
     if not tex_path.is_file():
         return None
 
-    lines = tex_path.read_text(encoding="utf-8").splitlines()
+    lines = masked_tex(tex_path.read_text(encoding="utf-8")).splitlines()
     env_stack: List[tuple[str, int]] = []
     display_ranges: List[tuple[int, int]] = []
 
@@ -397,7 +398,7 @@ def _build_overflow_defects(
     max_candidates: int,
 ) -> List[Dict[str, Any]]:
     defects: List[Dict[str, Any]] = []
-    seen: set[tuple[str, str, Optional[int], str]] = set()
+    seen: set[tuple[str, str, str, Optional[int], str]] = set()
     saw_overflow_candidate = False
 
     # 批次内的 D 族候选按溢出量降序处理：平局优先级下最重的溢出先进批次，
@@ -417,10 +418,17 @@ def _build_overflow_defects(
         object_name = str(target.get("label") or target.get("scope") or defect_id)
         line_number = candidate.get("line_number")
         description = str(candidate.get("description") or "").strip()
-        if defect_id == "D1" and _line_is_within_display_math(main_tex, line_number):
+        source_anchor = candidate.get("source_anchor") or {}
+        source_file = str(candidate.get("source_file") or source_anchor.get("file") or "")
+        source_root = Path.cwd().resolve()
+        main_path = Path(main_tex).resolve()
+        if not within(main_path, source_root):
+            source_root = main_path.parent
+        is_main_source = not source_file or (source_root / source_file).resolve() == main_path
+        if defect_id == "D1" and is_main_source and _line_is_within_display_math(main_tex, line_number):
             defect_id = "D2"
             object_name = "equation_overflow"
-        dedupe_key = (defect_id, object_name, line_number, description)
+        dedupe_key = (defect_id, source_file, object_name, line_number, description)
         if dedupe_key in seen:
             continue
         seen.add(dedupe_key)
@@ -441,6 +449,9 @@ def _build_overflow_defects(
         
         if candidate.get("finding_id"):
             defect_entry["finding_id"] = candidate["finding_id"]
+        for field in ("source_anchor", "source_file", "overflow_id"):
+            if candidate.get(field):
+                defect_entry[field] = candidate[field]
         defects.append(defect_entry)
         if len(defects) >= max_candidates:
             break

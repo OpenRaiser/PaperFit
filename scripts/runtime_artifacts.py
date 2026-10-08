@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -48,6 +49,26 @@ def _file_entry(path: Optional[Path], project_root: Path) -> Dict[str, Any]:
     }
 
 
+def _pdf_entry(path: Optional[Path], project_root: Path) -> Dict[str, Any]:
+    entry = _file_entry(path, project_root)
+    entry.update({"page_count": None, "page_count_status": "missing"})
+    if not entry["exists"]:
+        return entry
+    try:
+        import fitz
+
+        with fitz.open(path) as document:
+            if not document.is_pdf or document.needs_pass or document.page_count <= 0:
+                entry["page_count_status"] = "unreadable"
+            else:
+                entry.update({"page_count": document.page_count, "page_count_status": "available"})
+    except ImportError:
+        entry["page_count_status"] = "dependency_unavailable"
+    except (OSError, RuntimeError, ValueError):
+        entry["page_count_status"] = "unreadable"
+    return entry
+
+
 def _page_files(page_dir: Optional[Path]) -> list[Path]:
     if page_dir is None or not page_dir.is_dir():
         return []
@@ -63,9 +84,18 @@ def _hash_page_set(paths: Iterable[Path], project_root: Path) -> Dict[str, Any]:
     aggregate = hashlib.sha256()
     newest_mtime: Optional[float] = None
     oldest_mtime: Optional[float] = None
+    page_numbers: list[int] = []
+    invalid_names: list[str] = []
 
     for path in paths:
         entry = _file_entry(path, project_root)
+        match = re.fullmatch(r"page_([0-9]+)\.png", path.name, re.IGNORECASE)
+        number = int(match.group(1)) if match else None
+        entry["page_number"] = number
+        if number is None or number <= 0:
+            invalid_names.append(path.name)
+        else:
+            page_numbers.append(number)
         pages.append(entry)
         rel = str(entry.get("path") or path.name)
         sha = str(entry.get("sha256") or "")
@@ -81,6 +111,8 @@ def _hash_page_set(paths: Iterable[Path], project_root: Path) -> Dict[str, Any]:
     return {
         "exists": bool(pages),
         "count": len(pages),
+        "page_numbers": sorted(page_numbers),
+        "invalid_page_names": invalid_names,
         "aggregate_sha256": aggregate.hexdigest() if pages else None,
         "oldest_mtime": oldest_mtime,
         "newest_mtime": newest_mtime,
@@ -130,6 +162,23 @@ def _freshness_checks(entries: Dict[str, Any]) -> Dict[str, Any]:
     checks["page_images_exist"] = {
         "pass": bool(pages.get("exists")),
         "count": int(pages.get("count") or 0),
+    }
+    expected_count = pdf.get("page_count")
+    count_available = isinstance(expected_count, int) and not isinstance(expected_count, bool) and expected_count > 0
+    checks["pdf_page_count_available"] = {
+        "pass": count_available,
+        "page_count": expected_count,
+        "status": pdf.get("page_count_status"),
+    }
+    numbers = pages.get("page_numbers") or []
+    checks["page_images_complete"] = {
+        "pass": bool(count_available and not pages.get("invalid_page_names")
+                     and int(pages.get("count") or 0) == expected_count
+                     and numbers == list(range(1, expected_count + 1))),
+        "expected_page_count": expected_count,
+        "rendered_page_count": int(pages.get("count") or 0),
+        "page_numbers": numbers,
+        "invalid_page_names": pages.get("invalid_page_names") or [],
     }
     checks["page_images_not_older_than_pdf"] = {
         "pass": bool(page_oldest is not None and pdf_mtime is not None and page_oldest >= pdf_mtime),
@@ -181,7 +230,7 @@ def collect_artifact_manifest(
         "task_spec": _file_entry(_resolve(root, artifacts.get("task_spec")), root),
         "main_tex": _file_entry(main_path, root),
         "source_set": _source_set_entry(source_paths, root),
-        "pdf": _file_entry(pdf_path, root),
+        "pdf": _pdf_entry(pdf_path, root),
         "page_images": _hash_page_set(_page_files(page_dir), root),
         "rule_report": _file_entry(_resolve(root, artifacts.get("rule_report")), root),
         "crossrefs_report": _file_entry(_resolve(root, artifacts.get("crossrefs_report")), root),

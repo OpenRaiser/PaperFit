@@ -213,13 +213,18 @@ def build_round_evidence_from_state(
         summary = rule_report.get("summary") or {}
         return int(summary.get(key) or 0)
 
-    def _protected(state, key):
+    def _protected(state, key, phase):
         ci = state.get("content_integrity") or {}
         structure = ci.get("structure_changes") or {}
         if not structure:
             return 0
-        before = structure.get("before") or {}
-        return int(before.get(key) or 0)
+        observed = structure.get(phase) or {}
+        return int(observed.get(key) or 0)
+
+    def _labels(state, phase):
+        structure = (state.get("content_integrity") or {}).get("structure_changes") or {}
+        observed = structure.get(phase) or {}
+        return len(set(observed.get("figure_labels") or []) | set(observed.get("table_labels") or []))
 
     task = state_before.get("task") or {}
     target = task.get("target_pages")
@@ -230,12 +235,12 @@ def build_round_evidence_from_state(
         target_pages=int(target) if target else None,
         overfull_before=_overfull(rule_report_before),
         overfull_after=_overfull(rule_report_after),
-        figures_before=_protected(state_before, "figure_count"),
-        figures_after=_protected(state_after, "figure_count"),
-        tables_before=_protected(state_before, "table_count"),
-        tables_after=_protected(state_after, "table_count"),
-        labels_before=_protected(state_before, "table_labels") if False else 0,  # TODO
-        labels_after=0,
+        figures_before=_protected(state_before, "figure_count", "before"),
+        figures_after=_protected(state_after, "figure_count", "after"),
+        tables_before=_protected(state_before, "table_count", "before"),
+        tables_after=_protected(state_after, "table_count", "after"),
+        labels_before=_labels(state_before, "before"),
+        labels_after=_labels(state_after, "after"),
         undefined_refs_before=_undef(rule_report_before, "undefined_refs_count"),
         undefined_refs_after=_undef(rule_report_after, "undefined_refs_count"),
         undefined_citations_before=_undef(rule_report_before, "undefined_citations_count"),

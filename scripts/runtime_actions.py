@@ -140,6 +140,7 @@ def _mkdir_for_file(path: Path) -> None:
 
 
 def clean_main_build_artifacts(project_root: Path, *, main_tex: Path) -> None:
+    main_path = main_tex if main_tex.is_absolute() else project_root / main_tex
     for suffix in [
         ".aux",
         ".bbl",
@@ -153,7 +154,7 @@ def clean_main_build_artifacts(project_root: Path, *, main_tex: Path) -> None:
         ".toc",
     ]:
         try:
-            (project_root / f"{main_tex.stem}{suffix}").unlink()
+            main_path.with_suffix(suffix).unlink()
         except FileNotFoundError:
             pass
 
@@ -179,6 +180,10 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
     Nonstop mode can produce a diagnostic preview after an error. That preview
     does not establish successful compilation of the current source.
     """
+    project_root = project_root.resolve()
+    main_tex = (main_tex if main_tex.is_absolute() else project_root / main_tex).resolve()
+    build_root = main_tex.parent
+    main_relative = main_tex.relative_to(project_root).as_posix()
     timeout_sec = int(os.environ.get("PAPERFIT_COMPILE_TIMEOUT_SEC", "240"))
     if os.environ.get("PAPERFIT_BOUNDED_COMPILE") == "1":
         bounded = compile_latex_bounded(project_root, main_tex=main_tex, timeout_sec=timeout_sec)
@@ -189,7 +194,7 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
     if not tolerant:
         cmd.append("-halt-on-error")
     cmd.append(main_tex.name)
-    pdf_path = project_root / f"{main_tex.stem}.pdf"
+    pdf_path = main_tex.with_suffix(".pdf")
     # P2：编译前保存 baseline PDF。编译失败时恢复——绝不删除唯一修前 PDF，
     # 评估器要能读到修前状态
     baseline_pdf = project_root / "data" / f"baseline_{main_tex.stem}.pdf"
@@ -203,7 +208,7 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
     except FileNotFoundError:
         pass
 
-    result = run_command(cmd, cwd=project_root, timeout=timeout_sec)
+    result = run_command(cmd, cwd=build_root, timeout=timeout_sec)
     restored_baseline = False
     if not pdf_path.is_file() and had_baseline and baseline_pdf.is_file():
         shutil.copy2(baseline_pdf, pdf_path)
@@ -240,7 +245,7 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
             source_fingerprint,
         )
 
-        attempt = CompileAttempt(project_root, main_tex=main_tex.name, compiler="latexmk")
+        attempt = CompileAttempt(project_root, main_tex=main_relative, compiler="latexmk")
         fingerprint_store = project_root / "data" / "compile" / "last_fingerprint.json"
         prev_fp: Dict[str, str] = {}
         if fingerprint_store.is_file():
@@ -248,12 +253,12 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
                 prev_fp = json.loads(fingerprint_store.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 prev_fp = {}
-        current_fp = source_fingerprint(project_root, main_tex.name)
+        current_fp = source_fingerprint(project_root, main_relative)
         changed_files = diff_source_fingerprints(prev_fp, current_fp) if prev_fp else []
-        native_log = project_root / f"{main_tex.stem}.log"
+        native_log = main_tex.with_suffix(".log")
         v2 = attempt.finalize(
             command=cmd,
-            cwd=str(project_root),
+            cwd=str(build_root),
             returncode=result.returncode,
             timed_out=timed_out,
             stdout=result.stdout or "",
@@ -285,6 +290,7 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
         "restored_baseline_pdf": restored_baseline,
         "baseline_pdf": str(baseline_pdf) if had_baseline else None,
         "command": cmd,
+        "cwd": str(build_root),
         "returncode": result.returncode,
         "timeout": timed_out,
         "timeout_sec": timeout_sec,
@@ -297,7 +303,7 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
         "missing_images": case["missing_images"],
         "stdout_tail": (result.stdout or "")[-4000:],
         "stderr_tail": (result.stderr or "")[-4000:],
-        "log_file": f"{main_tex.stem}.log",
+        "log_file": main_tex.with_suffix(".log").relative_to(project_root).as_posix(),
         "pdf_path": str(pdf_path) if success else None,
         "compile_log": str(compile_log),
     }
@@ -306,11 +312,14 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
 
 
 def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) -> Dict[str, Any]:
+    project_root = project_root.resolve()
+    main_tex = (main_tex if main_tex.is_absolute() else project_root / main_tex).resolve()
+    build_root = main_tex.parent
     pdflatex = shutil.which("pdflatex")
     if not pdflatex:
         return {"available": False}
-    pdf_path = project_root / f"{main_tex.stem}.pdf"
-    good_pdf_path = project_root / f"{main_tex.stem}.paperfit-good.pdf"
+    pdf_path = main_tex.with_suffix(".pdf")
+    good_pdf_path = main_tex.with_suffix(".paperfit-good.pdf")
     clean_main_build_artifacts(project_root, main_tex=main_tex)
     for path in (pdf_path, good_pdf_path):
         try:
@@ -352,7 +361,7 @@ def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: in
     def _run_pdflatex() -> subprocess.CompletedProcess[str]:
         return run_command(
             [pdflatex, "-interaction=nonstopmode", "-halt-on-error", "-recorder", main_tex.name],
-            cwd=project_root,
+            cwd=build_root,
             timeout=pass_timeout,
         )
 
@@ -360,12 +369,12 @@ def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: in
     _record(result)
     have_good_pdf = _snapshot_if_readable()
 
-    aux_path = project_root / f"{main_tex.stem}.aux"
+    aux_path = main_tex.with_suffix(".aux")
     bibtex = shutil.which("bibtex")
     if aux_path.exists() and bibtex:
         aux_text = aux_path.read_text(encoding="utf-8", errors="replace")
         if r"\bibdata{" in aux_text:
-            result = run_command([bibtex, main_tex.stem], cwd=project_root, timeout=max(60, min(timeout_sec, 180)))
+            result = run_command([bibtex, main_tex.stem], cwd=build_root, timeout=max(60, min(timeout_sec, 180)))
             _record(result)
 
     for _ in range(2):
@@ -413,6 +422,7 @@ def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: in
         "available": True,
         "success": success,
         "command": [item.get("command") for item in passes],
+        "cwd": str(build_root),
         "returncode": 0 if success else (124 if timed_out else int((passes[-1] if passes else {}).get("returncode") or 1)),
         "timeout": timed_out,
         "timeout_sec": timeout_sec,
@@ -428,7 +438,7 @@ def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: in
         "passes": passes,
         "stdout_tail": "\n".join(str(item.get("stdout_tail") or "") for item in passes)[-4000:],
         "stderr_tail": "\n".join(str(item.get("stderr_tail") or "") for item in passes)[-4000:],
-        "log_file": f"{main_tex.stem}.log",
+        "log_file": main_tex.with_suffix(".log").relative_to(project_root).as_posix(),
         "pdf_path": str(pdf_path) if success else None,
         "compile_log": str(compile_log),
     }

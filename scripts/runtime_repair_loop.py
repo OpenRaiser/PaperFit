@@ -85,19 +85,57 @@ def build_round_artifact_lineage(
     ]
 
 
+def visual_comparison_metrics(report: Dict[str, Any], suffix: str) -> Dict[str, Any]:
+    """按通道保存观测；服务失联不是缺陷消失，也不是新增缺陷。"""
+    findings = [item for item in (report.get("findings") or []) if isinstance(item, dict)]
+    vlm_count = sum(item.get("source") == "vlm_detector" for item in findings)
+    return {
+        f"visual_cv_findings_{suffix}": len(findings) - vlm_count,
+        f"visual_vlm_findings_{suffix}": vlm_count,
+        f"vlm_status_{suffix}": str((report.get("vlm_diagnosis") or {}).get("status") or "unconfigured"),
+    }
+
+
+def _comparable_visual_pairs(metrics: Dict[str, Any]) -> List[tuple[int, int]]:
+    pairs = []
+    cv_before = _as_int(metrics.get("visual_cv_findings_before"), -1)
+    cv_after = _as_int(metrics.get("visual_cv_findings_after"), -1)
+    vlm_before = str(metrics.get("vlm_status_before") or "unconfigured")
+    vlm_after = str(metrics.get("vlm_status_after") or "unconfigured")
+    if cv_before >= 0 and cv_after >= 0:
+        pairs.append((cv_before, cv_after))
+        if vlm_before == vlm_after == "completed":
+            before = _as_int(metrics.get("visual_vlm_findings_before"), -1)
+            after = _as_int(metrics.get("visual_vlm_findings_after"), -1)
+            if before >= 0 and after >= 0:
+                pairs.append((before, after))
+    elif vlm_before == vlm_after and vlm_before in {"unconfigured", "skipped", "completed"}:
+        before = _as_int(metrics.get("visual_findings_before"), -1)
+        after = _as_int(metrics.get("visual_findings_after"), -1)
+        if before >= 0 and after >= 0:
+            pairs.append((before, after))
+    return pairs
+
+
 def _round_improved(metrics: Dict[str, Any]) -> Optional[bool]:
     """一轮是否真实改善：overfull 或剩余缺陷任一下降即为改善。无指标返回 None。"""
     overfull_before = _as_int(metrics.get("overfull_hbox_total_before"), -1)
     overfull_after = _as_int(metrics.get("overfull_hbox_total_after"), -1)
     defects_before = _as_int(metrics.get("defects_remaining_before"), -1)
     defects_after = _as_int(metrics.get("defects_remaining_after"), -1)
+    visual_pairs = _comparable_visual_pairs(metrics)
     if overfull_before < 0 or overfull_after < 0:
-        if defects_before < 0 or defects_after < 0:
+        if (defects_before < 0 or defects_after < 0) and not visual_pairs:
             return None
     improved = False
     if overfull_before >= 0 and overfull_after >= 0 and overfull_after < overfull_before:
         improved = True
-    if defects_before >= 0 and defects_after >= 0 and defects_after < defects_before:
+    before_status = str(metrics.get("vlm_status_before") or "unconfigured")
+    after_status = str(metrics.get("vlm_status_after") or "unconfigured")
+    comparable = before_status == after_status and before_status in {"unconfigured", "skipped", "completed"}
+    if comparable and defects_before >= 0 and defects_after >= 0 and defects_after < defects_before:
+        improved = True
+    if any(after < before for before, after in visual_pairs):
         improved = True
     return improved
 
@@ -119,11 +157,9 @@ def _round_quality_regressed(metrics: Dict[str, Any]) -> bool:
     """M4：本轮修复是否让质量变差（overfull 增多或视觉缺陷增多）。"""
     overfull_before = _as_int(metrics.get("overfull_hbox_total_before"), -1)
     overfull_after = _as_int(metrics.get("overfull_hbox_total_after"), -1)
-    visual_before = _as_int(metrics.get("visual_findings_before"), -1)
-    visual_after = _as_int(metrics.get("visual_findings_after"), -1)
     if overfull_before >= 0 and overfull_after > overfull_before:
         return True
-    if visual_before >= 0 and visual_after > visual_before:
+    if any(after > before for before, after in _comparable_visual_pairs(metrics)):
         return True
     return False
 

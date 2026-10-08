@@ -36,6 +36,7 @@ from runtime_repair_loop import (
     DEFAULT_CANDIDATE_BATCH_LIMIT,
     build_repair_loop_policy,
     build_round_artifact_lineage,
+    visual_comparison_metrics,
 )
 from runtime_mutation_integrity import build_source_mutation_report
 from runtime_snapshots import create_pre_repair_snapshot, env_snapshot_root, restore_snapshot
@@ -1251,6 +1252,7 @@ class OrchestratorRuntime:
                             "total_overflow_pt_before": before_pt,
                             "defects_remaining_before": int((state.get("defect_summary") or {}).get("remaining") or 0),
                             "visual_findings_before": len((before_visual or {}).get("findings") or []),
+                            **visual_comparison_metrics(before_visual or {}, "before"),
                             "figures_before": before_structural["figures"],
                             "tables_before": before_structural["tables"],
                             "labels_before": before_structural["labels"],
@@ -1532,6 +1534,7 @@ class OrchestratorRuntime:
                             Path.cwd() / str((state.get("artifacts") or {}).get("visual_signal_report") or "data/visual_signal_report.json")
                         )
                         round_metrics[-1]["visual_findings_after"] = len((visual_after or {}).get("findings") or [])
+                        round_metrics[-1].update(visual_comparison_metrics(visual_after or {}, "after"))
                     runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "artifacts_observed")
                     emit_runtime_event(
                         "phase_completed",
@@ -2267,6 +2270,7 @@ class OrchestratorRuntime:
         latest["overfull_hbox_total_after"] = int(after_rule_summary.get("overfull_hbox_total") or 0)
         latest["defects_remaining_after"] = int((state.get("defect_summary") or {}).get("remaining") or 0)
         latest["visual_findings_after"] = len((visual_report or {}).get("findings") or [])
+        latest.update(visual_comparison_metrics(visual_report or {}, "after"))
         latest["figures_after"] = after_structural["figures"]
         latest["tables_after"] = after_structural["tables"]
         latest["labels_after"] = after_structural["labels"]
@@ -2692,7 +2696,7 @@ class OrchestratorRuntime:
         cwd = Path.cwd()
         main_tex_path = cwd / main_tex
         if log_file is None:
-            log_file = str(main_tex_path.with_suffix(".log").name)
+            log_file = main_tex_path.with_suffix(".log").relative_to(cwd).as_posix()
         if page_dir is None:
             page_dir = "page_images" if (cwd / "page_images").is_dir() else "data/pages"
         if crossrefs_output is None:

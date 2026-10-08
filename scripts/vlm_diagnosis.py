@@ -97,6 +97,8 @@ Rules:
 - Use full-page images to judge margins, column balance and whitespace. Crops help read captions and small text; a crop edge is NOT a document margin or evidence of clipping.
 - Do not report ordinary title/abstract spacing, intentional final-page whitespace after references, naturally narrow figures, or a short table as defects without clear visible damage.
 - Unusual variable names and multiline equation labels are not layout defects by themselves. Never assess whether a formula is valid science. For D1/D2, identify a visibly crossed document margin or clipped glyphs; equation text that wraps inside the available width is not overflow.
+- Stacked subscripts, multiline identifiers, and names containing "Benchmark" or "Overflow" are not evidence of D2. Compare the equation's actual left/right extent with the nearby body-text margins. If every rendered line fits between those margins, do not report overflow.
+- A5 requires an INTERIOR gap with body text both above and below it in the same column. Empty space below the last text block is trailing whitespace, not A5. A page ending early before an equation or float continues on the next page does not by itself establish a defect.
 - For cross-page defects, only judge boundaries between consecutive physical pages present in this batch. Do not infer float drift without visible contextual evidence.
 - severity: "blocking" (makes the document unusable/unpublishable), "degrading" (clearly wrong but readable), "cosmetic" (minor polish).
 - For B2/C1/C2 defects you MUST include the object's caption number exactly as printed (e.g. "Figure 3" -> caption_number 3, "Table 2" -> caption_number 2). Omit caption_number only if no number is printed.

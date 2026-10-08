@@ -15,6 +15,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import orchestrator_runtime  # noqa: E402
+from pdf_test_support import write_test_pdf  # noqa: E402
 from orchestrator_runtime import OrchestratorRuntime  # noqa: E402
 from runtime_types import TaskSpec  # noqa: E402
 
@@ -30,7 +31,7 @@ class RoundExecutionRecordsTest(unittest.TestCase):
                 encoding="utf-8",
             )
             pdf = root / "main.pdf"
-            pdf.write_bytes(b"%PDF fixture\n")
+            write_test_pdf(pdf)
             core_calls = {"count": 0}
             execute_calls = {"count": 0}
             gate_calls = {"count": 0}
