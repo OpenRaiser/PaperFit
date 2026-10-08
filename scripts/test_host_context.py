@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from source_map import build_source_map, masked_tex
-from host_context import build_host_context
+from host_context import build_host_context, bind_visibility_to_current_source
 from pdf_test_support import write_test_pdf, write_test_png
 
 class HostContextTests(unittest.TestCase):
@@ -552,6 +552,48 @@ class CurrentEvidenceFreshnessTests(unittest.TestCase):
         self.assertIsNone(result['vision']['clean'])
         self.assertEqual(result['vision']['evidence_status'],'unknown')
         self.assertTrue(result['artifact_freshness']['manifest_path'].endswith('run_result.json'))
+
+class PDFSourceBindingTests(unittest.TestCase):
+    def report(self):
+        return {"status": "pass", "pass": True, "pdf_sha256": "a" * 64, "findings": []}
+
+    def snapshot(self):
+        return {"manifest_status": "available", "identity": {
+            "main_tex_matches_snapshot": True, "source_set_matches_snapshot": True,
+            "pdf_matches_snapshot": True, "pdf": {"sha256": "a" * 64}},
+            "checks": {"pdf_not_older_than_source_set": {"pass": True}},
+            "vision_status": "failed"}
+
+    def test_bundled_neighbor_pdf_without_build_binding_is_not_current_pass(self):
+        result = bind_visibility_to_current_source(self.report(), {})
+        self.assertEqual(result["geometry_status"], "pass")
+        self.assertTrue(result["geometry_pass"])
+        self.assertEqual(result["status"], "unverified_current_source")
+        self.assertFalse(result["pass"])
+        self.assertIsNone(result["applicable_to_current_source"])
+
+    def test_current_pdf_geometry_does_not_require_available_vlm(self):
+        result = bind_visibility_to_current_source(self.report(), self.snapshot())
+        self.assertTrue(result["applicable_to_current_source"])
+        self.assertEqual(result["status"], "pass")
+        self.assertTrue(result["pass"])
+
+    def test_edited_source_and_changed_pdf_cannot_inherit_old_binding(self):
+        for changed in ("main_tex_matches_snapshot", "source_set_matches_snapshot", "pdf_matches_snapshot"):
+            with self.subTest(changed=changed):
+                snapshot = self.snapshot(); snapshot["identity"][changed] = False
+                result = bind_visibility_to_current_source(self.report(), snapshot)
+                self.assertEqual(result["status"], "unverified_current_source")
+                self.assertFalse(result["pass"])
+
+    def test_geometry_hash_and_source_timestamp_must_match_binding(self):
+        for altered in ("pdf_hash", "source_timestamp"):
+            with self.subTest(altered=altered):
+                snapshot = self.snapshot()
+                if altered == "pdf_hash": snapshot["identity"]["pdf"]["sha256"] = "b" * 64
+                else: snapshot["checks"]["pdf_not_older_than_source_set"]["pass"] = False
+                self.assertFalse(bind_visibility_to_current_source(self.report(), snapshot)["pass"])
+
 
 if __name__ == '__main__':
     unittest.main()

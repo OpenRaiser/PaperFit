@@ -140,6 +140,28 @@ def evidence_freshness(main: Path, root: Path, data_dir: Path) -> dict[str, Any]
             "recorded_status": recorded_fresh.get("status", "unknown"),
             "recorded_blocking_checks": recorded_blocking, "identity": identity}
 
+def bind_visibility_to_current_source(visibility: dict[str, Any], freshness: dict[str, Any]) -> dict[str, Any]:
+    """Geometry of a neighboring PDF does not establish a current source build."""
+    result = dict(visibility)
+    identity = freshness.get("identity", {})
+    checks = freshness.get("checks", {})
+    bound = (freshness.get("manifest_status") == "available" and
+             all(identity.get(name + "_matches_snapshot") is True
+                 for name in ("main_tex", "source_set", "pdf")) and
+             checks.get("pdf_not_older_than_source_set", {}).get("pass") is True and
+             bool(result.get("pdf_sha256")) and
+             result.get("pdf_sha256") == identity.get("pdf", {}).get("sha256"))
+    result["applicable_to_current_source"] = True if bound else None
+    result["source_pdf_binding"] = "verified_runtime_snapshot" if bound else "unverified"
+    if result.get("pdf_sha256") and not bound:
+        result["geometry_status"] = result.get("status")
+        result["geometry_pass"] = result.get("pass")
+        result["status"] = "unverified_current_source"
+        result["pass"] = False
+        result["applicability_reason"] = "Neighboring PDF geometry is retained, but its binding to the current source build is not verified."
+    return result
+
+
 def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path | None = None, limit: int = 30) -> dict[str, Any]:
     if limit < 1:
         raise ValueError("limit must be positive")
@@ -215,8 +237,9 @@ def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path |
     if freshness["vision_status"] != "current":
         vision["clean"] = None
     # Provider completion describes its snapshot; freshness describes this project now.
-    visibility = review_pdf_visibility(main.with_suffix('.pdf'), root=root,
-                           reviews_path=data_dir / 'pdf_visibility_reviews.json')
+    visibility = bind_visibility_to_current_source(
+        review_pdf_visibility(main.with_suffix('.pdf'), root=root,
+                              reviews_path=data_dir / 'pdf_visibility_reviews.json'), freshness)
     return {
         "schema_version": "1.0", "main": sources["main"],
         "project_root": str(root), "project_root_resolution": root_resolution,
