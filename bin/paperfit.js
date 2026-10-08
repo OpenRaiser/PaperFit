@@ -814,8 +814,14 @@ program
       env: process.env,
     });
     if (r.status !== 0) {
-      console.error('PaperFit run failed (exit ' + (r.status ?? 'startup error') + '). Interpreter: ' + runner);
-      if (ext === '.py') console.error('Select the Python environment with installed requirements using PAPERFIT_PYTHON.');
+      if (r.error) {
+        console.error('PaperFit run failed to start. Interpreter: ' + runner);
+        if (ext === '.py') console.error('Select an available Python interpreter using PAPERFIT_PYTHON.');
+      } else if (r.signal) {
+        console.error('PaperFit script terminated by signal ' + r.signal + '. Interpreter: ' + runner);
+      } else {
+        console.error('PaperFit script returned exit ' + r.status + '. Consult its output/report for the result.');
+      }
     }
     process.exit(r.status === null ? 1 : r.status ?? 1);
   });

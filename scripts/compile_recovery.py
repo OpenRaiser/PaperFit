@@ -5,7 +5,8 @@
 - 只做 Level 1（确定性修复）：Unicode 归一、命令→宏包注入（白名单）、
   重复环境折叠、\\ref/\\label/\\cite 参数内转义下划线还原、缺失
   \\end{document}、documentclass 前垃圾清理、错误行证实的缺失 \\end{env}。
-- 不做 Level 2（LLM search-replace 写源码）——PaperFit 禁止模型直接写 LaTeX。
+- 本子系统不做 Level 2（辅助 LLM search-replace 写源码）；宿主 Agent 可按
+  host-native 工作流直接编辑 LaTeX，再提交当前候选接受内容与页面验证。
 - 不做联网补 bib / 伪造参考文献。
 - 恢复循环用 error_signature 去重（同一签名复现立即停，不无限重试）；
   全部尝试失败时恢复恢复前快照（all-or-nothing）。
