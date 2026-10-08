@@ -24,9 +24,10 @@ from visual_action_plan import document_scope_b1_authorized
 from overflow_fixers import _count_top_level_table_columns
 
 try:
-    from content_integrity_check import compute_content_diff, structure_regression_reasons
+    from content_integrity_check import compute_content_diff, structure_regression_reasons, scientific_regression_reasons
 except ImportError:
     compute_content_diff = None
+    scientific_regression_reasons = None
     structure_regression_reasons = None
 
 try:
@@ -2606,6 +2607,12 @@ def _passes_hard_content_gate(
     """
     if compute_content_diff is None:
         return False, "缺少 content_integrity_check 依赖，按 fail-closed 策略阻断写入"
+
+    if scientific_regression_reasons is None:
+        return False, "Scientific payload validation unavailable"
+    science_reasons = scientific_regression_reasons(compute_content_diff(original_tex, repaired_tex))
+    if science_reasons:
+        return False, "; ".join(science_reasons)
 
     normalized_original = _normalize_tex_for_integrity_gate(original_tex)
     normalized_repaired = _normalize_tex_for_integrity_gate(repaired_tex)

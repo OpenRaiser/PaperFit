@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from content_integrity_check import compute_content_diff, has_structure_regression
+from content_integrity_check import compute_content_diff, has_structure_regression, has_scientific_regression
 from fixer_registry import (
     CANONICAL_EXECUTION_ENTRY,
     canonical_execution_manifest,
@@ -637,12 +637,13 @@ def _has_catastrophic_overflow_candidates(plan: Dict[str, Any]) -> bool:
 def _passes_global_content_gate(original_tex: str, repaired_tex: str) -> bool:
     diff = compute_content_diff(original_tex, repaired_tex)
     return (
-        diff["hash_comparison"]["identical"]
+        not has_scientific_regression(diff)
+        and (diff["hash_comparison"]["identical"]
         or (
             diff["sentence_changes"]["deleted_count"] == 0
             and diff["sentence_changes"]["added_count"] == 0
             and diff["word_count"]["change"] == 0
-        )
+        ))
     )
 
 
@@ -779,6 +780,7 @@ def _enforce_structure_integrity(
     main_tex: str,
     original_tex: str,
     report: Dict[str, Any],
+    original_bytes: Optional[bytes] = None,
 ) -> Dict[str, Any]:
     tex_path = Path(main_tex)
     if not tex_path.is_file():
@@ -799,8 +801,11 @@ def _enforce_structure_integrity(
         "diff": diff,
     }
 
-    if final_tex != original_tex and _has_structure_regression(diff):
-        atomic_write_text(tex_path, original_tex, backup_dir=tex_path.parent / "data" / "backups")
+    if final_tex != original_tex and (_has_structure_regression(diff) or has_scientific_regression(diff)):
+        if original_bytes is not None:
+            tex_path.write_bytes(original_bytes)
+        else:
+            atomic_write_text(tex_path, original_tex, backup_dir=tex_path.parent / "data" / "backups")
         integrity["status"] = "failed"
         integrity["rollback_performed"] = True
         integrity["failure_reasons"] = (diff.get("violation") or {}).get("reasons") or ["structure regression detected"]
@@ -822,7 +827,7 @@ def _enforce_structure_integrity(
             **(report.get("global_report") or {}),
             "status": "failed" if report.get("global_report") else "noop",
         }
-        report["rollback_reason"] = "structure_integrity_violation"
+        report["rollback_reason"] = "scientific_integrity_violation" if has_scientific_regression(diff) else "structure_integrity_violation"
 
     report["content_integrity"] = integrity
     return report
@@ -879,7 +884,8 @@ def execute_repair_plan(
     plan = _load_json(repair_plan_path)
     review_skipped = len((plan.get("candidates") or [])) - len(_actionable_candidates(plan))
     tex_path = Path(main_tex)
-    original_tex = tex_path.read_text(encoding="utf-8") if tex_path.is_file() else ""
+    original_bytes = tex_path.read_bytes() if tex_path.is_file() else b""
+    original_tex = original_bytes.decode("utf-8")
     if _plan_uses_conflict_batch(plan):
         
         
@@ -1067,6 +1073,7 @@ def execute_repair_plan(
         main_tex=main_tex,
         original_tex=original_tex,
         report=report,
+        original_bytes=original_bytes,
     )
 
     out = Path(output_path)

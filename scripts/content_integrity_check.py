@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Set
 from datetime import datetime
 
+from scientific_integrity import scientific_payload_diff
+
 
 def extract_academic_content(tex_content: str) -> str:
     """
@@ -238,6 +240,18 @@ def structure_regression_reasons(diff: Dict) -> List[str]:
     return reasons
 
 
+def scientific_regression_reasons(diff: Dict) -> List[str]:
+    """Independent scientific-payload drift; prose hashes are insufficient."""
+    payload = diff.get("scientific_payload") or {}
+    if not payload.get("checked"):
+        return ["Scientific payload validation unavailable"]
+    return list(payload.get("regression_reasons") or [])
+
+
+def has_scientific_regression(diff: Dict) -> bool:
+    return bool(scientific_regression_reasons(diff))
+
+
 def has_structure_regression(diff: Dict) -> bool:
     """Return True when the diff shows any figure/table/graphics regression."""
     return bool(structure_regression_reasons(diff))
@@ -375,6 +389,8 @@ def compute_content_diff(original_tex: str, repaired_tex: str) -> Dict:
     pre_hash = semantic_hash(original_tex)
     post_hash = semantic_hash(repaired_tex)
 
+    scientific_payload = scientific_payload_diff(original_tex, repaired_tex)
+
     # Determine violation level and required action
     violation_level = 0
     violation_reasons = []
@@ -392,11 +408,15 @@ def compute_content_diff(original_tex: str, repaired_tex: str) -> Dict:
     structure_reasons = structure_regression_reasons({"structure_changes": structure_changes})
     layout_structure_changed = bool(structure_reasons)
 
+    if scientific_payload["regression_reasons"]:
+        violation_level = 3
+        action_required = "auto_rollback"
+        violation_reasons.extend(scientific_payload["regression_reasons"])
     if layout_structure_changed:
         violation_level = 3
         action_required = 'auto_rollback'
         violation_reasons.extend(structure_reasons)
-    elif pre_hash != post_hash:
+    elif pre_hash != post_hash and not scientific_payload["regression_reasons"]:
         if deleted_sentences:
             violation_reasons.append(f"Deleted {len(deleted_sentences)} sentence(s)")
         if abs(word_count_change_pct) > 15:
@@ -414,6 +434,7 @@ def compute_content_diff(original_tex: str, repaired_tex: str) -> Dict:
 
     return {
         'timestamp': datetime.now().isoformat(),
+        'scientific_payload': scientific_payload,
         'hash_comparison': {
             'pre_hash': pre_hash,
             'post_hash': post_hash,
@@ -737,8 +758,12 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    args.func(args)
+    result = args.func(args)
+    if args.command in {'diff', 'post'}:
+        action = result.get('action_required') or (result.get('violation') or {}).get('action')
+        return 3 if action == 'auto_rollback' else 2 if action == 'manual_review' else 0
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

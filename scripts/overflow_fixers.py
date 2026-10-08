@@ -17,11 +17,12 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Any
 
 try:
-    from content_integrity_check import compute_content_diff, structure_regression_reasons
+    from content_integrity_check import compute_content_diff, structure_regression_reasons, scientific_regression_reasons
     from math_safe_breaking import split_safe_additive_terms, verify_split_preserves_tokens
 except ImportError:
     compute_content_diff = None
     structure_regression_reasons = None
+    scientific_regression_reasons = None
     from math_safe_breaking import split_safe_additive_terms, verify_split_preserves_tokens
 
 from transactional_patch import atomic_write_text
@@ -97,11 +98,11 @@ class OverflowFixReport:
 
 
 def _passes_structure_write_gate(original_tex: str, updated_tex: str) -> Tuple[bool, str]:
-    if compute_content_diff is None or structure_regression_reasons is None:
+    if compute_content_diff is None or structure_regression_reasons is None or scientific_regression_reasons is None:
         return False, "缺少内容完整性依赖，按 fail-closed 策略阻断写入"
 
     diff = compute_content_diff(original_tex, updated_tex)
-    reasons = structure_regression_reasons(diff)
+    reasons = structure_regression_reasons(diff) + scientific_regression_reasons(diff)
     if reasons:
         return False, "；".join(reasons)
     return True, "pass"
