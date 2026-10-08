@@ -174,8 +174,11 @@ def pdf_page_count(pdf_path: Path) -> Optional[int]:
 
 
 def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False) -> Dict[str, Any]:
-    """tolerant=True：B0 冻结专用——数据集源码可能带可恢复编译错误（如双重斜杠），
-    只要产出了可读 PDF 就算成功。修复环编译保持严格（fail loud）。"""
+    """Compile without changing manuscript source.
+
+    Nonstop mode can produce a diagnostic preview after an error. That preview
+    does not establish successful compilation of the current source.
+    """
     timeout_sec = int(os.environ.get("PAPERFIT_COMPILE_TIMEOUT_SEC", "240"))
     if os.environ.get("PAPERFIT_BOUNDED_COMPILE") == "1":
         bounded = compile_latex_bounded(project_root, main_tex=main_tex, timeout_sec=timeout_sec)
@@ -214,38 +217,18 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
     timed_out = result.returncode == 124
     combined_log = (result.stdout or "") + "\n" + (result.stderr or "")
     fatal_patterns = [
-        "Fatal error occurred",
-        "Emergency stop",
-        "! LaTeX Error:",
-        " ==> Fatal error",
+        "Fatal error occurred", "Emergency stop", "! LaTeX Error:",
+        " ==> Fatal error", "Undefined control sequence",
     ]
-    fatal_error = any(pattern in combined_log for pattern in fatal_patterns)
-    partial_pdf_available = bool(timed_out and pdf_path.is_file() and not fatal_error)
-    if tolerant:
-        # 容错口径：PDF 可读即成功（错误记录在案但不挡冻结）
-        success = pdf_path.is_file() and (pdf_page_count(pdf_path) or 0) > 0
-    else:
-        success = (result.returncode == 0 and pdf_path.is_file()) or partial_pdf_available
-
-    # 容忍模式下的确定性恢复：PDF 虽可读，但日志证实 Undefined control sequence
-    # （模板被换后残留的模板宏）会中断 latexmk 的 bibtex/bbl 环节——引用全部
-    # 悬空、参考文献缺失，属于"看似成功实则残缺"。补一次确定性 shim 恢复
-    # （providecommand 白名单，幂等）后重编译；只做一层，不递归恢复。
-    if tolerant and fatal_error and "Undefined control sequence" in combined_log:
-        try:
-            from compile_recovery import apply_deterministic_recovery
-
-            recovery_actions = apply_deterministic_recovery(project_root, main_tex.name, combined_log)
-            if recovery_actions:
-                result = run_command(cmd, cwd=project_root, timeout=timeout_sec)
-                combined_log = (result.stdout or "") + "\n" + (result.stderr if result.stderr else "")
-                compile_log.write_text(combined_log, encoding="utf-8")
-                timed_out = result.returncode == 124
-                fatal_error = any(pattern in combined_log for pattern in fatal_patterns)
-                partial_pdf_available = bool(timed_out and pdf_path.is_file() and not fatal_error)
-                success = pdf_path.is_file() and (pdf_page_count(pdf_path) or 0) > 0
-        except Exception:  # 恢复失败不影响原结果口径
-            pass
+    fatal_error = any(pattern in combined_log for pattern in fatal_patterns) or bool(
+        re.search(r"^! ", combined_log, re.MULTILINE)
+    )
+    pdf_fresh = pdf_path.is_file() and not restored_baseline
+    partial_pdf_available = bool(timed_out and pdf_fresh and not fatal_error)
+    success = bool(result.returncode == 0 and pdf_fresh and not fatal_error)
+    if tolerant and success:
+        success = (pdf_page_count(pdf_path) or 0) > 0
+    preview_pdf_path = str(pdf_path) if pdf_path.is_file() and not success else None
 
     case = classify_compile_case(combined_log, success=success)
 
@@ -285,6 +268,10 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
                 "tolerant": tolerant,
                 "case_status": case["case_status"],
                 "restored_baseline_pdf": restored_baseline,
+                "pdf_fresh": pdf_fresh,
+                "pdf_path": str(pdf_path) if success else None,
+                "preview_pdf_path": preview_pdf_path,
+                "partial_pdf_available": partial_pdf_available,
             },
         )
         fingerprint_store.parent.mkdir(parents=True, exist_ok=True)
@@ -302,6 +289,8 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
         "timeout": timed_out,
         "timeout_sec": timeout_sec,
         "partial_pdf_available": partial_pdf_available,
+        "pdf_fresh": pdf_fresh,
+        "preview_pdf_path": preview_pdf_path,
         "fatal_error": fatal_error,
         "case_status": case["case_status"],
         "missing_sty": case["missing_sty"],
@@ -411,7 +400,9 @@ def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: in
         encoding="utf-8",
     )
     page_count = pdf_page_count(pdf_path)
-    success = page_count is not None and not fatal_error
+    success = bool(page_count is not None and page_count > 0 and not fatal_error
+                   and not timed_out and not restored_good_pdf
+                   and passes and all(item.get("returncode") == 0 for item in passes))
     combined_log = "\n".join(
         (item.get("stdout_tail") or "")
         + ("\n" + str(item.get("stderr_tail") or "") if item.get("stderr_tail") else "")
@@ -427,7 +418,9 @@ def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: in
         "timeout_sec": timeout_sec,
         "bounded_compile": True,
         "restored_good_pdf": restored_good_pdf,
-        "partial_pdf_available": False,
+        "partial_pdf_available": bool(timed_out and page_count and not fatal_error),
+        "pdf_fresh": bool(page_count and not restored_good_pdf),
+        "preview_pdf_path": str(pdf_path) if page_count and not success else None,
         "fatal_error": fatal_error,
         "case_status": case["case_status"],
         "missing_sty": case["missing_sty"],

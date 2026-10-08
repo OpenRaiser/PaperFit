@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Any
 
 from transactional_patch import atomic_write_text
+from visual_action_plan import document_scope_b1_authorized
 
 from overflow_fixers import _count_top_level_table_columns
 
@@ -438,20 +439,21 @@ def _find_labeled_float_block(
     for env_name in (float_type, f"{float_type}*", fallback_type, f"{fallback_type}*"):
         if env_name not in env_names:
             env_names.append(env_name)
+    active = _mask_inactive_latex(tex_content)
     for env_name in env_names:
         pattern = r'\\begin\{' + re.escape(env_name) + r'\}(\[[^\]]*\])?'
-        for match in re.finditer(pattern, tex_content):
+        for match in re.finditer(pattern, active):
             if _is_commented_at(tex_content, match.start()):
                 continue
             end_match = re.search(
                 r'\\end\{' + re.escape(env_name) + r'\}',
-                tex_content[match.end():],
+                active[match.end():],
                 re.DOTALL,
             )
             if not end_match:
                 continue
             block_end = match.end() + end_match.end()
-            block = tex_content[match.start():block_end]
+            block = active[match.start():block_end]
             label_pattern = r'\\label\{' + re.escape(float_label) + r'\}'
             for label_match in re.finditer(label_pattern, block):
                 if _is_commented_at(tex_content, match.start() + label_match.start()):
@@ -1131,7 +1133,6 @@ def _normalize_float_block_for_semantic_fix(
 ) -> str:
     block = tex_content[block_start:block_end]
     updated_block = _ensure_label_after_caption_in_block(block, float_label=float_label)
-    updated_block = _normalize_figure_width_for_semantic_fix(updated_block, env_name=env_name)
     if updated_block == block:
         return tex_content
     return tex_content[:block_start] + updated_block + tex_content[block_end:]
@@ -1233,8 +1234,9 @@ def _find_endmatter_start(tex_content: str) -> Optional[int]:
         r'\\begin\{thebibliography\}',
     ]
     candidates: List[int] = []
+    active = _mask_inactive_latex(tex_content)
     for pattern in patterns:
-        match = re.search(pattern, tex_content, flags=re.IGNORECASE | re.MULTILINE)
+        match = re.search(pattern, active, flags=re.IGNORECASE | re.MULTILINE)
         if match:
             candidates.append(match.start())
     return min(candidates) if candidates else None
@@ -1247,11 +1249,12 @@ def _enforce_endmatter_float_barrier(
     if endmatter_start is None:
         return tex_content, None
 
-    if not re.search(r'\\begin\{(figure\*?|table\*?)\}', tex_content[:endmatter_start]):
+    active = _mask_inactive_latex(tex_content)
+    if not re.search(r'\\begin\{(figure\*?|table\*?)\}', active[:endmatter_start]):
         return tex_content, None
 
     lookback_start = max(0, endmatter_start - 240)
-    if re.search(r'\\FloatBarrier\b', tex_content[lookback_start:endmatter_start]):
+    if re.search(r'\\(?:FloatBarrier|clearpage)\b', active[lookback_start:endmatter_start]):
         return tex_content, None
 
     prefix = tex_content[:endmatter_start].rstrip()
@@ -2104,6 +2107,35 @@ def fix_split_figure(
 # B1 文档级去堆叠（placement 归一化 + 浮动参数放宽）
 # ============================================================
 
+def _mask_inactive_latex(tex_content: str) -> str:
+    """Preserve offsets while excluding comments and common literal-source areas."""
+    chars = list(tex_content)
+    def mask(start, end):
+        for index in range(start, end):
+            if chars[index] not in "\r\n":
+                chars[index] = " "
+    # Inline verbatim is masked before comments: its delimiter can be `%`.
+    for match in re.finditer(r"(?<!\\)\\verb\*?([^\sA-Za-z])", tex_content):
+        delimiter = match.group(1)
+        line_end = tex_content.find("\n", match.end())
+        line_end = len(tex_content) if line_end < 0 else line_end
+        end = tex_content.find(delimiter, match.end(), line_end)
+        mask(match.start(), line_end if end < 0 else end + 1)
+    active = mask_latex_comments("".join(chars))
+    chars = list(active)
+    pattern = re.compile(r"\\begin\s*\{(verbatim\*?|Verbatim\*?|lstlisting|minted|comment|filecontents\*?)\}")
+    cursor = 0
+    while True:
+        match = pattern.search(active, cursor)
+        if match is None:
+            break
+        end = re.search(r"\\end\s*\{" + re.escape(match.group(1)) + r"\}", active[match.end():])
+        stop = match.end() + end.end() if end else len(active)
+        mask(match.start(), stop)
+        cursor = stop
+    return "".join(chars)
+
+
 _FLOAT_ONLY_PLACEMENT_RE = re.compile(
     r"(\\begin\{(?:figure|table)\*?\}\s*)\[p\]"
 )
@@ -2128,10 +2160,16 @@ def _normalize_float_only_placements(tex_content: str) -> Tuple[str, Optional[Fi
     B1_float_to_page 的注入方式）。[htbp] 恢复 LaTeX 自由放置，属纯布局级
     改动。只改 placement 可选参数，不动浮动体内容。
     """
-    normalized, count = _FLOAT_ONLY_PLACEMENT_RE.subn(r"\1[htbp]", tex_content)
+    matches = list(_FLOAT_ONLY_PLACEMENT_RE.finditer(_mask_inactive_latex(tex_content)))
+    normalized = tex_content
+    for match in reversed(matches):
+        # Replace the placement only; masked comments remain byte-for-byte intact.
+        start = match.end() - len("[p]")
+        normalized = normalized[:start] + "[htbp]" + normalized[match.end():]
+    count = len(matches)
     if count == 0:
         return tex_content, None
-    first = _FLOAT_ONLY_PLACEMENT_RE.search(tex_content)
+    first = matches[0] if matches else None
     return normalized, FixResult(
         defect_id="B1",
         object_name="document",
@@ -2150,7 +2188,8 @@ def _inject_float_relaxation(tex_content: str) -> Tuple[str, Optional[FixResult]
     """
     if _FLOAT_RELAX_MARKER in tex_content:
         return tex_content, None
-    insert_at = tex_content.find("\\begin{document}")
+    begin = re.search(r"\\begin\s*\{document\}", _mask_inactive_latex(tex_content))
+    insert_at = begin.start() if begin else -1
     if insert_at <= 0:
         return tex_content, None
     block = _FLOAT_RELAX_BLOCK + "\n"
@@ -2166,7 +2205,9 @@ def _inject_float_relaxation(tex_content: str) -> Tuple[str, Optional[FixResult]
 
 
 _ENDMATTER_FLUSH_MARKER = "% PaperFit: flush deferred floats before endmatter (B1)"
-_BIBLIOGRAPHY_RE = re.compile(r"(?<![%\n])[ \t]*(\\(?:bibliography|begin\{thebibliography\})\{?[^%\n]*)")
+_BIBLIOGRAPHY_RE = re.compile(
+    r"(?<!\\)(\\(?:bibliography(?![A-Za-z@])\s*\{|printbibliography(?![A-Za-z@])|begin\s*\{thebibliography\}))"
+)
 
 
 def _flush_floats_before_endmatter(tex_content: str) -> Tuple[str, Optional[FixResult]]:
@@ -2180,7 +2221,7 @@ def _flush_floats_before_endmatter(tex_content: str) -> Tuple[str, Optional[FixR
     """
     if _ENDMATTER_FLUSH_MARKER in tex_content:
         return tex_content, None
-    m = _BIBLIOGRAPHY_RE.search(tex_content)
+    m = _BIBLIOGRAPHY_RE.search(_mask_inactive_latex(tex_content))
     if not m:
         return tex_content, None
     insert_at = m.start(1)
@@ -2253,34 +2294,25 @@ def fix_float_defects(
         ),
     )
 
-    # —— B1 文档级去堆叠（先于对象级修复）——
-    # 浮动体被强制只上浮动页（[p]）或被默认参数挤出正文时，对象级“移近引用”
-    # 无法奏效：真正缺的是放置约束本身。这两步是纯布局级改动（不碰内容）：
-    # 1) [p]-only 放置归一化为 [htbp]，允许 LaTeX 把浮动体放回正文顶部/底部；
-    # 2) 放宽浮动参数（topfraction 等），让“表格堆在文末/参考文献后”回到正文。
-    # 触发条件：存在 B1 缺陷（页级 VLM finding 无 label 也可触发）。
-    b1_defects = [d for d in ordered_defects if str(d.get("defect_id") or "") == "B1"]
-    if b1_defects:
+    # Document-wide constraints are authored choices. Only an explicitly
+    # approved candidate may relax them; a page-level B1 diagnosis is evidence,
+    # not authority to rewrite every unrelated float in the manuscript.
+    document_b1 = [d for d in ordered_defects
+                   if str(d.get("defect_id") or "") == "B1"
+                   and document_scope_b1_authorized(d)]
+    if document_b1:
         tex_content, placement_change = _normalize_float_only_placements(tex_content)
         if placement_change is not None:
             changes.append(placement_change)
-        needs_relaxation = len(b1_defects) >= 2 or any(
+        needs_relaxation = len(document_b1) >= 2 or any(
             str(d.get("severity") or "").lower() in {"major", "critical", "degrading", "blocking"}
-            for d in b1_defects
+            for d in document_b1
         )
         if needs_relaxation:
             tex_content, relax_change = _inject_float_relaxation(tex_content)
             if relax_change is not None:
                 changes.append(relax_change)
-        # endmatter 入侵证据（表格/图落在参考文献区）时，[htbp]+参数放宽仍可能
-        # 不够——放不下的浮动体必须先于文献列表冲刷出来，否则触发 hard guard
-        # 整轮回滚，把同轮其他好修复一并吞掉。
-        endmatter_evidence = any(
-            "endmatter" in str(d.get("description") or "").lower()
-            or "reference" in str(d.get("description") or "").lower()
-            for d in b1_defects
-        )
-        if endmatter_evidence:
+        if any(_defect_allows_floatbarrier(d) for d in document_b1):
             tex_content, flush_change = _flush_floats_before_endmatter(tex_content)
             if flush_change is not None:
                 changes.append(flush_change)
@@ -2310,7 +2342,9 @@ def fix_float_defects(
             defect["reference_source"] = "latex_ref_normalized"
             defect["reference_text"] = f"\\ref{{{object_name}}}"
 
-    if any(_defect_allows_floatbarrier(defect) for defect in ordered_defects):
+    if any(_defect_allows_floatbarrier(defect)
+           and (bool(_defect_labels(defect)) or document_scope_b1_authorized(defect))
+           for defect in ordered_defects):
         tex_content, endmatter_barrier_change = _enforce_endmatter_float_barrier(tex_content)
         if endmatter_barrier_change:
             tex_content, preamble_change = add_floatbarrier_to_preamble(tex_content)

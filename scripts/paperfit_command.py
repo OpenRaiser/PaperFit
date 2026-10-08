@@ -1257,31 +1257,8 @@ def _run_fix_layout(
                 blocked_reasons.append("failure_tracking_stalled")
             break
 
-        # 确定性 B1 去堆叠：endmatter 浮动入侵（表格/图被挤进参考文献区，
-        # _inspect_endmatter_float_intrusion 的页文本证据）是文档级放置问题，
-        # VLM 页级 finding 有随机性，这里用确定性信号兜底触发
-        # fix_float_defects 的 [p]→[htbp] 归一化 + 浮动参数放宽路径。
-        intrusions = visual_hard_guards.get("intrusions") or []
-        if intrusions:
-            try:
-                from float_fixers import fix_float_defects  # noqa: PLC0415
-
-                b1_defects = [
-                    {
-                        "defect_id": "B1",
-                        "page": int(item.get("page") or 0),
-                        "severity": "major",
-                        "object": None,
-                        "description": f"endmatter float intrusion: {', '.join(item.get('captions') or [])}",
-                    }
-                    for item in intrusions
-                    if isinstance(item, dict)
-                ]
-                if b1_defects:
-                    fix_float_defects(str(main_tex), b1_defects)
-            except Exception as destack_exc:  # 去堆叠失败不阻断常规修复计划
-                print(f"[paperfit] deterministic B1 de-stacking skipped: {destack_exc}")
-
+        # Guard findings enter the regular candidate workflow. Do not modify
+        # source here before the plan's snapshot/fingerprint/acceptance checks.
         repair_state = _execute_repair_plan(project_root, main_tex=main_tex)
         repair_summary = repair_state.get("repair_execution_summary") or {}
         if not isinstance(repair_summary, dict):

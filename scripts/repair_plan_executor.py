@@ -22,6 +22,7 @@ from fixer_registry import (
     execute_space_util_candidates,
 )
 from transactional_patch import atomic_write_text
+from visual_action_plan import document_scope_b1_authorized
 
 
 _DISPLAY_MATH_BEGIN_RE = re.compile(r"\\begin\{(equation\*?|align\*?|multline\*?|gather\*?)\}")
@@ -164,10 +165,8 @@ def _build_float_defects(plan: Dict[str, Any], max_candidates: int) -> List[Dict
         if defect_family not in {"B1", "B2"}:
             return
         if not label:
-            # 页级 B1（VLM 看到浮动体堆叠/漂移但无对象锚点）允许以文档级
-            # 候选进入执行：fix_float_defects 的 B1 去堆叠路径
-            # （[p]→[htbp] 归一化 + 浮动参数放宽）不依赖 label。
-            if defect_family == "B1":
+            # Unanchored visual findings require explicit document-scope authorization.
+            if defect_family == "B1" and document_scope_b1_authorized(candidate):
                 doc_key = "document"
                 if doc_key in seen_objects:
                     return
@@ -182,6 +181,11 @@ def _build_float_defects(plan: Dict[str, Any], max_candidates: int) -> List[Dict
                         "finding_id": candidate.get("finding_id"),
                         "severity": severity,
                         "description": str(candidate.get("rationale") or "page-level float stacking"),
+                        "document_scope_approved": True,
+                        "endmatter_float_intrusion": candidate.get("endmatter_float_intrusion") is True,
+                        "hard_guard_evidence": candidate.get("hard_guard_evidence"),
+                        "visual_hard_guard": candidate.get("visual_hard_guard"),
+                        "hard_guard": candidate.get("hard_guard"),
                     }
                 )
             return
@@ -211,6 +215,11 @@ def _build_float_defects(plan: Dict[str, Any], max_candidates: int) -> List[Dict
         if defect_family == "B1":
             defect["ref_page"] = candidate.get("page") or 0
             defect.update(merged_b1_metadata.get(str(label)) or {})
+            for key in ("document_scope_approved", "allow_floatbarrier", "requires_floatbarrier",
+                        "hard_guard_float_intrusion", "endmatter_float_intrusion",
+                        "body_float_intrudes_endmatter", "visual_hard_guard", "hard_guard", "hard_guard_evidence"):
+                if candidate.get(key) is not None:
+                    defect[key] = candidate[key]
         if defect_family == "B2":
             target_object_kind = target.get("object_kind")
             if target_object_kind is not None:

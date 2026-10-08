@@ -11,5 +11,5 @@ const script = path.join(__dirname, 'install-host-global.js');
 const args = process.argv.slice(2);
 const hasTarget = args.includes('--target');
 const forwarded = hasTarget ? args : ['--target', 'claude', ...args];
-const result = spawnSync(process.execPath, [script, ...forwarded], { stdio: 'inherit' });
+const result = spawnSync(process.execPath, [script, ...forwarded], { stdio: 'inherit', windowsHide: true });
 process.exit(result.status ?? 1);

@@ -14,7 +14,8 @@
     "check:py-warnings": "node bin/paperfit.js run scripts/check_python_warnings.py",
     "postinstall": "node scripts/postinstall.js",
     "upgrade": "bash install.sh --update --local",
-    "upgrade:registry": "bash install.sh --update"
+    "upgrade:registry": "bash install.sh --update",
+    "test:hosts": "node --test scripts/test_host_install.js"
   },
   "files": [
     "bin/",
@@ -31,7 +32,10 @@
     "LICENSE",
     "CONTRIBUTING.md",
     "requirements.txt",
-    "install.sh"
+    "install.sh",
+    "docs/",
+    "protocols/",
+    "plugin.json"
   ],
   "repository": {
     "type": "git",

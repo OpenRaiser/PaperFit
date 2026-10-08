@@ -9,7 +9,7 @@
  *   paperfit status        Show current status
  *   paperfit doctor        Check installation health
  *   /paperfit（Claude）    见 .claude/commands/paperfit.md：问卷 + paperfit_portrait.py 扫描画像
- *   paperfit（Codex agent）通过 ~/.codex/agents/paperfit.toml 作为自定义 agent 入口
+ *   paperfit（Codex skill）入口 ~/.agents/skills/paperfit/SKILL.md
  *   paperfit wizard        终端 TUI：会刊/模板、页数口径等 → data/paperfit-project.yaml + state
  *   paperfit upgrade       一键：npm 全局最新 paperfit-cli + install-global（支持 --target）
  *   paperfit render <pdf>  Run bundled render_pages.py (from your project cwd)
@@ -28,7 +28,11 @@ function execSync(command, options = {}) {
 }
 
 function spawnSync(command, args, options = {}) {
-  return spawnProcessSync(command, args, { ...options, windowsHide: true });
+  const result = spawnProcessSync(command, args, { ...options, windowsHide: true });
+  if (result.error && options.stdio !== 'ignore') {
+    console.error('PaperFit: failed to start "' + command + '": ' + result.error.message);
+  }
+  return result;
 }
 const path = require('path');
 const fs = require('fs');
@@ -46,19 +50,34 @@ function packageRoot() {
   return path.resolve(path.join(__dirname, '..'));
 }
 
+let cachedPythonRunner;
 function pythonRunner() {
   if (process.env.PAPERFIT_PYTHON) return process.env.PAPERFIT_PYTHON;
+  if (cachedPythonRunner) return cachedPythonRunner;
   const venvRoot = path.join(packageRoot(), '.venv');
-  const candidates = [
-    path.join(venvRoot, 'bin', 'python'), // macOS / Linux venv layout
-    path.join(venvRoot, 'Scripts', 'python.exe'), // Windows venv layout
-  ];
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
-      return candidate;
+  for (const candidate of [path.join(venvRoot, 'bin', 'python'),
+    path.join(venvRoot, 'Scripts', 'python.exe')]) {
+    if (fs.existsSync(candidate)) return (cachedPythonRunner = candidate);
+  }
+  if (process.platform === 'win32') {
+    // WindowsApps aliases can exit without useful output or open the Store.
+    // Inspect actual PATH executables; never change the user's PATH.
+    for (const directory of (process.env.PATH || '').split(path.delimiter)) {
+      const clean = directory.replace(/^"|"$/g, '');
+      if (!clean || /[\\/]Microsoft[\\/]WindowsApps(?:[\\/]|$)/i.test(clean)) continue;
+      for (const name of ['python.exe', 'python3.exe']) {
+        const candidate = path.join(clean, name);
+        if (!fs.existsSync(candidate)) continue;
+        const probe = spawnProcessSync(candidate, ['--version'], {
+          encoding: 'utf8', timeout: 5000, windowsHide: true
+        });
+        if (probe.status === 0 && /^Python 3\./.test((probe.stdout || '') + (probe.stderr || ''))) {
+          return (cachedPythonRunner = candidate);
+        }
+      }
     }
   }
-  return process.platform === 'win32' ? 'python' : 'python3';
+  return (cachedPythonRunner = process.platform === 'win32' ? 'python' : 'python3');
 }
 
 const isWindows = process.platform === 'win32';
@@ -73,9 +92,16 @@ function probeCommand(command) {
 }
 
 function probePython() {
-  const runner = pythonRunner();
-  const file = path.isAbsolute(runner) ? runner : isWindows ? 'python' : 'python3';
-  const result = spawnSync(file, ['--version'], { stdio: 'ignore', timeout: 5000 });
+  const result = spawnSync(pythonRunner(), ['--version'], {
+    encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  return result.status === 0 && /^Python 3\./.test((result.stdout || '') + (result.stderr || ''));
+}
+
+function probePythonDependencies() {
+  const result = spawnSync(pythonRunner(), ['-c', 'import yaml, fitz, cv2, pdf2image'], {
+    stdio: 'ignore', timeout: 10000
+  });
   return result.status === 0;
 }
 
@@ -787,6 +813,10 @@ program
       cwd: process.cwd(),
       env: process.env,
     });
+    if (r.status !== 0) {
+      console.error('PaperFit run failed (exit ' + (r.status ?? 'startup error') + '). Interpreter: ' + runner);
+      if (ext === '.py') console.error('Select the Python environment with installed requirements using PAPERFIT_PYTHON.');
+    }
     process.exit(r.status === null ? 1 : r.status ?? 1);
   });
 
@@ -796,11 +826,14 @@ program
   .description('Install PaperFit assets into a host home (claude/codex/cursor/all)')
   .option('--target <target>', 'Host target: claude | codex | cursor | all', 'claude')
   .option('--project <path>', 'Optional project root for host-specific project assets')
-  .option('--force', 'Overwrite existing files')
+  .option('--scope <scope>', 'Install scope: global | project', 'global')
+  .option('--home <path>', 'Explicit host home for isolated setup')
+  .option('--force', 'Overwrite existing PaperFit files')
   .option('--dry-run', 'Print planned copies only')
   .action((options) => {
     const script = path.join(__dirname, '..', 'scripts', 'install-host-global.js');
-    const args = [script, '--target', options.target];
+    const args = [script, '--target', options.target, '--scope', options.scope];
+    if (options.home) args.push('--home', path.resolve(options.home));
     if (options.project) args.push('--project', path.resolve(options.project));
     if (options.force) args.push('--force');
     if (options.dryRun) args.push('--dry-run');
@@ -959,225 +992,58 @@ program
 // doctor command
 program
   .command('doctor')
-  .description('Check installation health')
+  .description('Check toolchain and discoverable host skill')
   .option('--target <target>', 'Host target: claude | codex | cursor | all', 'claude')
-  .option('--project <path>', 'Optional project root for host-specific project assets')
+  .option('--project <path>', 'Paper project with local skills (defaults to cwd when a project receipt exists)')
   .action((options) => {
-    console.log('🔍 Running health checks...\n');
-
-    const installTargets = loadInstallTargetsManifest();
-    const knownTargets = Object.keys(installTargets.targets);
-    const resolvedTargets = options.target === 'all' ? knownTargets : [options.target];
-    for (const target of resolvedTargets) {
-      if (!installTargets.targets[target]) {
-        console.error(`Unsupported target: ${target}`);
-        process.exit(1);
-      }
+    const manifest = loadInstallTargetsManifest();
+    const targets = options.target === 'all' ? Object.keys(manifest.targets) : [options.target];
+    for (const target of targets) {
+      if (!manifest.targets[target]) { console.error('Unsupported target: ' + target); process.exit(1); }
     }
-
-    const checks = [
-      { name: 'Python 3', run: () => probePython() },
-      { name: isWindows ? 'pip' : 'pip3', run: () => probeCommand(isWindows ? 'pip --version' : 'pip3 --version') },
-      { name: 'latexmk', run: () => commandExists('latexmk') },
-      { name: 'pdfinfo (poppler)', run: () => commandExists('pdfinfo') },
-    ];
-    if (resolvedTargets.includes('claude')) {
-      checks.push({ name: 'Claude Code CLI', run: () => probeCommand('claude --version') });
+    const home = process.env.HOME || os.homedir();
+    const project = options.project ? path.resolve(options.project) : process.cwd();
+    const localReceipt = safeReadJson(path.join(project, '.paperfit', 'install-manifest.json'));
+    const projectScope = localReceipt?.scope === 'project';
+    const sharedRoot = path.join(projectScope ? project : home, '.paperfit');
+    const receipt = projectScope ? localReceipt : safeReadJson(path.join(sharedRoot, 'install-manifest.json'));
+    let passed = 0, failed = 0;
+    function check(name, ok) { console.log((ok ? '✅ ' : '❌ ') + name); if (ok) passed++; else failed++; }
+    console.log('PaperFit health: ' + targets.join(', ') + ' (' + (projectScope ? 'project' : 'global') + ' scope)');
+    check('Python 3: ' + pythonRunner(), probePython());
+    check('Python modules: yaml, fitz, cv2, pdf2image', probePythonDependencies());
+    for (const command of ['latexmk', 'pdfinfo', 'pdftoppm']) check(command, commandExists(command));
+    check('install receipt: ' + sharedRoot, Boolean(receipt));
+    if (receipt) {
+      check('receipt version: ' + receipt.version, receipt.version === version);
+      check('recorded targets', targets.every(target => (receipt.targets || []).includes(target)));
+      check('bundled CLI: ' + receipt.packageRoot, Boolean(receipt.packageRoot) &&
+        fs.existsSync(path.join(receipt.packageRoot, 'bin', 'paperfit.js')));
     }
-    const projectRoot = resolveProjectRoot(options.project);
-
-    let passed = 0;
-    let failed = 0;
-
-    console.log(`Targets: ${resolvedTargets.join(', ')}\n`);
-    console.log('Dependencies');
-    checks.forEach(check => {
-      if (check.run()) {
-        console.log(`✅ ${check.name}`);
-        passed++;
-      } else {
-        console.log(`❌ ${check.name}`);
-        failed++;
+    for (const target of targets) {
+      const spec = manifest.targets[target];
+      const localEntry = (spec.project_copies || []).find(entry => entry.target.endsWith('skills/paperfit'));
+      const globalEntry = spec.copies.find(entry => entry.target.endsWith('skills/paperfit') || entry.target === 'skills');
+      const localSkill = localEntry ? path.join(project, localEntry.target, 'SKILL.md') : '';
+      const globalSkill = globalEntry ? path.join(home, spec.root_suffix, globalEntry.target,
+        globalEntry.target === 'skills' ? 'paperfit' : '', 'SKILL.md') : '';
+      const skillPath = projectScope || (options.project && fs.existsSync(localSkill)) ? localSkill : globalSkill;
+      let metadataOk = false;
+      if (skillPath && fs.existsSync(skillPath)) {
+        const content = fs.readFileSync(skillPath, 'utf8');
+        metadataOk = /^---\r?\n/.test(content) && /^name:\s*paperfit\s*$/m.test(content) &&
+          /^description:\s*\S/m.test(content);
       }
-    });
-
-    const sharedRoot = resolveHostRoot(
-      installTargets.shared_copy.root_env_var,
-      installTargets.shared_copy.root_suffix,
-    );
-    const globalInstallManifestPath = path.join(sharedRoot, 'install-manifest.json');
-    const globalInstallManifest = safeReadJson(globalInstallManifestPath);
-
-    console.log('\nInstall Manifest');
-    if (globalInstallManifest) {
-      console.log(`✅ install-manifest.json`);
-      passed++;
-      const manifestVersion = globalInstallManifest.version || 'unknown';
-      if (manifestVersion === version) {
-        console.log(`✅ manifest version matches package: ${manifestVersion}`);
-        passed++;
-      } else {
-        console.log(`❌ manifest version mismatch: installed=${manifestVersion} current=${version}`);
-        failed++;
-      }
-      const manifestTargets = Array.isArray(globalInstallManifest.targets)
-        ? globalInstallManifest.targets
-        : [];
-      const missingManifestTargets = resolvedTargets.filter((target) => !manifestTargets.includes(target));
-      if (missingManifestTargets.length === 0) {
-        console.log(`✅ requested targets recorded: ${resolvedTargets.join(', ')}`);
-        passed++;
-      } else {
-        console.log(`❌ requested targets recorded: missing ${missingManifestTargets.join(', ')}`);
-        failed++;
-      }
-      console.log(`   shared=${sharedRoot}`);
-    } else {
-      console.log(`❌ install-manifest.json`);
-      console.log(`   expected at ${globalInstallManifestPath}`);
-      failed++;
+      check(target + ' discoverable paperfit skill: ' + skillPath, metadataOk);
     }
-
-    console.log('\nShared Assets');
-    for (const entry of installTargets.shared_copy.copies) {
-      const sharedPath = path.join(sharedRoot, entry.target);
-      const ok = entry.type === 'directory'
-        ? directoryHasVisibleContent(sharedPath)
-        : fs.existsSync(sharedPath) && fs.statSync(sharedPath).isFile();
-      console.log(`${ok ? '✅' : '❌'} ${entry.target}`);
-      if (ok) {
-        passed++;
-      } else {
-        failed++;
-      }
-    }
-
-    console.log('\nHost Assets');
-    for (const target of resolvedTargets) {
-      const targetSpec = installTargets.targets[target];
-      const rootDir = resolveHostRoot(targetSpec.home_env_var, targetSpec.root_suffix);
-      console.log(`${target} -> ${rootDir}`);
-
-      if (fs.existsSync(rootDir) && fs.statSync(rootDir).isDirectory()) {
-        console.log(`  ✅ root directory`);
-        passed++;
-      } else {
-        console.log(`  ❌ root directory`);
-        failed++;
-      }
-
-      for (const entry of targetSpec.copies) {
-        const installedPath = path.join(rootDir, entry.target);
-        let ok = false;
-        if (entry.type === 'directory') {
-          ok = directoryHasVisibleContent(installedPath);
-        } else if (entry.type === 'file') {
-          ok = fs.existsSync(installedPath) && fs.statSync(installedPath).isFile();
-        }
-        console.log(`  ${ok ? '✅' : '❌'} ${entry.target}`);
-        if (ok) {
-          passed++;
-        } else {
-          failed++;
-        }
-      }
-      if (target === 'codex') {
-        const codexConfigPath = path.join(rootDir, 'config.toml');
-        const codexConfig = parseCodexConfigSummary(codexConfigPath);
-        if (codexConfig) {
-          console.log(`  ✅ config.toml`);
-          passed++;
-          const providerLabel = codexConfig.modelProvider || 'default';
-          const modelLabel = codexConfig.model || 'default';
-          const baseUrlLabel = codexConfig.baseUrl || 'platform default';
-          console.log(`     provider=${providerLabel} model=${modelLabel} base_url=${baseUrlLabel}`);
-        } else {
-          console.log(`  ⚠️ config.toml not found; Codex will rely on its own default login/provider`);
-        }
-        console.log('  Codex extra assets');
-        const officialSkillPath = path.join(codexOfficialSkillsDir(), 'space-util-fixer', 'SKILL.md');
-        const officialSkillsOk =
-          fs.existsSync(officialSkillPath) && fs.statSync(officialSkillPath).isFile();
-        console.log(`  ${officialSkillsOk ? '✅' : '❌'} ${officialSkillPath}`);
-        if (officialSkillsOk) {
-          passed++;
-        } else {
-          failed++;
-        }
-
-        const legacySkillPath = path.join(codexLegacySkillDir(rootDir), 'space-util-fixer', 'SKILL.md');
-        const legacySkillsOk =
-          fs.existsSync(legacySkillPath) && fs.statSync(legacySkillPath).isFile();
-        console.log(`  ${legacySkillsOk ? '✅' : '❌'} ${legacySkillPath}`);
-        if (legacySkillsOk) {
-          passed++;
-        } else {
-          failed++;
-        }
-
-        const marketplacePath = codexPersonalMarketplacePath();
-        const marketplaceJson = safeReadJson(marketplacePath);
-        const marketplaceOk =
-          marketplaceJson &&
-          Array.isArray(marketplaceJson.plugins) &&
-          marketplaceJson.plugins.some((plugin) => plugin.name === 'paperfit');
-        console.log(`  ${marketplaceOk ? '✅' : '❌'} ${marketplacePath}`);
-        if (marketplaceOk) {
-          passed++;
-        } else {
-          failed++;
-        }
-
-        const pluginManifestPath = path.join(codexPluginDir(rootDir), '.codex-plugin', 'plugin.json');
-        const pluginOk =
-          fs.existsSync(pluginManifestPath) && fs.statSync(pluginManifestPath).isFile();
-        console.log(`  ${pluginOk ? '✅' : '❌'} ${pluginManifestPath}`);
-        if (pluginOk) {
-          passed++;
-        } else {
-          failed++;
-        }
-      }
-      console.log('');
-    }
-
-    if (projectRoot) {
-      console.log(`Project Assets -> ${projectRoot}`);
-      for (const target of resolvedTargets) {
-        const targetSpec = installTargets.targets[target];
-        if (!Array.isArray(targetSpec.project_copies) || targetSpec.project_copies.length === 0) {
-          continue;
-        }
-        for (const entry of targetSpec.project_copies) {
-          const installedPath = path.join(projectRoot, entry.target);
-          const ok = entry.type === 'directory'
-            ? directoryHasVisibleContent(installedPath)
-            : fs.existsSync(installedPath) && fs.statSync(installedPath).isFile();
-          console.log(`  ${ok ? '✅' : '❌'} ${target}:${entry.target}`);
-          if (ok) {
-            passed++;
-          } else {
-            failed++;
-          }
-        }
-      }
-      console.log('');
-    } else if (resolvedTargets.includes('cursor')) {
-      console.log('Project Assets');
-      console.log('ℹ️ cursor project rules not checked; pass --project /path/to/paper');
-    }
-
-    console.log(`\n${passed}/${passed + failed} checks passed`);
-
-    if (failed > 0) {
-      console.log('\n💡 Install missing dependencies:');
-      if (isWindows) {
-        console.log('   choco install poppler miktex   (or: scoop install poppler; scoop install latex)');
-      } else {
-        console.log('   brew install poppler mactex');
-      }
-      console.log(`   ${isWindows ? 'pip' : 'pip3'} install -r requirements.txt`);
-      console.log(`   paperfit install-global --target ${options.target} --force`);
+    console.log(passed + '/' + (passed + failed) + ' checks passed');
+    console.log('Codex entry: $paperfit. No custom role/provider registration is required.');
+    if (failed) {
+      console.log('Install host assets: paperfit-install --target ' + options.target +
+        (projectScope ? ' --scope project --project "' + project + '"' : ''));
+      console.log('Python dependencies: "' + pythonRunner() + '" -m pip install -r "' +
+        path.join(packageRoot(), 'requirements.txt') + '"');
+      process.exitCode = 1;
     }
   });
 

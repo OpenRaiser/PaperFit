@@ -1808,59 +1808,27 @@ class OrchestratorRuntime:
         emit_event: Callable[..., Dict[str, Any]],
         runtime_actions: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """硬门禁检出的 endmatter 浮动入侵：先治疗再复检，而不是直接整轮回滚。
+        """Report guard evidence; a failed acceptance guard cannot write source.
 
-        入侵的根源是文档级放置问题（浮动体滞留到文献区），常规候选级归因
-        找不到"致害候选"——谁都没害，是布局本身放不下。fix_float_defects 的
-        B1 去堆叠（[p]→[htbp] + 参数放宽 + 文献前 clearpage 冲刷）针对的
-        正是这一层。治疗幂等（标记防重入），复检由调用方重跑 post observe。
+        Unattributed regressions require rollback and a newly reviewed candidate,
+        including document-scope authorization when that scope is necessary.
         """
         guards = post_observe.get("visual_hard_guards") or {}
         intrusions = guards.get("intrusions") or []
         if not intrusions:
-            return {"applied": False, "reason": "no intrusions in guard evidence"}
-        try:
-            from float_fixers import fix_float_defects
-
-            defects = [
-                {
-                    "defect_id": "B1",
-                    "page": int(item.get("page") or 0),
-                    "severity": "major",
-                    "object": None,
-                    "description": f"endmatter float intrusion: {', '.join(item.get('captions') or [])}",
-                }
-                for item in intrusions
-                if isinstance(item, dict)
-            ]
-            main_tex_path = project_root / task_spec.main_tex
-            before = main_tex_path.read_text(encoding="utf-8", errors="replace") if main_tex_path.is_file() else ""
-            report = fix_float_defects(str(main_tex_path), defects)
-            changes = report.to_dict().get("changes") if hasattr(report, "to_dict") else None
-            applied = bool(changes) or (main_tex_path.is_file() and main_tex_path.read_text(encoding="utf-8", errors="replace") != before)
-            self._record_runtime_action(
-                "endmatter_destack_heal",
-                {
-                    "success": bool(applied),
-                    "input_artifacts": {"main_tex": task_spec.main_tex, "intrusions": intrusions},
-                    "changes": len(changes or []),
-                },
-                phase="verify",
-                state="VERIFYING",
-                emit_event=emit_event,
-                runtime_actions=runtime_actions,
-            )
-            return {"applied": bool(applied), "changes": len(changes or [])}
-        except Exception as exc:  # 治疗失败不改变原回滚语义
-            self._record_runtime_action(
-                "endmatter_destack_heal",
-                {"success": False, "error": f"{type(exc).__name__}: {exc}"},
-                phase="verify",
-                state="VERIFYING",
-                emit_event=emit_event,
-                runtime_actions=runtime_actions,
-            )
-            return {"applied": False, "error": f"{type(exc).__name__}: {exc}"}
+            return {"applied": False, "reason": "no_intrusion_evidence"}
+        review = {
+            "success": False,
+            "applied": False,
+            "review_required": True,
+            "reason": "explicit_candidate_required",
+            "input_artifacts": {"main_tex": task_spec.main_tex, "intrusions": intrusions},
+        }
+        self._record_runtime_action(
+            "endmatter_destack_heal", review, phase="verify", state="VERIFYING",
+            emit_event=emit_event, runtime_actions=runtime_actions,
+        )
+        return review
 
     def _post_repair_hard_guard_failure(
         self,
@@ -2409,54 +2377,17 @@ class OrchestratorRuntime:
         project_root = Path.cwd()
         main_tex = project_root / task_spec.main_tex
         runtime_actions: Dict[str, Any] = {}
-        # 与 B0 冻结口径对齐：数据集源码可带可恢复编译错误，PDF 可读即进入流程。
-        # 我们的修改是否搞坏编译由轮前/轮后证据对比与内容门禁裁决，不靠 -halt-on-error。
+        # Observation is read-only with respect to manuscript source. A failed
+        # compile can be repaired through an explicit, snapshotted recovery call.
         compile_result = compile_latex(project_root, main_tex=main_tex, tolerant=True)
         if not compile_result.get("success"):
-            # 编译恢复子系统：确定性修复（Unicode/缺宏包注入/重复环境/转义下划线等）
-            # + 错误签名去重 + 全败整体回滚。模型不写源码，只走受控 fixer。
-            try:
-                from compile_recovery import recover_compile
-                from runtime_snapshots import create_pre_repair_snapshot, env_snapshot_root, restore_snapshot
-
-                def _snap_create():
-                    return create_pre_repair_snapshot(
-                        project_root=project_root,
-                        main_tex=task_spec.main_tex,
-                        snapshot_root=env_snapshot_root(),
-                    )
-
-                def _snap_restore(snapshot):
-                    restore_snapshot(project_root=project_root, rollback_target=str(snapshot.get("rollback_target")))
-
-                recovery = recover_compile(
-                    project_root,
-                    task_spec.main_tex,
-                    compile_fn=lambda root, main: compile_latex(root, main_tex=main, tolerant=True),
-                    snapshot_create=_snap_create,
-                    snapshot_restore=_snap_restore,
-                )
-                compile_result = recovery.final_compile or compile_result
-                self._record_runtime_action(
-                    "compile_recovery",
-                    {
-                        "success": recovery.success,
-                        **recovery.to_dict(),
-                    },
-                    phase="observe",
-                    state="OBSERVING",
-                    emit_event=emit_event,
-                    runtime_actions=runtime_actions,
-                )
-            except Exception as recovery_exc:
-                self._record_runtime_action(
-                    "compile_recovery",
-                    {"success": False, "error": f"{type(recovery_exc).__name__}: {recovery_exc}"},
-                    phase="observe",
-                    state="OBSERVING",
-                    emit_event=emit_event,
-                    runtime_actions=runtime_actions,
-                )
+            runtime_actions["compile_recovery"] = {
+                "success": False,
+                "skipped": True,
+                "reason": "explicit_source_repair_required",
+                "failure_class": compile_result.get("failure_class"),
+                "preview_pdf_path": compile_result.get("preview_pdf_path"),
+            }
         self._record_runtime_action(
             "compile",
             compile_result,

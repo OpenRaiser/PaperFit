@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from diagnosis_ingest import findings_to_candidates, parse_host_diagnosis
 from runtime_repair_risk import annotate_repair_candidates
-from visual_action_plan import normalized_visual_object_kind, vlm_table_size_semantics
+from visual_action_plan import document_scope_b1_authorized, normalized_visual_object_kind, vlm_table_size_semantics
 
 
 def _load_json(path: Optional[str]) -> Dict[str, Any]:
@@ -1518,10 +1518,10 @@ def _promote_visual_action_plan(visual_signal_report: str) -> List[Dict[str, Any
             continue
         
         
-        
-        
-        
-        document_level_b1 = family == "B1" and confidence >= 0.6 and not anchor
+        document_level_b1 = (family == "B1" and confidence >= 0.6 and not anchor
+                             and document_scope_b1_authorized(entry))
+        if family == "B1" and not anchor and not document_level_b1:
+            continue
         if not document_level_b1:
             if anchor_status and anchor_status != "resolved":
                 continue
@@ -1543,7 +1543,8 @@ def _promote_visual_action_plan(visual_signal_report: str) -> List[Dict[str, Any
             "D1": "repair_overfull_boxes", "D2": "split_display_formula",
             "D3": "wrap_url_breaking",
         }
-        proposed_action = action_map.get(family)
+        proposed_action = ("normalize_float_placements_document_level" if document_level_b1
+                           else action_map.get(family))
         if proposed_action is None:
             continue
 
@@ -1555,6 +1556,11 @@ def _promote_visual_action_plan(visual_signal_report: str) -> List[Dict[str, Any
 
         # 为 fixer 提供必要字段（A2 需要 whitespace_ratio 等）
         extra_fields: Dict[str, Any] = {}
+        if document_level_b1:
+            for key in ("document_scope_approved", "hard_guard_evidence", "visual_hard_guard",
+                        "hard_guard", "endmatter_float_intrusion", "body_float_intrudes_endmatter"):
+                if entry.get(key) is not None:
+                    extra_fields[key] = entry[key]
         if family == "A2":
             extra_fields["whitespace_ratio"] = 0.3  # 默认值：末页有可见空白
             extra_fields["current_pages"] = page or 0

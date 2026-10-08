@@ -43,73 +43,59 @@ PACKAGE_FIXES: Dict[str, Tuple[str, str]] = {
     "\\SI": ("siunitx", "\\usepackage{siunitx}"),
 }
 
-
-
-
-
-
+# Only shims that retain their argument payload are automatically recoverable.
+# Layout/template metadata and undefined environment aliases need host review.
 TEMPLATE_MACRO_SHIMS: Dict[str, str] = {
     r"\IEEEmembership": r"\providecommand{\IEEEmembership}[1]{#1}",
     r"\IEEEauthorrefmark": r"\providecommand{\IEEEauthorrefmark}[1]{#1}",
     r"\IEEEPARstart": r"\providecommand{\IEEEPARstart}[2]{#1#2}",
-    r"\IEEEproof": r"\providecommand{\IEEEproof}{\proof}",
-    r"\IEEEitemize": r"\providecommand{\IEEEitemize}{\itemize}",
-    r"\IEEEsetlabelwidth": r"\providecommand{\IEEEsetlabelwidth}[1]{}",
-    r"\ACMConf": r"\providecommand{\ACMConf}[1]{}",
-    r"\icmlpapersize": r"\providecommand{\icmlpapersize}[1]{}",
-    r"\cvprpaperid": r"\providecommand{\cvprpaperid}[1]{}",
 }
-TEMPLATE_ENV_SHIMS: Dict[str, str] = {
-    "IEEEkeywords": r"\newenvironment{IEEEkeywords}{\paragraph*{Index Terms}}{}",
-    "IEEEabstract": r"\newenvironment{IEEEabstract}{\begin{abstract}}{\end{abstract}}",
-}
+TEMPLATE_ENV_SHIMS: Dict[str, str] = {}
 _TEMPLATE_SHIM_MARKER = "% PaperFit: template macro shims (compile recovery)"
-_UNDEFINED_CS_RE = re.compile(r"\\([A-Za-z@]+)")
+_UNDEFINED_CS_RE = re.compile(r"\\[A-Za-z@]+")
 _UNDEFINED_ENV_RE = re.compile(r"(?:Environment|environment) ([A-Za-z*]+) undefined")
 
 
 def _parse_undefined_names(log_text: str) -> Tuple[set, set]:
-    """从日志提取 Undefined control sequence 的命令名与 undefined 环境名。"""
-    commands: set = set()
-    envs: set = set()
+    """Read the offending control token, not every macro in nearby source lines."""
+    commands, envs = set(), set()
     lines = (log_text or "").splitlines()
     for idx, line in enumerate(lines):
         if "! Undefined control sequence." in line:
-            context = "\n".join(lines[idx + 1 : idx + 4])
-            commands.update(m.group(0) for m in _UNDEFINED_CS_RE.finditer(context) if m.group(0))
-        m = _UNDEFINED_ENV_RE.search(line)
-        if m:
-            envs.add(m.group(1).rstrip("*"))
+            for context in lines[idx + 1:idx + 4]:
+                if not re.match(r"\s*(?:l\.\d+\s|<[^>]+>)", context):
+                    continue
+                matches = list(_UNDEFINED_CS_RE.finditer(context))
+                if matches and not context[matches[-1].end():].strip():
+                    commands.add(matches[-1].group(0))
+                    break
+        match = _UNDEFINED_ENV_RE.search(line)
+        if match:
+            envs.add(match.group(1))
     return commands, envs
 
 
 def fix_template_macro_shims(tex: str, log_text: str) -> Tuple[str, List[str]]:
-    """模板宏残留 + 通用 documentclass → 导言区注入 providecommand shim。
-
-    只 shim 日志证实 Undefined 且源码确实使用的宏；幂等（标记已存在跳过）。
-    """
-    if "undefined control sequence" not in (log_text or "").lower() and "undefined" not in (log_text or "").lower():
+    """Add individually idempotent, log-proven argument-preserving shims."""
+    try:
+        from skills.latex_fixers.shared_table_helpers import mask_latex_comments
+    except ModuleNotFoundError:
         return tex, []
-    if _TEMPLATE_SHIM_MARKER in tex:
+    active = mask_latex_comments(tex)
+    begin = re.search(r"\\begin\s*\{document\}", active)
+    if begin is None or begin.start() <= 0:
         return tex, []
-    commands, envs = _parse_undefined_names(log_text)
-    if not commands and not envs:
-        return tex, []
-    shim_lines: List[str] = []
-    for macro, shim in TEMPLATE_MACRO_SHIMS.items():
-        if macro in commands and macro in tex:
-            shim_lines.append(shim)
-    for env, shim in TEMPLATE_ENV_SHIMS.items():
-        if env in envs and f"\\begin{{{env}}}" in tex:
-            guarded = "\\makeatletter\\@ifundefined{" + env + "}{" + shim + "}{}\\makeatother"
-            shim_lines.append(guarded)
+    commands, _envs = _parse_undefined_names(log_text)
+    shim_lines = [
+        shim for macro, shim in TEMPLATE_MACRO_SHIMS.items()
+        if macro in commands
+        and re.search(re.escape(macro) + r"(?![A-Za-z@])", active[begin.end():])
+        and shim not in active[:begin.start()]
+    ]
     if not shim_lines:
         return tex, []
-    preamble_end = tex.find("\\begin{document}")
-    if preamble_end <= 0:
-        return tex, []
     block = "\n".join([_TEMPLATE_SHIM_MARKER] + shim_lines) + "\n"
-    return tex[:preamble_end] + block + tex[preamble_end:], shim_lines
+    return tex[:begin.start()] + block + tex[begin.start():], shim_lines
 
 UNICODE_REPLACEMENTS: Dict[str, str] = {
     "\u2018": "`", "\u2019": "'", "\u201c": "``", "\u201d": "''",
@@ -381,6 +367,21 @@ def apply_deterministic_recovery(
     return actions
 
 
+def _recovery_signature(result: Dict[str, Any], root: Path):
+    signature = result.get("error_signature")
+    log_source = result.get("log_path")
+    if log_source:
+        path = Path(str(log_source))
+        path = path if path.is_absolute() else root / path
+        try:
+            commands, envs = _parse_undefined_names(path.read_text(encoding="utf-8", errors="replace"))
+            if commands or envs:
+                return signature, tuple(sorted(commands)), tuple(sorted(envs))
+        except OSError:
+            pass
+    return signature
+
+
 def recover_compile(
     project_root: Path,
     main_tex: str,
@@ -405,6 +406,13 @@ def recover_compile(
         result.success = True
         return result
 
+    # Retain exact source bytes even when no external snapshot is supplied or
+    # its creation fails. Recovery is an explicit all-or-nothing source action.
+    try:
+        original_sources = {path: path.read_bytes() for path in discover_source_files(root, main_tex)}
+    except OSError:
+        result.stopped_reason = "source_backup_failed"
+        return result
     snapshot = None
     if snapshot_create is not None:
         try:
@@ -412,7 +420,7 @@ def recover_compile(
         except Exception:
             snapshot = None
 
-    seen_signatures = {first.get("error_signature")}
+    seen_signatures = {_recovery_signature(first, root)}
     log_source = first.get("log_path")
 
     for attempt in range(2, max_attempts + 1):
@@ -424,32 +432,50 @@ def recover_compile(
                     log_text = log_path.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     log_text = ""
-        actions = apply_deterministic_recovery(root, main_tex, log_text)
+        try:
+            actions = apply_deterministic_recovery(root, main_tex, log_text)
+        except Exception:
+            result.stopped_reason = "recovery_exception"
+            break
         if not actions:
             result.stopped_reason = "no_deterministic_fix_available"
             break
         result.attempted.extend(actions)
 
-        nxt = compile_fn(root, main_path)
+        try:
+            nxt = compile_fn(root, main_path)
+        except Exception:
+            result.stopped_reason = "compile_exception"
+            break
         result.attempts = attempt
         result.final_compile = nxt
         if nxt.get("success"):
             result.success = True
             result.stopped_reason = f"recovered_after_{attempt - 1}_fix_rounds"
             return result
-        sig = nxt.get("error_signature")
+        sig = _recovery_signature(nxt, root)
         if sig in seen_signatures:
             result.stopped_reason = "same_error_signature_repeated"
             break
         seen_signatures.add(sig)
         log_source = nxt.get("log_path")
 
-    if not result.success and snapshot is not None and snapshot_restore is not None and result.attempted:
+    source_changed = any(not path.is_file() or path.read_bytes() != original
+                         for path, original in original_sources.items())
+    if not result.success and (result.attempted or source_changed):
+        if snapshot is not None and snapshot_restore is not None:
+            try:
+                snapshot_restore(snapshot)
+            except Exception:
+                pass  # The byte-preserving local backup remains authoritative.
         try:
-            snapshot_restore(snapshot)
+            for path, original in original_sources.items():
+                if not path.is_file() or path.read_bytes() != original:
+                    path.write_bytes(original)
             result.rolled_back = True
-        except Exception:
+        except OSError:
             result.rolled_back = False
+            result.stopped_reason = "source_rollback_failed"
     if not result.stopped_reason:
         result.stopped_reason = "max_attempts_exhausted" if result.attempted else "no_fix_applied"
     return result

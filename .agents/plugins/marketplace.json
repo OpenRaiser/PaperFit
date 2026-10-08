@@ -8,7 +8,7 @@
       "name": "paperfit",
       "source": {
         "source": "local",
-        "path": "./plugins/paperfit"
+        "path": "./"
       },
       "policy": {
         "installation": "AVAILABLE",

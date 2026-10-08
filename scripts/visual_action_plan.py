@@ -21,9 +21,6 @@ FAMILY_ACTIONS: Dict[str, List[str]] = {
     "B1": [
         "normalize_float_position_near_reference",
         "move_float_closer_to_first_reference",
-        # 文档级去堆叠：页级 finding（浮动页堆叠/漂移，无对象锚点）也有
-        # 安全执行器——[p]→[htbp] 归一化 + 浮动参数放宽（float_fixers）
-        "normalize_float_placements_document_level",
     ],
     "B2": ["adjust_float_width"],
     "B3": ["decluster_float_sequence", "pack_late_floats_before_endmatter"],
@@ -157,7 +154,26 @@ def _resolve_anchor(finding: Dict[str, Any], crossrefs_report: Dict[str, Any]) -
     }
 
 
-def _status_for(family: str, *, confidence: float, anchor_status: str, severity: str, anchor_reason: Optional[str] = None) -> Dict[str, Any]:
+def document_scope_b1_authorized(candidate: Dict[str, Any]) -> bool:
+    """Validate host approval and structured evidence, never model permission."""
+    if candidate.get("document_scope_approved") is not True:
+        return False
+    for key in ("hard_guard_evidence", "visual_hard_guard", "hard_guard"):
+        evidence = candidate.get(key)
+        if not isinstance(evidence, dict):
+            continue
+        kind = str(evidence.get("failure_type") or evidence.get("type") or "")
+        if kind in {"endmatter_float_intrusion", "body_float_intrudes_endmatter",
+                    "float_only_pages", "float_stacking"}:
+            return True
+        if (evidence.get("available") is True
+                and isinstance(evidence.get("intrusions"), list) and evidence["intrusions"]
+                and isinstance(evidence.get("hard_failures"), list) and evidence["hard_failures"]):
+            return True
+    return False
+
+
+def _status_for(family: str, *, confidence: float, anchor_status: str, severity: str, anchor_reason: Optional[str] = None, document_scope_authorized: bool = False) -> Dict[str, Any]:
     if family in BLOCKED_FAMILIES:
         return {"status": "blocked", "reason": BLOCKED_FAMILIES[family]}
     if anchor_reason:
@@ -166,19 +182,10 @@ def _status_for(family: str, *, confidence: float, anchor_status: str, severity:
         return {"status": "human_review", "reason": f"confidence {confidence} below {CONFIDENCE_REVIEW_THRESHOLD}"}
     if not FAMILY_ACTIONS.get(family):
         return {"status": "human_review", "reason": f"no action mapping for family {family or 'unknown'}"}
-    # B1 例外：浮动体堆叠/漂移是文档级布局问题，即使没有对象锚点，
-    # [p]→[htbp] 归一化 + 浮动参数放宽也是安全可执行的（不碰内容）。
-    # 页级 VLM finding（无 caption 锚点）由此进入执行而不是永久 human_review。
-    if (
-        family == "B1"
-        and anchor_status == "unresolved"
-        and severity in {"major", "critical"}
-        and confidence >= CONFIDENCE_REVIEW_THRESHOLD
-    ):
-        return {
-            "status": "executable",
-            "reason": "document-level float de-stacking does not require an object anchor",
-        }
+    if family == "B1" and anchor_status == "unresolved":
+        if document_scope_authorized:
+            return {"status": "executable", "reason": "host-approved document scope with structured evidence"}
+        return {"status": "human_review", "reason": "source anchor unresolved; document scope requires explicit host approval and structured evidence"}
     if anchor_status == "unresolved" and severity in {"major", "critical"}:
         # 页级/对象级缺陷允许无锚点进入人工复核——绝不静默丢弃
         return {"status": "human_review", "reason": "source anchor unresolved"}
@@ -190,6 +197,7 @@ def build_visual_action_plan(
     visual_report: Dict[str, Any],
     crossrefs_report: Dict[str, Any],
     include_hints: bool = True,
+    document_scope_approvals: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     findings: List[Dict[str, Any]] = list(visual_report.get("findings") or [])
     entries: List[Dict[str, Any]] = []
@@ -202,6 +210,12 @@ def build_visual_action_plan(
         confidence_raw = finding.get("confidence")
         confidence = float(confidence_raw) if isinstance(confidence_raw, (int, float)) else 0.5
         severity = str(finding.get("severity") or "minor")
+        finding_id = str(finding.get("defect_id") or finding.get("id") or f"finding-{len(entries) + 1:04d}")
+        # Separate host input is the only approval authority. Finding fields,
+        # including VLM metrics, cannot grant source mutation permissions.
+        approval = (document_scope_approvals or {}).get(finding_id) or {}
+        document_authorized = (isinstance(approval, dict)
+                               and document_scope_b1_authorized(approval))
         anchor = _resolve_anchor(finding, crossrefs_report)
         decision = _status_for(
             family,
@@ -209,6 +223,7 @@ def build_visual_action_plan(
             anchor_status=anchor["anchor_status"],
             severity=severity,
             anchor_reason=anchor["anchor_reason"],
+            document_scope_authorized=document_authorized,
         )
         if table_semantics == "undersized_table":
             decision = {
@@ -218,7 +233,7 @@ def build_visual_action_plan(
         if is_hint and decision["status"] == "executable":
             decision = {"status": "human_review", "reason": "low-confidence hint below promotion threshold"}
         entry: Dict[str, Any] = {
-            "finding_id": str(finding.get("defect_id") or finding.get("id") or f"finding-{len(entries) + 1:04d}"),
+            "finding_id": finding_id,
             "defect_type": table_semantics or str(metrics.get("subtype") or family or "unknown"),
             "family": family or None,
             "severity": severity,
@@ -241,6 +256,12 @@ def build_visual_action_plan(
             "status_reason": decision["reason"],
             "origin": "hint" if is_hint else "finding",
         }
+        if family == "B1" and document_authorized and anchor["anchor_status"] == "unresolved":
+            entry["recommended_actions"] = ["normalize_float_placements_document_level"]
+            for key in ("document_scope_approved", "hard_guard_evidence", "visual_hard_guard",
+                        "hard_guard", "endmatter_float_intrusion", "body_float_intrudes_endmatter"):
+                if approval.get(key) is not None:
+                    entry[key] = approval[key]
         if table_semantics:
             entry["source_taxonomy_defect_id"] = source_family
             entry["source_defect_type"] = metrics.get("defect_type")

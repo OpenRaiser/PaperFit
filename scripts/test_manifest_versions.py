@@ -9,6 +9,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_PATHS = [
     REPO_ROOT / "package.json",
+    REPO_ROOT / "plugin.json",
     REPO_ROOT / ".claude-plugin" / "plugin.json",
     REPO_ROOT / ".claude-plugin" / "marketplace.json",
     REPO_ROOT / "plugins" / "paperfit" / ".codex-plugin" / "plugin.json",

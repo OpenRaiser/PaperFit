@@ -32,31 +32,30 @@
           "type": "file",
           "target": "rules/paperfit.md"
         }
+      ],
+      "project_copies": [
+        {
+          "source": "skills/paperfit",
+          "type": "directory",
+          "target": ".claude/skills/paperfit"
+        }
       ]
     },
     "codex": {
       "home_env_var": "HOME",
-      "root_suffix": ".codex",
+      "root_suffix": ".agents",
       "copies": [
         {
-          "source": "skills",
+          "source": "skills/paperfit",
           "type": "directory",
           "target": "skills/paperfit"
-        },
+        }
+      ],
+      "project_copies": [
         {
-          "source": "agents",
+          "source": "skills/paperfit",
           "type": "directory",
-          "target": "skills/paperfit/agents"
-        },
-        {
-          "source": "config/host_assets/codex/AGENTS.md",
-          "type": "file",
-          "target": "AGENTS.md"
-        },
-        {
-          "source": "config/host_assets/codex/agents/paperfit.toml",
-          "type": "file",
-          "target": "agents/paperfit.toml"
+          "target": ".agents/skills/paperfit"
         }
       ]
     },
@@ -65,17 +64,17 @@
       "root_suffix": ".cursor",
       "copies": [
         {
-          "source": "skills",
+          "source": "skills/paperfit",
           "type": "directory",
           "target": "skills/paperfit"
-        },
-        {
-          "source": "agents",
-          "type": "directory",
-          "target": "skills/paperfit/agents"
         }
       ],
       "project_copies": [
+        {
+          "source": "skills/paperfit",
+          "type": "directory",
+          "target": ".cursor/skills/paperfit"
+        },
         {
           "source": "config/host_assets/cursor/paperfit.mdc",
           "type": "file",
