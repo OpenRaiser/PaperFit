@@ -20,6 +20,7 @@ LAYOUT_ONE={'vspace','hspace','vskip','hskip','fontsize','linespread','color','c
 RULES={'toprule','midrule','bottomrule','hline','hlineB'}
 DELIMITER_SIZE_COMMANDS={'left','right'}|{size+suffix for size in ('big','Big','bigg','Bigg') for suffix in ('','l','r','m')}
 DELIMITER_COMMANDS={'{','}','|','lbrace','rbrace','langle','rangle','lvert','rvert','lVert','rVert','vert','Vert','lfloor','rfloor','lceil','rceil','backslash'}
+LAYOUT_LENGTH_REGISTERS={'tabcolsep','arrayrulewidth','textheight','textwidth','columnsep','columnwidth','linewidth','abovecaptionskip','belowcaptionskip','floatsep','textfloatsep','intextsep','parskip','parindent','baselineskip'}
 
 def _command(s:str,i:int)->Tuple[str,int]:
  m=re.match(r'\\([A-Za-z@]+|.)',s[i:],re.S)
@@ -48,6 +49,62 @@ def _literal_dimension(value:str)->bool:
  # A bounded spelling of a TeX length, not arbitrary macros or expressions.
  number=r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)'
  return bool(re.fullmatch(r'\s*(?:'+number+r'\s*(?:pt|em|ex|cm|mm|in|bp|pc|dd|cc|sp)|(?:'+number+r'\s*)?\\(?:linewidth|columnwidth|textwidth|textheight))\s*',value))
+
+def layout_length_end(s:str,i:int,*,opaque_commands:frozenset[str]=frozenset())->int|None:
+ """Parse a known register and literal length, with braced or token first arg.
+
+ Dynamic expressions and directly redefined registers remain opaque. This
+ recognizes presentation syntax only; it does not approve spacing or templates.
+ """
+ pos=i
+ while pos<len(s) and s[pos].isspace():pos+=1
+ if pos<len(s) and s[pos]=='{':
+  register,end=_group(s,pos)
+  if end==pos:return None
+  register=register.strip()
+ elif pos<len(s) and s[pos]=='\\':
+  name,end=_command(s,pos);register='\\'+name
+ else:return None
+ if register not in {'\\'+name for name in LAYOUT_LENGTH_REGISTERS} or register[1:] in opaque_commands:return None
+ pos=end
+ while pos<len(s) and s[pos].isspace():pos+=1
+ if pos>=len(s) or s[pos]!='{':return None
+ value,end=_group(s,pos)
+ if end==pos:return None
+ number=r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)'
+ registers='|'.join(sorted(LAYOUT_LENGTH_REGISTERS))
+ dimension=r'(?:'+number+r'\s*(?:pt|em|ex|cm|mm|in|bp|pc|dd|cc|sp)|(?:'+number+r'\s*)?\\(?:'+registers+r'))'
+ if not re.fullmatch(r'\s*'+dimension+r'(?:\s+plus\s+'+dimension+r')?(?:\s+minus\s+'+dimension+r')?\s*',value):return None
+ if any(name in opaque_commands for name in re.findall(r'\\([A-Za-z@]+)',value)):return None
+ return end
+
+def standard_group_offsets(s:str,*,opaque_commands:frozenset[str]=frozenset(),allowed_commands:frozenset[str]|None=None)->frozenset[int]:
+ """Balanced standard scopes with no unknown/stateful command inside them.
+
+ Inspect complete active source before declaration/math masking: moving a
+ definition or aftergroup into a scope can change later expansion. This does
+ not expand macros or establish semantic equivalence.
+ """
+ if {'begingroup','endgroup'} & opaque_commands:return frozenset()
+ stack=[];paired=set();i=0;unmatched=False
+ while i<len(s):
+  if s[i]!='\\':i+=1;continue
+  name,end=_command(s,i)
+  star=end<len(s) and s[end]=='*'
+  if name in {'setlength','addtolength'} and not star and name not in opaque_commands:
+   stop=layout_length_end(s,end,opaque_commands=opaque_commands)
+   if stop is not None:i=stop;continue
+  if name=='begingroup' and not star:stack.append([i,True])
+  elif name=='endgroup' and not star:
+   if stack:
+    start,known=stack.pop()
+    if known:paired.update((start,i))
+   else:unmatched=True
+  elif name in opaque_commands or (allowed_commands is not None and name not in allowed_commands) or (star and name in {'begingroup','endgroup'}):
+   for scope in stack:scope[1]=False
+  i=end
+ # An incomplete outer scope is unsupported, including its nested pairs.
+ return frozenset() if stack or unmatched else frozenset(paired)
 
 def minipage_layout_end(s:str,i:int)->int|None:
  """End of known minipage presentation arguments; unknown forms stay opaque."""
@@ -86,7 +143,7 @@ def _shadowed_presentation_commands(source:str)->frozenset[str]:
  for record in _macro_definitions(source):
   target=record[1] if record[0] in {'def','gdef','edef','xdef','let'} else record[2]
   name=target.lstrip('\\')
-  if name in DELIMITER_SIZE_COMMANDS|{'parbox'}:names.add(name)
+  if name in DELIMITER_SIZE_COMMANDS|LAYOUT_LENGTH_REGISTERS|{'parbox','setlength','addtolength','begingroup','endgroup'}:names.add(name)
  return frozenset(names)
 
 def _shadowed_literal_url_payload(source:str)->tuple[Any,...]:
@@ -251,7 +308,7 @@ def _safe_float_counter(name:str,value:str)->bool:
  return name.strip() in {'topnumber','bottomnumber','totalnumber','dbltopnumber'} and bool(re.fullmatch(r'\s*\d+\s*',value))
 
 def _strip_layout(s:str,*,text_wrappers:bool=False,opaque_commands:frozenset[str]=frozenset())->str:
- s=re.sub(r'\\tabcolsep\s*(?:=\s*)?[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*(?:pt|em|ex|cm|mm|in)\b','',s)
+ if 'tabcolsep' not in opaque_commands:s=re.sub(r'\\tabcolsep\s*(?:=\s*)?[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*(?:pt|em|ex|cm|mm|in)\b','',s)
  s=re.sub(r'\\(?:widowpenalty|clubpenalty|displaywidowpenalty|brokenpenalty|interlinepenalty)\s*(?:=\s*)?[+-]?\d+\b','',s)
  s=re.sub(r'\\(?:linebreak|nolinebreak)\s*(?:\[[0-4]\])?','',s)
  out=[];i=0
@@ -289,9 +346,9 @@ def _strip_layout(s:str,*,text_wrappers:bool=False,opaque_commands:frozenset[str
   if name=='setcounter':
    counter,k=_group(s,j);value,end=_group(s,k)
    if end>k and _safe_float_counter(counter,value):i=end;continue
-  if name in {'setlength','addtolength'}:
-   arg,k=_group(s,j);_,end=_group(s,k)
-   if arg in {'\\tabcolsep','\\arrayrulewidth','\\textheight','\\textwidth','\\columnsep','\\columnwidth','\\linewidth','\\abovecaptionskip','\\belowcaptionskip','\\floatsep','\\textfloatsep','\\intextsep','\\parskip','\\parindent','\\baselineskip'} and end>k:i=end;continue
+  if name in {'setlength','addtolength'} and not star:
+   end=layout_length_end(s,j,opaque_commands=opaque_commands)
+   if end is not None:i=end;continue
   if name in {'renewcommand','newcommand','providecommand'}:
    arg,k=_group(s,j);k=_optional(s,k);_,end=_group(s,k)
    if arg in {'\\arraystretch','\\topfraction','\\bottomfraction','\\textfraction','\\floatpagefraction','\\dbltopfraction','\\dblfloatpagefraction'} and end>k:i=end;continue

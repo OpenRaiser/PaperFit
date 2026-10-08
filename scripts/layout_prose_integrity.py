@@ -37,7 +37,7 @@ _KNOWN_COMMANDS = (
        "raisebox", "shortstack", "multirow", "multicolumn", "footnotemark",
        "allowbreak", "linebreak", "nolinebreak", "looseness", "selectfont",
        "tabcolsep", "widowpenalty", "clubpenalty", "displaywidowpenalty",
-       "brokenpenalty", "interlinepenalty", "item", "\\", "-"}
+       "brokenpenalty", "interlinepenalty", "item", "begingroup", "endgroup", "\\", "-"}
 )
 _TOKEN = re.compile(r"\w+|[^\w\s]", re.UNICODE)
 _LIMITS = (
@@ -162,8 +162,13 @@ def _opaque_end(source: str, pos: int) -> int:
 
 
 def _prose_tokens(source: str) -> tuple[str, ...]:
-    shadowed_urls = scientific.shadowed_literal_url_commands(source)
+    shadowed = scientific._shadowed_presentation_commands(scientific.active_source(source))
     body = _ordinary_body(source)
+    # Inspect scope effects before definitions/scientific regions are masked.
+    # A local definition may alter later macro rendering even with identical
+    # declaration inventories and ordinary words.
+    group_offsets = scientific.standard_group_offsets(scientific.active_source(source),
+        opaque_commands=shadowed, allowed_commands=frozenset(_KNOWN_COMMANDS))
     # Literal minipage dimensions/alignment change presentation. Preserve the
     # complete body; dynamic headers and unbalanced environments stay opaque.
     container_markers = []
@@ -174,6 +179,8 @@ def _prose_tokens(source: str) -> tuple[str, ...]:
                 container_markers.extend(((env['start'], end), (env['tail'], env['end'])))
     for start, end in sorted(container_markers, reverse=True):
         body = body[:start] + ' ' + body[end:]
+        group_offsets = frozenset(offset if offset < start else offset + 1 - (end - start)
+                                  for offset in group_offsets if not start <= offset < end)
     pieces = []
     opaque: dict[str, str] = {}
     index = 0
@@ -187,10 +194,25 @@ def _prose_tokens(source: str) -> tuple[str, ...]:
             index += 1
             continue
         name, pos = scientific._command(body, index)
-        unknown = name not in _KNOWN_COMMANDS
+        if name in {'setlength', 'addtolength'} and name not in shadowed:
+            end = scientific.layout_length_end(body, pos, opaque_commands=shadowed)
+            if end is not None:
+                # Consume the whole known invocation before its unbraced
+                # register can become an unknown prose macro token.
+                index = end
+                continue
+        if name in {'begingroup', 'endgroup'} and index in group_offsets:
+            # Existing literal brace normalization keeps the body tokens and
+            # ordered claims. Unknown/redefined/unbalanced scopes stay opaque.
+            pieces.append('{' if name == 'begingroup' else '}')
+            index = pos
+            continue
+        unknown = name not in _KNOWN_COMMANDS or name in shadowed
+        if name in {'begingroup', 'endgroup'}:
+            unknown = True
         if name in {'nolinkurl', 'urlstyle'}:
             value, end = scientific._group(body, pos)
-            unknown = not (name not in shadowed_urls and end > pos and ((name == 'nolinkurl' and scientific.literal_long_identifier(value)) or
+            unknown = not (name not in shadowed and end > pos and ((name == 'nolinkurl' and scientific.literal_long_identifier(value)) or
                                          (name == 'urlstyle' and value == 'same')))
         if name in {"begin", "end"}:
             env, _ = scientific._group(body, pos)
@@ -229,7 +251,7 @@ def _prose_tokens(source: str) -> tuple[str, ...]:
             continue
         pieces.append(body[index:pos])
         index = pos
-    normalized = scientific._strip_layout("".join(pieces), text_wrappers=True)
+    normalized = scientific._strip_layout("".join(pieces), text_wrappers=True, opaque_commands=shadowed)
     normalized = re.sub(r"(?<!\\)[{}]", "", normalized)
     normalized = re.sub(r"(?<!\\)~", " ", normalized)
     return tuple(opaque.get(token, token) for token in _TOKEN.findall(normalized))
