@@ -85,8 +85,6 @@ class HostContextTests(unittest.TestCase):
         self.assertEqual(result["findings"][0]["status"], "human_review")
         self.assertIsNone(result["findings"][0]["source_anchor"])
 
-if __name__ == "__main__":
-    unittest.main()
 
 class StaticSourceSafetyTests(unittest.TestCase):
     fixture = HostContextTests.fixture
@@ -246,5 +244,122 @@ class StaticSourceSafetyTests(unittest.TestCase):
         self.assertEqual(result['reports']['action_plan'], 'invalid')
         self.assertEqual(result['finding_counts']['total'], 0)
 
-if __name__ == "__main__":
+
+class ObjectFamilyNavigationTests(unittest.TestCase):
+    fixture = HostContextTests.fixture
+
+    def test_wrapped_objects_resolve_real_lines_without_importing_unused_shadow(self):
+        source = '\n'.join([
+            r'\input{tables/active}',
+            r'\begin{wrapfigure}[11]{r}[8pt]{0.4\textwidth}',
+            r'\includegraphics[width=\linewidth]{body.pdf}',
+            r'\caption{Wrapped \includegraphics[height=1ex]{arrow.pdf}}',
+            r'\label{fig:wrapped}',
+            r'\end{wrapfigure}',
+            r'\begin{wraptable}{r}{0.6\textwidth}',
+            r'\caption{Ablation}',
+            r'\label{tab:wrapped}',
+            r'\begin{tabular}{lr}A & 1\\\end{tabular}',
+            r'\end{wraptable}',
+            r'% \input{tables/unused}',
+            r'\ref{fig:wrapped}\ref{tab:wrapped}\ref{tab:active}',
+        ])
+        root = self.fixture({'main.tex': source,
+            'tables/active.tex': '\n'+r'\begin{sidewaystable*}[p]\caption{Active}\label{tab:active}\end{sidewaystable*}',
+            'tables/unused.tex': r'\begin{table}\caption{Wrong shadow}\label{tab:wrapped}\end{table}'})
+        result = build_source_map(root/'main.tex')
+        by_label = {label:obj for obj in result['objects'] for label in obj['labels']}
+        self.assertEqual(set(by_label), {'fig:wrapped','tab:wrapped','tab:active'})
+        figure = by_label['fig:wrapped']
+        self.assertEqual((figure['kind'],figure['environment'],figure['file'],figure['start_line'],figure['end_line']),
+                         ('figure','wrapfigure','main.tex',2,6))
+        self.assertEqual(figure['environment_arguments'],
+                         {'lines':'11','placement':'r','overhang':'8pt','width':r'0.4\textwidth'})
+        self.assertEqual([(g['file'],g['line'],g['in_caption']) for g in figure['graphics']],
+                         [('body.pdf',3,False),('arrow.pdf',4,True)])
+        table = by_label['tab:wrapped']
+        self.assertEqual((table['kind'],table['start_line'],table['end_line']),('table',7,11))
+        self.assertEqual(table['environment_arguments'],{'placement':'r','width':r'0.6\textwidth'})
+        self.assertEqual(by_label['tab:active']['file'],'tables/active.tex')
+        self.assertEqual({f['file'] for f in result['files']},{'main.tex','tables/active.tex'})
+        self.assertTrue(all(obj['anchor_status']=='resolved' for obj in result['objects']))
+        self.assertEqual(result['object_marker_coverage']['status'],'static_markers_mapped')
+        data=root/'data';data.mkdir()
+        (data/'visual_action_plan.json').write_text(json.dumps({'entries':[
+            {'label':label,'object_type':kind,'status':'executable','page':1}
+            for label,kind in [('fig:wrapped','figure_like'),('tab:wrapped','table_like'),('tab:active','table_like')]]}))
+        context=build_host_context(root/'main.tex',root=root)
+        hits={finding['label']:finding for finding in context['findings']}
+        self.assertEqual(hits['tab:wrapped']['source_anchor'],{'file':'main.tex','start_line':7,'end_line':11})
+        self.assertEqual(hits['fig:wrapped']['source_environment'],'wrapfigure')
+        self.assertEqual(hits['tab:active']['source_anchor']['file'],'tables/active.tex')
+        self.assertEqual(context['source_navigation_coverage'],result['object_marker_coverage'])
+
+    def test_sideways_standard_and_starred_families_have_canonical_kinds(self):
+        for env,kind in [('sidewaysfigure','figure'),('sidewaysfigure*','figure'),
+                         ('sidewaystable','table'),('sidewaystable*','table')]:
+            with self.subTest(environment=env):
+                root=self.fixture({'main.tex':r'\begin{'+env+r'}[tp]\caption{Rotated}\label{object}\end{'+env+'}'})
+                obj=build_source_map(root/'main.tex')['objects'][0]
+                self.assertEqual(obj['kind'],kind)
+                self.assertEqual(obj['environment'],env)
+                self.assertEqual(obj['environment_arguments'],{'placement':'tp'})
+                self.assertEqual(obj['anchor_status'],'resolved')
+
+    def test_longtable_after_split_repair_keeps_table_navigation(self):
+        root=self.fixture({'main.tex':r'\begin{longtable}[c]{lr}\caption{Loss}\label{tab:long}A & 1\\\end{longtable}\ref{tab:long}'})
+        result=build_source_map(root/'main.tex');obj=result['objects'][0]
+        self.assertEqual((obj['kind'],obj['environment']),('table','longtable'))
+        self.assertEqual(obj['environment_arguments'],{'placement':'c','column_specification':'lr'})
+        self.assertEqual(obj['anchor_status'],'resolved')
+        self.assertEqual(result['object_marker_coverage']['mapped_caption_markers'],1)
+
+    def test_unknown_caption_carrier_discloses_partial_navigation(self):
+        root=self.fixture({'main.tex':r'\begin{customfloat}\caption{Not supported}\label{unknown}\end{customfloat}'})
+        data=root/'data';data.mkdir()
+        (data/'visual_action_plan.json').write_text(json.dumps({'entries':[{'label':'unknown','object_type':'figure','status':'executable','page':1}]}))
+        result=build_host_context(root/'main.tex',root=root)
+        coverage=result['source_navigation_coverage']
+        self.assertEqual(coverage['status'],'partial')
+        self.assertEqual(coverage['caption_markers'],1)
+        self.assertEqual(coverage['mapped_caption_markers'],0)
+        self.assertEqual(coverage['unmapped_markers'][0]['environment'],'customfloat')
+        self.assertEqual(result['findings'][0]['status'],'human_review')
+        self.assertIsNone(result['findings'][0]['source_anchor'])
+
+    def test_captionof_and_unknown_float_environment_are_not_silent_coverage(self):
+        root=self.fixture({'main.tex':r'\begin{minipage}{.5\linewidth}\captionof{table}{Outside}\label{inline}\end{minipage}'+'\n'+
+                          r'\begin{SCfigure}\label{sidecaption}\end{SCfigure}'})
+        result=build_source_map(root/'main.tex')
+        self.assertEqual(result['objects'],[])
+        markers=result['object_marker_coverage']['unmapped_markers']
+        self.assertEqual({m['reason'] for m in markers},{'unmapped_caption_marker','unsupported_object_environment'})
+        self.assertEqual(result['object_marker_coverage']['status'],'partial')
+
+    def test_malformed_wrap_arguments_require_review_even_with_literal_label(self):
+        root=self.fixture({'main.tex':r'\begin{wrapfigure}{r}\caption{Missing width}\label{bad}\end{wrapfigure}'})
+        obj=build_source_map(root/'main.tex')['objects'][0]
+        self.assertEqual(obj['argument_status'],'requires_host_review')
+        self.assertEqual(obj['anchor_status'],'requires_host_review')
+        self.assertEqual(build_source_map(root/'main.tex')['object_marker_coverage']['status'],'partial')
+
+    def test_nested_and_unclosed_known_objects_cannot_claim_complete_anchors(self):
+        for source in [r'\begin{figure}\begin{wrapfigure}{r}{.4\linewidth}\caption{Nested}\label{inner}\end{wrapfigure}\label{outer}\end{figure}',
+                       r'\begin{wraptable}{r}{.4\linewidth}\caption{Never closed}\label{unclosed}']:
+            with self.subTest(source=source):
+                root=self.fixture({'main.tex':source});result=build_source_map(root/'main.tex')
+                self.assertEqual(result['object_marker_coverage']['status'],'partial')
+                self.assertTrue(all(obj['anchor_status']!='resolved' for obj in result['objects']))
+
+    def test_wrapped_examples_inside_macros_comments_and_literals_do_not_emit_markers(self):
+        source='\n'.join([r'% \begin{wraptable}{r}{1cm}\caption{Comment}\end{wraptable}',
+                         r'\newcommand{\unused}{\begin{wrapfigure}{r}{1cm}\caption{Macro}\end{wrapfigure}}',
+                         r'\verb|\captionof{table}{Literal}|',
+                         r'\begin{figure}\caption{Real}\label{active}\end{figure}'])
+        root=self.fixture({'main.tex':source});result=build_source_map(root/'main.tex')
+        self.assertEqual([o['labels'] for o in result['objects']],[['active']])
+        self.assertEqual(result['object_marker_coverage']['caption_markers'],1)
+        self.assertEqual(result['object_marker_coverage']['unmapped_markers'],[])
+
+if __name__ == '__main__':
     unittest.main()

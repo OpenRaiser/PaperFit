@@ -4,6 +4,13 @@ import re
 from pathlib import Path
 from typing import Any
 
+OBJECT_ENVIRONMENT_KINDS = {
+    **{name: 'figure' for name in ('figure', 'figure*', 'wrapfigure', 'sidewaysfigure', 'sidewaysfigure*')},
+    **{name: 'table' for name in ('table', 'table*', 'wraptable', 'sidewaystable', 'sidewaystable*', 'longtable')},
+}
+OBJECT_PATTERN = '|'.join(re.escape(name) for name in sorted(OBJECT_ENVIRONMENT_KINDS, key=len, reverse=True))
+CAPTION_MARKER_RE = re.compile(r'\\(?:captionof|caption|subcaption)\*?(?![A-Za-z@])')
+
 LITERAL_ENVS = {'verbatim', 'verbatim*', 'Verbatim', 'lstlisting', 'minted', 'comment'}
 COMMAND_DEFINITIONS = {'newcommand', 'renewcommand', 'providecommand', 'DeclareRobustCommand'}
 ENV_DEFINITIONS = {'newenvironment', 'renewenvironment', 'provideenvironment'}
@@ -193,6 +200,50 @@ def _conditional_ranges(active: str) -> list[tuple[int, int]]:
     return spans
 
 
+def _object_arguments(active: str, pos: int, environment: str) -> tuple[dict[str, str], bool]:
+    """Read common environment arguments without evaluating dimensions/macros."""
+    result: dict[str, str] = {}
+    optional = group(active, pos, '[', ']')
+    if optional:
+        result['lines' if environment.startswith('wrap') else 'placement'] = optional[0].strip()
+        pos = optional[1]
+    if environment.startswith('wrap'):
+        placement = group(active, pos)
+        if not placement:
+            return result, False
+        result['placement'] = placement[0].strip()
+        pos = placement[1]
+        overhang = group(active, pos, '[', ']')
+        if overhang:
+            result['overhang'] = overhang[0].strip()
+            pos = overhang[1]
+        width = group(active, pos)
+        if not width:
+            return result, False
+        result['width'] = width[0].strip()
+    elif environment == 'longtable':
+        columns = group(active, pos)
+        if not columns:
+            return result, False
+        result['column_specification'] = columns[0]
+    return result, True
+
+
+def _environment_spans(active: str) -> list[tuple[str, int, int]]:
+    """Only literal environment extents, for explaining unsupported markers."""
+    stack: list[tuple[str, int]] = []
+    spans: list[tuple[str, int, int]] = []
+    for marker in re.finditer(r'\\(begin|end)\s*\{([^{}]+)\}', active):
+        name = marker[2].strip()
+        if marker[1] == 'begin':
+            stack.append((name, marker.start()))
+        elif stack and stack[-1][0] == name:
+            _, start = stack.pop()
+            spans.append((name, start, marker.end()))
+    spans.extend((name, start, len(active)) for name, start in stack)
+    return spans
+
+
 def build_source_map(main: Path, *, root: Path | None = None, max_files: int = 128) -> dict[str, Any]:
     main = main.resolve()
     root = (root or main.parent).resolve()
@@ -206,6 +257,9 @@ def build_source_map(main: Path, *, root: Path | None = None, max_files: int = 1
     visited: set[Path] = set()
     uncertain_sources: set[str] = set()
     children: dict[Path, set[Path]] = {}
+    object_markers: list[dict[str, Any]] = []
+    caption_marker_count = 0
+    mapped_caption_marker_count = 0
 
     def mark_uncertain(path: Path, seen: set[Path] | None = None) -> None:
         seen = set() if seen is None else seen
@@ -217,6 +271,7 @@ def build_source_map(main: Path, *, root: Path | None = None, max_files: int = 1
             mark_uncertain(child, seen)
 
     def visit(path: Path, uncertain: bool = False) -> None:
+        nonlocal caption_marker_count, mapped_caption_marker_count
         rel = path.relative_to(root).as_posix()
         if uncertain:
             mark_uncertain(path)
@@ -251,9 +306,13 @@ def build_source_map(main: Path, *, root: Path | None = None, max_files: int = 1
             warnings.append({'file': rel, 'reason': 'conditional_tex_requires_host_review'})
         conditional_at = lambda pos: any(a <= pos < b for a, b in conditions)
         stack: list[tuple[str, int, int]] = []
-        for m in re.finditer(r'\\(begin|end)\s*\{(figure\*?|table\*?)\}', active):
+        mapped_spans: list[tuple[int, int, dict[str, Any]]] = []
+        nested_starts: set[int] = set()
+        for m in re.finditer(r'\\(begin|end)\s*\{(' + OBJECT_PATTERN + r')\}', active):
             kind = m.group(2)
             if m.group(1) == 'begin':
+                if stack:
+                    nested_starts.update(start for _, start, _ in stack)
                 stack.append((kind, m.start(), m.end()))
                 continue
             if not stack or stack[-1][0] != kind:
@@ -268,7 +327,7 @@ def build_source_map(main: Path, *, root: Path | None = None, max_files: int = 1
             labels = [x.group(1).strip() for x in re.finditer(r'\\label\s*\{([^{}]+)\}', body)]
             caption_spans: list[tuple[int, int]] = []
             captions: list[str] = []
-            for cm in re.finditer(r'\\caption\*?(?![A-Za-z@])', body):
+            for cm in re.finditer(r'\\(?:caption|subcaption)\*?(?![A-Za-z@])', body):
                 cp = cm.end()
                 optional = group(body, cp, '[', ']')
                 if optional:
@@ -289,14 +348,43 @@ def build_source_map(main: Path, *, root: Path | None = None, max_files: int = 1
                 graphics.append({'file': asset[0].strip(), 'options': options[0] if options else '',
                     'line': line_at(text, body_start + gm.start()),
                     'in_caption': any(a <= gm.start() < b for a, b in caption_spans)})
-            placement = group(active, body_start, '[', ']')
-            objects.append({'kind': kind.rstrip('*'), 'environment': kind, 'labels': labels,
+            arguments, arguments_valid = _object_arguments(active, body_start, kind)
+            if not arguments_valid:
+                warnings.append({'file': rel, 'line': line_at(text, start), 'reason': 'malformed_object_arguments', 'environment': kind})
+            obj = {'kind': OBJECT_ENVIRONMENT_KINDS[kind], 'environment': kind, 'labels': labels,
                 'file': rel, 'start_line': line_at(text, start), 'end_line': line_at(text, m.end()),
-                'placement': placement[0] if placement else '', 'captions': captions, 'graphics': graphics,
+                'placement': arguments.get('placement', ''), 'environment_arguments': arguments,
+                'argument_status': 'resolved' if arguments_valid else 'requires_host_review',
+                'nested_object_source': start in nested_starts,
+                'captions': captions, 'graphics': graphics,
                 'conditional_source': any(a < m.end() and b > start for a, b in conditions),
-                'dynamic_label_source': any(re.search(r'[\\#$]', label) for label in labels)})
+                'dynamic_label_source': any(re.search(r'[\\#$]', label) for label in labels)}
+            objects.append(obj)
+            mapped_spans.append((start, m.end(), obj))
         for kind, start, _ in stack:
             warnings.append({'file': rel, 'line': line_at(text, start), 'reason': 'unclosed_float'})
+        environment_spans = _environment_spans(active)
+        for marker in CAPTION_MARKER_RE.finditer(active):
+            caption_marker_count += 1
+            hits = [obj for start, end, obj in mapped_spans if start <= marker.start() < end]
+            if hits and not marker[0].startswith(r'\captionof'):
+                mapped_caption_marker_count += 1
+                continue
+            parents = [(name, start, end) for name, start, end in environment_spans if start <= marker.start() < end]
+            parent = min(parents, key=lambda item: item[2]-item[1])[0] if parents else None
+            item = {'file': rel, 'line': line_at(text, marker.start()), 'command': marker[0],
+                    'environment': parent, 'reason': 'unsupported_caption_command' if hits else 'unmapped_caption_marker'}
+            object_markers.append(item)
+            warnings.append(dict(item))
+            for obj in hits:
+                obj['unsupported_object_source'] = True
+        for name, start, end in environment_spans:
+            if name in OBJECT_ENVIRONMENT_KINDS or not re.search(r'(?:figure|table)(?:\*|[A-Z].*)?$', name):
+                continue
+            item = {'file': rel, 'line': line_at(text, start), 'environment': name,
+                    'reason': 'unsupported_object_environment'}
+            object_markers.append(item)
+            warnings.append(dict(item))
         for m in re.finditer(r'\\(?:ref|eqref|autoref|cref|Cref|pageref)\*?\s*\{([^{}]+)\}', active):
             for label in m.group(1).split(','):
                 references.append({'label': label.strip(), 'file': rel, 'line': line_at(text, m.start())})
@@ -334,11 +422,24 @@ def build_source_map(main: Path, *, root: Path | None = None, max_files: int = 1
     for obj in objects:
         obj['references'] = [r for r in references if r['label'] in obj['labels']]
         obj['anchor_status'] = 'ambiguous' if any(len(by_label[x]) > 1 for x in obj['labels']) else 'resolved'
-        if obj['anchor_status'] != 'ambiguous' and (obj['conditional_source'] or obj['dynamic_label_source'] or obj['file'] in uncertain_sources):
+        if obj['anchor_status'] != 'ambiguous' and (obj['conditional_source'] or obj['dynamic_label_source'] or obj['file'] in uncertain_sources or
+                obj.get('argument_status') != 'resolved' or obj.get('unsupported_object_source') or obj.get('nested_object_source')):
             obj['anchor_status'] = 'requires_host_review'
     for label, hits in by_label.items():
         if len(hits) > 1:
             warnings.append({'label': label, 'reason': 'duplicate_float_label', 'files': [o['file'] for o in hits]})
+    incomplete_reasons = {'unbalanced_float', 'unclosed_float', 'nested_float', 'source_file_limit',
+                          'dynamic_include', 'missing_include', 'external_include'}
+    uncertain_objects = sum(obj['anchor_status'] != 'resolved' for obj in objects)
+    marker_coverage = {
+        'status': 'partial' if object_markers or uncertain_objects or any(w['reason'] in incomplete_reasons for w in warnings) else 'static_markers_mapped',
+        'supported_environments': sorted(OBJECT_ENVIRONMENT_KINDS),
+        'mapped_objects': len(objects), 'caption_markers': caption_marker_count,
+        'mapped_caption_markers': mapped_caption_marker_count, 'unmapped_markers': object_markers,
+        'uncertain_objects': uncertain_objects,
+        'scope': 'Literal environment/caption syntax in reachable sources; not a proof of all TeX-expanded objects.',
+    }
     return {'schema_version': '1.0', 'root': str(root), 'main': main.relative_to(root).as_posix(),
         'files': files, 'objects': objects, 'references': references, 'warnings': warnings,
+        'object_marker_coverage': marker_coverage,
         'limitations': 'Static source navigation, not TeX expansion, catcode changes, or conditional evaluation. Macro-generated objects and conditional/include fallbacks require host verification; include paths use the declared project root first.'}

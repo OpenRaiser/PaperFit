@@ -1,4 +1,4 @@
-"""Scientific preservation at actual write and executor rollback boundaries."""
+﻿"""Scientific preservation at actual write and executor rollback boundaries."""
 from __future__ import annotations
 
 import json
@@ -98,6 +98,27 @@ class ScientificPayloadTest(unittest.TestCase):
         after = manuscript(r'\renewcommand{\arraystretch}{1.3}$x+1$')
         self.assertFalse(has_scientific_regression(compute_content_diff(before, after)))
 
+    def test_ensuremath_and_extended_math_environment_payloads(self) -> None:
+        math_sources = [
+            r'\ensuremath{\frac{x+y}{z}}',
+            r'\begin{IEEEeqnarray}{rCl}x&=&y+z\label{eq:ieee}\end{IEEEeqnarray}',
+            r'\begin{dmath}x=y+z\label{eq:dmath}\end{dmath}',
+            r'\begin{custommath}x=y+z\label{eq:custom}\end{custommath}',
+        ]
+        for source in math_sources:
+            with self.subTest(source=source):
+                self.assert_rejected(manuscript(source), manuscript(source.replace('+','-')))
+        ensure = manuscript(r'\ensuremath{x+y=1}')
+        aligned = manuscript(r'\ensuremath{\begin{aligned}x+y&={}\\1\end{aligned}}')
+        self.assertFalse(has_scientific_regression(compute_content_diff(ensure, aligned)))
+        ieee = manuscript(r'\begin{IEEEeqnarray}{rCl}x&=&y+z\label{eq:ieee}\end{IEEEeqnarray}')
+        broken = ieee.replace('y+z', r'y+{}\\&&z')
+        self.assertFalse(has_scientific_regression(compute_content_diff(ieee, broken)))
+        # Unknown math-like environments retain opaque content; no guessed
+        # equivalence is used to accept a restructuring.
+        unknown = manuscript(r'\begin{custommath}x+y\end{custommath}')
+        self.assert_rejected(unknown, unknown.replace('x+y', 'y+x'))
+
     def test_known_caption_style_and_float_counters_are_layout(self) -> None:
         before = manuscript('$x+1$')
         after = before.replace(r'\begin{document}', r'\captionsetup{font=small,labelfont=bf,skip=6pt}\setcounter{topnumber}{3}\begin{document}')
@@ -149,6 +170,9 @@ class ScientificExecutorRollbackTest(unittest.TestCase):
             (r'$\text{a b}$', r'$\text{ab}$'),
             (r'\newcommand{\combine}{+}$x\combine y$', r'\newcommand{\combine}{-}$x\combine y$'),
             (r'\def\combine#1{#1+1}$x\combine y$', r'\def\combine#1{#1-1}$x\combine y$'),
+            (r'\ensuremath{x+y}', r'\ensuremath{x-y}'),
+            (r'\begin{IEEEeqnarray}{rCl}x&=&y+z\end{IEEEeqnarray}', r'\begin{IEEEeqnarray}{rCl}x&=&y-z\end{IEEEeqnarray}'),
+            (r'\begin{custommath}x=y+z\end{custommath}', r'\begin{custommath}x=y-z\end{custommath}'),
         ]
         for before, after in fixtures:
             with self.subTest(before=before, after=after):
@@ -165,6 +189,18 @@ class ScientificExecutorRollbackTest(unittest.TestCase):
         self.assertEqual(report['status'], 'success', report)
         self.assertFalse(report['content_integrity']['rollback_performed'])
         self.assertNotEqual(final, original)
+
+    def test_ensuremath_and_ieee_linebreaks_pass_executor_boundary(self) -> None:
+        cases = [
+            (r'\ensuremath{x+y=1}', r'\ensuremath{\begin{aligned}x+y&={}\\1\end{aligned}}'),
+            (r'\begin{IEEEeqnarray}{rCl}x&=&y+z\end{IEEEeqnarray}', r'\begin{IEEEeqnarray}{rCl}x&=&y+{}\\&&z\end{IEEEeqnarray}'),
+        ]
+        for before, after in cases:
+            with self.subTest(before=before):
+                report, final, original = self.run_candidate(manuscript(before), manuscript(after))
+                self.assertEqual(report['status'], 'success', report)
+                self.assertFalse(report['content_integrity']['rollback_performed'])
+                self.assertNotEqual(final, original)
 
     def test_actual_d2_fix_lands_and_preserves_payload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

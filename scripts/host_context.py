@@ -67,6 +67,8 @@ def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path |
             "source_anchor": {"file": obj["file"], "start_line": obj["start_line"], "end_line": obj["end_line"]} if obj else None,
             "source_anchor_status": "resolved" if obj else ("ambiguous" if len(obj_hits) > 1 else "requires_host_review"),
             "graphics": obj["graphics"] if obj else [],
+            "source_environment": obj["environment"] if obj else None,
+            "environment_arguments": obj.get("environment_arguments", {}) if obj else {},
         })
     # The explicit diagnosis is authoritative; old provenance summaries may be stale.
     if "vlm_diagnosis" in visual:
@@ -91,12 +93,14 @@ def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path |
                     "full_action_plan": str(data_dir / "visual_action_plan.json"),
                     "full_visual_report": str(data_dir / "visual_signal_report.json")},
         "vision": vision, "vision_source": vision_source,
+        "source_navigation_coverage": sources["object_marker_coverage"],
         "finding_counts": {"total": len(compact), "shown": min(limit, len(compact)), "omitted": max(0, len(compact)-limit)},
         "findings": compact[:limit], "source_map": sources,
         "host_tasks": [
             "Inspect rendered pages, including pages without machine findings.",
             "Treat recommendations as evidence; verify the target before editing.",
             "Use exact source files and lines, not flattened include-expansion line numbers.",
+            "Review unsupported object/caption markers and uncertain source anchors; static navigation is not TeX-expanded coverage.",
             "Compile and render after source edits; preserve scientific content and template requirements.",
             "Report unresolved findings and incomplete visual coverage explicitly."
         ],

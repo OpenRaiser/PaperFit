@@ -8,7 +8,7 @@ import hashlib,json,re
 from collections import Counter
 from typing import Any,Dict,List,Tuple
 
-MATH_ENVS={'equation','equation*','align','align*','alignat','alignat*','flalign','flalign*','multline','multline*','gather','gather*','displaymath','math','eqnarray','eqnarray*'}
+MATH_ENVS={'equation','equation*','align','align*','alignat','alignat*','flalign','flalign*','multline','multline*','gather','gather*','displaymath','math','eqnarray','eqnarray*','IEEEeqnarray','IEEEeqnarray*','IEEEeqnarraybox','IEEEeqnarraybox*','dmath','dmath*','dgroup','dgroup*'}
 MATH_WRAPPERS=MATH_ENVS|{'aligned','alignedat','split','multlined','gathered'}
 TABLE_ENVS={'tabular','tabular*','tabularx','longtable'}
 FLOAT_ENVS={'figure','figure*','table','table*','wrapfigure','wraptable','sidewaysfigure','sidewaystable'}
@@ -75,17 +75,24 @@ def _envs(s:str)->List[Dict[str,Any]]:
    name,start,body=stack.pop();out.append({'name':name,'start':start,'body':body,'tail':m.start(),'end':m.end()})
  return sorted(out,key=lambda x:x['start'])
 
+def _math_like_environment(name:str)->bool:
+ return bool(re.search(r'(?:math|equation|eqn|align|gather|multline)',name,re.I))
+
 def _math_spans(s:str,envs:List[Dict[str,Any]])->List[Dict[str,Any]]:
  spans=[]
  for e in envs:
-  if e['name'] in MATH_ENVS and not any(p['start']<=e['start']<p['end'] for p in spans):
-   spans.append({**e,'text':s[e['body']:e['tail']],'numbered':e['name'] not in {'math','displaymath'} and not e['name'].endswith('*')})
+  if (e['name'] in MATH_ENVS or _math_like_environment(e['name'])) and not any(p['start']<=e['start']<p['end'] for p in spans):
+   spans.append({**e,'text':s[e['body']:e['tail']],'opaque':e['name'] not in MATH_ENVS,'numbered':e['name'] not in {'math','displaymath','IEEEeqnarraybox','IEEEeqnarraybox*'} and not e['name'].endswith('*')})
  i=0
  while i<len(s):
   cover=next((e for e in spans if e['start']<=i<e['end']),None)
   if cover:i=cover['end'];continue
   if s[i]=='\\':
    name,j=_command(s,i)
+   if name=='ensuremath':
+    arg,end=_group(s,j)
+    if end>j:
+     spans.append({'start':i,'end':end,'text':arg,'numbered':False});i=end;continue
    if name in {'(','['}:
     endmark='\\'+(')' if name=='(' else ']');end=s.find(endmark,j)
     if end>=0:spans.append({'start':i,'end':end+2,'text':s[j:end],'numbered':False});i=end+2;continue
@@ -98,7 +105,10 @@ def _math_spans(s:str,envs:List[Dict[str,Any]])->List[Dict[str,Any]]:
     k+=1
    if k<len(s):spans.append({'start':i,'end':k+len(delim),'text':s[j:k],'numbered':False});i=k+len(delim);continue
   i+=1
- return sorted(spans,key=lambda x:x['start'])
+ ordered=sorted(spans,key=lambda x:(x['start'],-x['end']));outer=[]
+ for span in ordered:
+  if not any(parent['start']<=span['start'] and span['end']<=parent['end'] for parent in outer):outer.append(span)
+ return outer
 
 def _roman_stack(s:str)->str:
  # Only the existing bounded long-roman-identifier presentation rewrite.
@@ -117,6 +127,9 @@ def _math_tokens(s:str)->Tuple[str,...]:
   if s[i].isspace():i+=1;continue
   if s[i]=='\\':
    name,j=_command(s,i)
+   if name=='ensuremath' and not protected:
+    arg,end=_group(s,j)
+    if end>j:out.extend(_math_tokens(arg));i=end;continue
    if name in {'begin','end'}:
     env,k=_group(s,j)
     if env in MATH_WRAPPERS:
@@ -383,7 +396,7 @@ def _payload(s:str)->Dict[str,Any]:
   return (labels,graphics)
  math_body=[];math_float=[]
  for m in math:
-  record=(m['numbered'],_math_tokens(m['text']));key=context(m['start'])
+  record=('opaque_math_environment',m['name'],re.sub(r'\s+',' ',m['text']).strip()) if m.get('opaque') else (m['numbered'],_math_tokens(m['text']));key=context(m['start'])
   if key is None:math_body.append(record)
   else:math_float.append((key,record))
  table_records=[]
