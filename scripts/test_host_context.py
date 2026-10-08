@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from source_map import build_source_map, masked_tex
 from host_context import build_host_context
+from pdf_test_support import write_test_pdf, write_test_png
 
 class HostContextTests(unittest.TestCase):
     def fixture(self, files):
@@ -202,7 +203,11 @@ class StaticSourceSafetyTests(unittest.TestCase):
             (data / 'visual_signal_report.json').write_text(json.dumps({
                 'machine_sources': {'vlm': {'status': 'completed', 'clean': True}}, 'vlm_diagnosis': diagnosis}))
             result = build_host_context(root / 'main.tex', root=root)
-            self.assertEqual(result['vision'], diagnosis)
+            self.assertEqual(result['vision']['provider_status'], diagnosis['status'])
+            self.assertEqual(result['vision']['provider_clean'], diagnosis['clean'])
+            self.assertIsNone(result['vision']['clean'])
+            self.assertEqual(result['vision']['coverage'], diagnosis['coverage'])
+            self.assertEqual(result['vision']['evidence_status'], 'unknown')
             self.assertEqual(result['vision_source'], 'vlm_diagnosis')
 
     def test_invalid_or_inconsistent_diagnosis_cannot_inherit_legacy_clean(self):
@@ -360,6 +365,193 @@ class ObjectFamilyNavigationTests(unittest.TestCase):
         self.assertEqual([o['labels'] for o in result['objects']],[['active']])
         self.assertEqual(result['object_marker_coverage']['caption_markers'],1)
         self.assertEqual(result['object_marker_coverage']['unmapped_markers'],[])
+
+
+class CurrentEvidenceFreshnessTests(unittest.TestCase):
+    fixture = HostContextTests.fixture
+
+    def record_manifest(self, root, data):
+        from runtime_artifacts import collect_artifact_manifest
+        manifest = collect_artifact_manifest(root, 'main.tex', {
+            'page_images_dir': 'data/pages', 'visual_signal_report': 'data/visual_signal_report.json',
+            'defect_report': 'data/defect_report.json', 'gatekeeper_decision': 'data/gatekeeper_decision.json'})
+        (data/'run_result_check_visual.json').write_text(json.dumps({'artifact_manifest': manifest}), encoding='utf-8')
+        return manifest
+
+    def fresh_fixture(self):
+        import os
+        root = self.fixture({'main.tex': r'\begin{document}Text\input{body}\end{document}',
+                             'body.tex': 'Included scientific text'})
+        data = root / 'data'; data.mkdir(); (data / 'pages').mkdir()
+        diagnosis = {'configured': True, 'status': 'completed', 'clean': True,
+                     'coverage': 1.0, 'finding_count': 0, 'missing_page_numbers': []}
+        write_test_pdf(root / 'main.pdf')
+        write_test_png(data / 'pages/page_001.png')
+        for name, value in [('visual_signal_report.json', {'vlm_diagnosis': diagnosis, 'findings': []}),
+                            ('visual_action_plan.json', {'entries': []}),
+                            ('defect_report.json', {'defects': []}),
+                            ('gatekeeper_decision.json', {'decision': 'DONE'})]:
+            (data / name).write_text(json.dumps(value), encoding='utf-8')
+        for path, timestamp in [(root/'main.tex',100), (root/'body.tex',100),
+                                (root/'main.pdf',200), (data/'pages/page_001.png',300),
+                                (data/'visual_signal_report.json',400),
+                                (data/'defect_report.json',500), (data/'gatekeeper_decision.json',600)]:
+            os.utime(path, (timestamp, timestamp))
+        manifest = self.record_manifest(root, data)
+        self.assertEqual(manifest['freshness']['status'], 'pass')
+        return root, data, manifest
+
+    def test_completed_zero_findings_is_clean_only_with_current_snapshot_identity(self):
+        root, data, manifest = self.fresh_fixture()
+        before = {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+        result = build_host_context(root/'main.tex', root=root)
+        self.assertEqual(result['finding_counts']['total'], 0)
+        self.assertEqual(result['vision']['provider_status'], 'completed')
+        self.assertTrue(result['vision']['provider_clean'])
+        self.assertTrue(result['vision']['clean'])
+        self.assertTrue(result['vision']['applicable_to_current_artifacts'])
+        self.assertEqual(result['artifact_freshness']['status'], 'pass')
+        self.assertEqual(result['artifact_freshness']['vision_status'], 'current')
+        self.assertEqual(before, {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob('*') if p.is_file()})
+
+    def test_completed_zero_findings_cannot_clean_changed_pdf_source_or_new_page(self):
+        import os
+        for change, expected in [('pdf','artifact_manifest_pdf_changed'),
+                                 ('source','artifact_manifest_source_set_changed'),
+                                 ('page','artifact_manifest_page_images_changed')]:
+            with self.subTest(change=change):
+                root, data, manifest = self.fresh_fixture()
+                path = {'pdf': root/'main.pdf', 'source': root/'body.tex', 'page': data/'pages/page_002.png'}[change]
+                if change == 'pdf':
+                    write_test_pdf(path, page_count=2)
+                elif change == 'page':
+                    write_test_png(path)
+                else:
+                    path.write_text('Changed scientific text', encoding='utf-8')
+                # Preserve the original PDF/source timestamps; hashes must still invalidate them.
+                timestamp = {'pdf': 200, 'source': 100, 'page': 300}[change]
+                os.utime(path, (timestamp, timestamp))
+                result = build_host_context(root/'main.tex',root=root)
+                self.assertTrue(result['vision']['provider_clean'])
+                self.assertIsNone(result['vision']['clean'])
+                self.assertFalse(result['vision']['applicable_to_current_artifacts'])
+                self.assertEqual(result['vision']['evidence_status'],'stale_or_missing')
+                self.assertIn(expected,result['artifact_freshness']['blocking_checks'])
+
+    def test_incomplete_or_unreadable_pages_cannot_clean_matching_snapshot(self):
+        import os
+        for case, check in [('incomplete', 'page_images_complete'),
+                            ('unreadable', 'page_images_readable')]:
+            with self.subTest(case=case):
+                root, data, _ = self.fresh_fixture()
+                if case == 'incomplete':
+                    write_test_pdf(root/'main.pdf', page_count=2)
+                    os.utime(root/'main.pdf', (200, 200))
+                else:
+                    (data/'pages/page_001.png').write_bytes(b'Undecodable PNG')
+                    os.utime(data/'pages/page_001.png', (300, 300))
+                self.record_manifest(root, data)
+                before = {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+                result = build_host_context(root/'main.tex', root=root)
+                self.assertTrue(result['artifact_freshness']['identity']['pdf_matches_snapshot'])
+                self.assertTrue(result['artifact_freshness']['identity']['page_images_matches_snapshot'])
+                self.assertEqual(result['vision']['provider_status'], 'completed')
+                self.assertTrue(result['vision']['provider_clean'])
+                self.assertIsNone(result['vision']['clean'])
+                self.assertFalse(result['vision']['applicable_to_current_artifacts'])
+                self.assertEqual(result['vision']['evidence_status'], 'stale_or_missing')
+                self.assertIn(check, result['artifact_freshness']['vision_blocking_checks'])
+                self.assertFalse(result['artifact_freshness']['checks'][check]['pass'])
+                self.assertEqual(before, {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob('*') if p.is_file()})
+
+    def test_unavailable_pdf_page_count_cannot_clean_matching_snapshot(self):
+        from unittest.mock import patch
+        root, data, _ = self.fresh_fixture()
+        with patch.dict('sys.modules', {'fitz': None}):
+            self.record_manifest(root, data)
+            result = build_host_context(root/'main.tex', root=root)
+        self.assertTrue(result['artifact_freshness']['identity']['pdf_matches_snapshot'])
+        self.assertEqual(result['vision']['provider_status'], 'completed')
+        self.assertIsNone(result['vision']['clean'])
+        self.assertFalse(result['vision']['applicable_to_current_artifacts'])
+        check = result['artifact_freshness']['checks']['pdf_page_count_available']
+        self.assertFalse(check['pass'])
+        self.assertEqual(check['status'], 'dependency_unavailable')
+        self.assertIn('pdf_page_count_available', result['artifact_freshness']['vision_blocking_checks'])
+
+    def test_freshness_preserves_failed_and_completed_provider_status(self):
+        import os
+        for status, provider_clean in [('failed', None), ('completed', True)]:
+            with self.subTest(status=status):
+                root, data, _ = self.fresh_fixture()
+                report_path = data/'visual_signal_report.json'
+                report = json.loads(report_path.read_text(encoding='utf-8'))
+                report['vlm_diagnosis'].update({'status': status, 'clean': provider_clean})
+                report_path.write_text(json.dumps(report), encoding='utf-8')
+                os.utime(report_path, (400, 400))
+                self.record_manifest(root, data)
+                current = build_host_context(root/'main.tex', root=root)
+                self.assertEqual(current['vision']['provider_status'], status)
+                self.assertEqual(current['vision']['status'], status)
+                self.assertEqual(current['vision']['provider_clean'], provider_clean)
+                self.assertEqual(current['vision']['clean'], provider_clean)
+                (root/'body.tex').write_text('Changed text', encoding='utf-8')
+                os.utime(root/'body.tex', (100, 100))
+                stale = build_host_context(root/'main.tex', root=root)
+                self.assertEqual(stale['vision']['provider_status'], status)
+                self.assertEqual(stale['vision']['status'], status)
+                self.assertEqual(stale['vision']['provider_clean'], provider_clean)
+                self.assertIsNone(stale['vision']['clean'])
+                self.assertFalse(stale['vision']['applicable_to_current_artifacts'])
+
+    def test_runtime_stale_png_blocking_check_remains_explicit(self):
+        import os
+        root, data, manifest = self.fresh_fixture()
+        os.utime(root/'main.pdf',(350,350))
+        manifest['freshness']['status']='stale_or_missing'
+        manifest['freshness']['blocking_checks']=['page_images_not_older_than_pdf']
+        (data/'run_result_check_visual.json').write_text(json.dumps({'artifact_manifest':manifest}))
+        result=build_host_context(root/'main.tex',root=root)
+        self.assertEqual(result['vision']['provider_status'],'completed')
+        self.assertIsNone(result['vision']['clean'])
+        self.assertIn('page_images_not_older_than_pdf', result['artifact_freshness']['blocking_checks'])
+        self.assertIn('page_images_not_older_than_pdf', result['artifact_freshness']['recorded_blocking_checks'])
+        self.assertFalse(result['artifact_freshness']['checks']['page_images_not_older_than_pdf']['pass'])
+
+    def test_missing_or_invalid_runtime_manifest_cannot_clean_current_pages(self):
+        for value in [None, {}, {'artifact_manifest': []}, {'artifact_manifest': {'artifacts': {'pdf': {} }}}]:
+            with self.subTest(value=value):
+                root,data,manifest=self.fresh_fixture()
+                path=data/'run_result_check_visual.json'
+                if value is None:path.unlink()
+                else:path.write_text(json.dumps(value))
+                result=build_host_context(root/'main.tex',root=root)
+                self.assertEqual(result['vision']['evidence_status'],'unknown')
+                self.assertIsNone(result['vision']['applicable_to_current_artifacts'])
+                self.assertIsNone(result['vision']['clean'])
+                self.assertIn('artifact_manifest_missing_or_invalid',result['artifact_freshness']['blocking_checks'])
+
+    def test_external_snapshot_path_is_unknown_and_never_followed(self):
+        root,data,manifest=self.fresh_fixture()
+        outside=root.parent/'outside_snapshot.pdf'
+        self.assertFalse(outside.exists())
+        manifest['artifacts']['pdf']['path']=str(outside)
+        (data/'run_result_check_visual.json').write_text(json.dumps({'artifact_manifest':manifest}))
+        result=build_host_context(root/'main.tex',root=root)
+        self.assertEqual(result['vision']['evidence_status'],'unknown')
+        self.assertIsNone(result['vision']['clean'])
+        self.assertIn('artifact_manifest_pdf_path_invalid',result['artifact_freshness']['blocking_checks'])
+        self.assertFalse(outside.exists())
+
+    def test_latest_invalid_result_cannot_fall_back_to_older_clean_snapshot(self):
+        import os
+        root,data,manifest=self.fresh_fixture()
+        os.utime(data/'run_result_check_visual.json',(100,100))
+        (data/'run_result.json').write_text('[]')
+        result=build_host_context(root/'main.tex',root=root)
+        self.assertIsNone(result['vision']['clean'])
+        self.assertEqual(result['vision']['evidence_status'],'unknown')
+        self.assertTrue(result['artifact_freshness']['manifest_path'].endswith('run_result.json'))
 
 if __name__ == '__main__':
     unittest.main()
