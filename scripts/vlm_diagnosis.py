@@ -328,7 +328,11 @@ class _OpenAICompatibleDiagnosisClient:
             try:
                 with urlopen(_build_request(), timeout=self.timeout) as response:
                     result = json.load(response)
-            except URLError:
+            except URLError as url_exc:
+                # HTTPError 是 URLError 的子类：HTTP 层错误（4xx/5xx）说明请求
+                # 已到达服务端，不属于"连不上"，直连重试没有意义，直接上抛。
+                if isinstance(url_exc, HTTPError):
+                    raise
                 # Windows 上 urlopen 会读注册表里的 WinINET 系统代理；代理已停用
                 # 时表现为本地 10061 拒绝连接。退回无代理直连重试一次——工作代理
                 # 仍被优先尊重。注意：代理尝试会 set_proxy 原地改写 Request（host
