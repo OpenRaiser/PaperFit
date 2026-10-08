@@ -19,6 +19,28 @@ from runtime_types import TaskSpec  # noqa: E402
 
 
 class RuntimeTerminalGuardTest(unittest.TestCase):
+    def test_fresh_artifacts_cannot_hide_failed_or_partial_configured_vision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = OrchestratorRuntime(state_path=str(Path(tmpdir) / "state.json"))
+            for status in ("failed", "partial", "skipped"):
+                with self.subTest(status=status):
+                    failure = runtime._terminal_visual_evidence_failure(
+                        decision="DONE",
+                        artifact_manifest={
+                            "freshness": {"status": "pass"},
+                            "vision_diagnosis": {"configured": True, "status": status, "clean": None},
+                        },
+                    )
+                    self.assertEqual(failure["failure_type"], "terminal_success_without_complete_vlm_evidence")
+            self.assertIsNone(runtime._terminal_visual_evidence_failure(
+                decision="CONTINUE",
+                artifact_manifest={"freshness": {"status": "pass"}, "vision_diagnosis": {"configured": True, "status": "failed"}},
+            ))
+            for diagnosis in ({}, {"configured": False, "status": "skipped"}, {"configured": True, "status": "completed", "clean": True}):
+                self.assertIsNone(runtime._terminal_visual_evidence_failure(
+                    decision="DONE", artifact_manifest={"freshness": {"status": "pass"}, "vision_diagnosis": diagnosis},
+                ))
+
     def test_done_gatekeeper_is_blocked_without_fresh_visual_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir).resolve()

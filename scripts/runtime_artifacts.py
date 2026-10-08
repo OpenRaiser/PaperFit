@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -190,8 +191,22 @@ def collect_artifact_manifest(
         "repair_plan": _file_entry(_resolve(root, artifacts.get("repair_plan")), root),
         "gatekeeper_decision": _file_entry(_resolve(root, artifacts.get("gatekeeper_decision")), root),
     }
+    visual_path = _resolve(root, artifacts.get("visual_signal_report"))
+    vision_diagnosis: Dict[str, Any] = {}
+    if visual_path is not None and visual_path.is_file():
+        try:
+            visual_report = json.loads(visual_path.read_text(encoding="utf-8"))
+            diagnosis = visual_report.get("vlm_diagnosis")
+            if isinstance(diagnosis, dict):
+                vision_diagnosis = {
+                    key: diagnosis.get(key)
+                    for key in ("status", "configured", "clean", "coverage", "missing_page_numbers")
+                }
+        except (OSError, ValueError, AttributeError):
+            pass
     return {
         "schema_version": "1.0",
         "artifacts": entries,
         "freshness": _freshness_checks(entries),
+        "vision_diagnosis": vision_diagnosis,
     }

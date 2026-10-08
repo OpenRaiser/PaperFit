@@ -10,6 +10,8 @@ Float Optimizer Fixers - Category B 缺陷修复
 处理浮动体位置、尺寸、堆叠、跨页分裂等问题。
 """
 
+from __future__ import annotations
+
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple

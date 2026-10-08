@@ -69,6 +69,7 @@ def terminate_process_tree(process: subprocess.Popen) -> None:
         subprocess.run(
             ["taskkill", "/F", "/T", "/PID", str(process.pid)],
             capture_output=True, encoding="utf-8", errors="replace",
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
         return
     try:
@@ -101,6 +102,7 @@ def run_command(
         stderr=subprocess.PIPE,
         text=False,
         start_new_session=True,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
     timed_out = False
     try:

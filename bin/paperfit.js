@@ -20,7 +20,16 @@
  */
 
 const { program } = require('commander');
-const { execSync, spawnSync } = require('child_process');
+const { execSync: executeCommandSync, spawnSync: spawnProcessSync } = require('child_process');
+
+// Keep subprocess output in the calling host without opening extra Windows consoles.
+function execSync(command, options = {}) {
+  return executeCommandSync(command, { ...options, windowsHide: true });
+}
+
+function spawnSync(command, args, options = {}) {
+  return spawnProcessSync(command, args, { ...options, windowsHide: true });
+}
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -38,6 +47,7 @@ function packageRoot() {
 }
 
 function pythonRunner() {
+  if (process.env.PAPERFIT_PYTHON) return process.env.PAPERFIT_PYTHON;
   const venvRoot = path.join(packageRoot(), '.venv');
   const candidates = [
     path.join(venvRoot, 'bin', 'python'), // macOS / Linux venv layout
@@ -254,6 +264,11 @@ function printRuntimeStatusSummary(status) {
   if (status.gatekeeper_decision) console.log(`  Gatekeeper: ${status.gatekeeper_decision}`);
   if (status.run_result_path) console.log(`  RunResult: ${status.run_result_path}`);
   if (freshness.status) console.log(`  Artifact Freshness: ${freshness.status}`);
+  if (visual.vlm_diagnosis?.configured) {
+    const vision = visual.vlm_diagnosis;
+    const coverage = Number.isFinite(vision.coverage) ? `${Math.round(vision.coverage * 100)}%` : 'unknown';
+    console.log(`  Vision Inspection: ${vision.status || 'unknown'}; coverage=${coverage}; clean=${vision.clean ?? 'unknown'}`);
+  }
   if (visual.b2_width_findings) {
     const b2 = visual.b2_width_findings;
     const bySubtype = b2.by_subtype && Object.keys(b2.by_subtype).length > 0

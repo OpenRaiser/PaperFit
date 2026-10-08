@@ -70,6 +70,7 @@ def _run(cmd: List[str], *, cwd: Path, timeout: Optional[int] = None) -> subproc
         stderr=subprocess.PIPE,
         text=False,
         start_new_session=True,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
     timed_out = False
     try:
