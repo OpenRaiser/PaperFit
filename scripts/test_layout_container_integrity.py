@@ -10,6 +10,78 @@ def document(body):
 
 
 class LayoutContainerIntegrityTest(unittest.TestCase):
+    def test_shadowed_url_commands_cannot_hide_new_rendered_content(self):
+        token = 'BenchmarkOverflowTokenWithoutBreakpointsAntibodyDesignerLayoutRegressionSequenceColumnWidthStressCase'
+        for definition, wrapper in (
+            (r'\renewcommand{\nolinkurl}[1]{DifferentScientificIdentifier}', r'\nolinkurl{' + token + '}'),
+            (r'\def\nolinkurl#1{DifferentScientificIdentifier}', r'\nolinkurl{' + token + '}'),
+            (r'\let\nolinkurl=\DifferentScientificIdentifier', r'\nolinkurl{' + token + '}'),
+            (r'\renewcommand{\urlstyle}[1]{DifferentScientificIdentifier}', r'\urlstyle{same}' + token),
+        ):
+            with self.subTest(definition=definition):
+                before = document(definition + '\nIdentifier ' + token + '.')
+                after = before.replace('Identifier ' + token, 'Identifier ' + wrapper)
+                diff = compute_content_diff(before, after, layout_only=True)
+                self.assertEqual(diff['scientific_payload']['status'], 'failed', diff)
+                self.assertEqual(diff['layout_prose']['status'], 'failed', diff)
+                self.assertEqual(diff['action_required'], 'auto_rollback', diff)
+
+    def test_shadowed_wrapper_in_caption_is_protected_by_complete_source(self):
+        token = 'BenchmarkOverflowTokenWithoutBreakpoints1234567890'
+        before = (r'\renewcommand{\nolinkurl}[1]{DifferentScientificIdentifier}' + '\n' +
+                  document(r'\begin{figure}\caption{Identifier ' + token + r'}\end{figure}'))
+        after = before.replace('Identifier ' + token, r'Identifier \nolinkurl{' + token + '}')
+        diff = compute_content_diff(before, after, layout_only=True)
+        self.assertIn('shadowed_literal_url_invocations', diff['scientific_payload']['changed_components'])
+        self.assertEqual(diff['action_required'], 'auto_rollback', diff)
+
+    def test_commented_shadow_definition_does_not_reject_standard_wrapper(self):
+        token = 'BenchmarkOverflowTokenWithoutBreakpoints1234567890'
+        before = document('% ' + r'\renewcommand{\nolinkurl}[1]{DifferentScientificIdentifier}' + '\nIdentifier ' + token + '.')
+        after = before.replace('Identifier ' + token, r'Identifier \nolinkurl{' + token + '}')
+        diff = compute_content_diff(before, after, layout_only=True)
+        self.assertEqual(diff['scientific_payload']['status'], 'pass', diff)
+        self.assertEqual(diff['layout_prose']['status'], 'pass', diff)
+        self.assertIn(diff['action_required'], {'none', 'log_only'}, diff)
+
+    def test_current_font_long_identifier_wrapper_is_only_presentation(self):
+        token = 'BenchmarkOverflowTokenWithoutBreakpointsAntibodyDesignerLayoutRegressionSequenceColumnWidthStressCase'
+        before = document('The identifier is ' + token + '. The method does not improve recall.')
+        after = before.replace(token, r'{\urlstyle{same}\nolinkurl{' + token + '}}')
+        diff = compute_content_diff(before, after, layout_only=True)
+        for channel in ('scientific_payload', 'layout_prose', 'layout_policy'):
+            self.assertEqual(diff[channel]['status'], 'pass', diff)
+        self.assertEqual(diff['word_count']['change'], 0, diff)
+        self.assertIn(diff['action_required'], {'none', 'log_only'}, diff)
+
+    def test_paragraph_boundary_survives_removing_vertical_spacer(self):
+        before = document(r'PFVoidTop\par\vspace{120pt}PFVoidBottom\par The method does not improve recall.')
+        after = before.replace(r'\vspace{120pt}', ' ')
+        diff = compute_content_diff(before, after, layout_only=True)
+        self.assertEqual(diff['layout_prose']['status'], 'pass', diff)
+        self.assertEqual(diff['scientific_payload']['status'], 'pass', diff)
+        self.assertEqual(diff['layout_policy']['status'], 'pass', diff)
+        self.assertNotEqual(diff['action_required'], 'auto_rollback', diff)
+        unsafe = after.replace('does not improve', 'does improve')
+        self.assertEqual(compute_content_diff(before, unsafe, layout_only=True)['action_required'], 'auto_rollback')
+
+    def test_identifier_character_change_remains_rejected(self):
+        token = 'BenchmarkOverflowTokenWithoutBreakpoints1234567890'
+        before = document('The identifier is ' + token + '.')
+        after = before.replace(token, r'{\urlstyle{same}\nolinkurl{' + token.replace('123', '321') + '}}')
+        diff = compute_content_diff(before, after, layout_only=True)
+        self.assertEqual(diff['layout_prose']['status'], 'failed', diff)
+        self.assertEqual(diff['action_required'], 'auto_rollback', diff)
+
+    def test_other_url_forms_and_style_macros_remain_opaque(self):
+        for wrapper in (r'\nolinkurl{https://example.org/claim?value=0.47}',
+                        r'\nolinkurl{\UnknownScientificClaim}', r'\nolinkurl*{'+ 'A'*40+'}',
+                        r'\urlstyle{\UnknownStyle}', r'\nolinkurl{short}'):
+            with self.subTest(wrapper=wrapper):
+                diff = compute_content_diff(document(wrapper), document(''), layout_only=True)
+                self.assertEqual(diff['layout_prose']['status'], 'failed', diff)
+                self.assertEqual(diff['action_required'], 'auto_rollback', diff)
+
     def test_literal_minipage_reflow_preserves_body_number(self):
         body = 'Accuracy is 0.47 and the method does not improve recall.'
         for header in (r'{0.47\linewidth}', r'[t]{.47\columnwidth}',

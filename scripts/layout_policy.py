@@ -17,7 +17,7 @@ from source_map import group, line_at, masked_tex
 _COMMAND = re.compile(r"\\(resizebox|scalebox|newpage|clearpage|pagebreak|vspace)(?![A-Za-z@])")
 _TABLE = re.compile(r"\\begin\s*\{(?:tabular\*?|tabularx|tabulary|longtable|table\*?)\}")
 _GRAPHIC = re.compile(r"\\includegraphics\*?(?:\s*\[[^\]]*\])?\s*\{([^{}]+)\}")
-_FLOAT = re.compile(r"\\(begin|end)\s*\{(table\*?|figure\*?|longtable)\}")
+_FLOAT = re.compile(r"\\(begin|end)\s*\{((?:(?:wrap|sideways)?(?:table|figure)|longtable)\*?)\}")
 
 
 def _active(source: str) -> str:
@@ -38,24 +38,57 @@ def _normalize(value: str) -> str:
     return re.sub(r"\s+", "", value)
 
 
-def _target(active: str, offset: int, body: str) -> str:
+def _scale_body(body: str) -> str:
+    # Nested scale arguments have their own policy findings. Keep the outer
+    # wrapper attached to its content when only an inner factor changes.
+    edits: list[tuple[int, int]] = []
+    for match in _COMMAND.finditer(body):
+        if match[1] not in {"resizebox", "scalebox"}:
+            continue
+        first = group(body, match.end())
+        if not first:
+            continue
+        end = first[1]
+        second = group(body, end) if match[1] == "resizebox" else group(body, end, "[", "]")
+        if second:
+            end = second[1]
+        edits.append((match.end(), end))
+    for start, end in reversed(edits):
+        body = body[:start] + body[end:]
+    return _normalize(body)
+
+
+def _target(active: str, offset: int, body: str) -> tuple[str, str]:
     graphics = tuple(_normalize(value) for value in _GRAPHIC.findall(body))
-    if graphics:
-        return "graphics:" + ",".join(graphics)
-    # A labelled float anchors an existing wrapper even if its tabular layout
-    # changes. Unlabelled objects use their literal body to avoid transferring
-    # a grandfathered violation to a different table.
+    # Only a globally unique, single label can identify a float across layout
+    # environments. Ambiguous/unlabelled floats retain their exact environment
+    # and occurrence, so reflow cannot transfer an inherited scaling allowance.
     stack: list[tuple[str, int]] = []
+    containing: list[tuple[str, int, int]] = []
     for marker in _FLOAT.finditer(active):
         if marker[1] == "begin":
             stack.append((marker[2], marker.start()))
         elif stack and stack[-1][0] == marker[2]:
-            _, start = stack.pop()
+            environment, start = stack.pop()
             if start <= offset < marker.end():
-                labels = re.findall(r"\\label\s*\{([^{}]+)\}", active[start:marker.end()])
-                if labels:
-                    return "labels:" + ",".join(labels)
-    return "body:" + hashlib.sha256(_normalize(body).encode("utf-8")).hexdigest()
+                containing.append((environment, start, marker.end()))
+    if len(containing) == 1:
+        environment, start, end = containing[0]
+        labels = re.findall(r"\\label\s*\{([^{}]+)\}", active[start:end])
+        all_labels = re.findall(r"\\label\s*\{([^{}]+)\}", active)
+        if len(labels) == 1 and all_labels.count(labels[0]) == 1:
+            family = "figure" if "figure" in environment else "table"
+            return "labels:" + labels[0], family
+    if containing:
+        contexts = []
+        for environment, start, _ in sorted(containing, key=lambda item: item[1]):
+            occurrence = sum(marker[1] == "begin" for marker in _FLOAT.finditer(active[:start]))
+            contexts.append(f"{environment}:{occurrence}")
+        context = "/".join(contexts)
+    else:
+        context = ""
+    target = "graphics:" + ",".join(graphics) if graphics else "body:" + hashlib.sha256(_scale_body(body).encode("utf-8")).hexdigest()
+    return target, context
 
 
 def _operations(source: str, *, bounded_layout: bool) -> list[dict[str, Any]]:
@@ -85,7 +118,7 @@ def _operations(source: str, *, bounded_layout: bool) -> list[dict[str, Any]]:
             kind = "table" if _TABLE.search(body) else "graphics" if _GRAPHIC.search(body) else "unknown"
             rule = "scaled_table" if kind == "table" else "scaled_graphics" if kind == "graphics" else "opaque_scaling"
             disposition = "blocked" if kind != "unknown" else "manual_review"
-            target = _target(active, match.start(), body)
+            target, anchor_family = _target(active, match.start(), body)
         elif name == "vspace":
             amount = group(active, pos)
             if amount:
@@ -114,12 +147,13 @@ def _operations(source: str, *, bounded_layout: bool) -> list[dict[str, Any]]:
             "end_offset": pos,
             "line": line_at(source, match.start()),
             "source": source[match.start():pos],
+            **({"anchor_family": anchor_family, "body_signature": hashlib.sha256(_scale_body(body).encode("utf-8")).hexdigest()} if name in {"resizebox", "scalebox"} else {}),
         })
     return operations
 
 
 def _signature(operation: dict[str, Any]) -> tuple[Any, ...]:
-    return operation["command"], tuple(operation["arguments"]), operation["target"]
+    return operation["command"], tuple(operation["arguments"]), operation["target"], operation.get("anchor_family", ""), operation.get("body_signature", "")
 
 
 def _approved(operation: dict[str, Any], approvals: Iterable[dict[str, Any]], file: str) -> bool:

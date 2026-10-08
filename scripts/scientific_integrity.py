@@ -13,7 +13,7 @@ MATH_WRAPPERS=MATH_ENVS|{'aligned','alignedat','split','multlined','gathered'}
 TABLE_ENVS={'tabular','tabular*','tabularx','longtable'}
 FLOAT_ENVS={'figure','figure*','table','table*','wrapfigure','wraptable','sidewaysfigure','sidewaystable'}
 FONT_DECL={'tiny','scriptsize','footnotesize','small','normalsize','large','Large','LARGE','huge','Huge','bfseries','mdseries','itshape','upshape','slshape','scshape','rmfamily','sffamily','ttfamily','normalfont','centering','raggedright','raggedleft','raggedbottom','flushleft','flushright','FloatBarrier','clearpage','newpage','pagebreak','nopagebreak','noindent','medskip','smallskip','bigskip','hfill','vfill','par','arraybackslash'}
-TEXT_WRAPPERS={'textbf','textit','texttt','textrm','textsf','textnormal','emph','underline','mbox','makecell'}
+TEXT_WRAPPERS={'textbf','textit','texttt','textrm','textsf','textnormal','emph','underline','mbox','makecell','nolinkurl'}
 ID_COMMANDS={'label','ref','eqref','pageref','autoref','cref','Cref','vref','nameref','cite','citep','citet','citealp','citealt','citeauthor','citeyear','citeyearpar','nocite'}
 PROTECTED_ARGS={'caption','subcaption','section','subsection','subsubsection','paragraph','title','author','affiliation','thanks','footnote','footnotetext'}
 LAYOUT_ONE={'vspace','hspace','vskip','hskip','fontsize','linespread','color','cellcolor','rowcolor','cline','cmidrule','addlinespace','bibliographystyle'}
@@ -61,6 +61,34 @@ def minipage_layout_end(s:str,i:int)->int|None:
  if len(options)>2 and options[2] not in {'t','c','b','s'}:return None
  width,end=_group(s,pos)
  return end if end>pos and _literal_dimension(width) else None
+
+def literal_long_identifier(value:str)->bool:
+ # nolinkurl has special TeX character rules. Normalize only the literal
+ # alphanumeric long identifiers used by D1; macros/URL punctuation stay opaque.
+ return bool(re.fullmatch(r'[A-Za-z][A-Za-z0-9]{39,}',value))
+
+def shadowed_literal_url_commands(source:str)->frozenset[str]:
+ # Direct definitions of these newly supported wrappers invalidate their
+ # standard presentation meaning. Inspect the whole source, not a body chunk.
+ names=set()
+ for record in _macro_definitions(active_source(source)):
+  target=record[1] if record[0] in {'def','gdef','edef','xdef','let'} else record[2]
+  name=target.lstrip('\\')
+  if name in {'nolinkurl','urlstyle'}:names.add(name)
+ return frozenset(names)
+
+def _shadowed_literal_url_payload(source:str)->tuple[Any,...]:
+ shadowed=shadowed_literal_url_commands(source);records=[];i=0
+ while i<len(source):
+  if source[i]!='\\':i+=1;continue
+  name,end=_command(source,i)
+  if name in shadowed:
+   star=end<len(source) and source[end]=='*';pos=end+int(star)
+   arg,last=_group(source,pos)
+   records.append((name,star,re.sub(r'\s+',' ',arg).strip() if last>pos else None))
+   i=last if last>pos else pos;continue
+  i=end
+ return tuple(records)
 
 def active_source(s:str)->str:
  chars=list(s);i=0
@@ -207,7 +235,12 @@ def _strip_layout(s:str,*,text_wrappers:bool=False)->str:
    # Dynamic values and larger changes remain visible to preservation checks.
    value=re.match(r'\s*(?:=\s*)?([+-]?[01])(?=\s|}|$)',s[j:])
    if value:i=j+value.end();continue
-  if name in FONT_DECL|RULES:i=opt;continue
+  if name in FONT_DECL|RULES:
+   if name=='par' and text_wrappers:out.append(' ')
+   i=opt;continue
+  if name=='urlstyle' and not star:
+   body,end=_group(s,j)
+   if end>j and body=='same':i=end;continue
   if name=='captionsetup':
    body,end=_group(s,opt)
    if end>opt and _safe_caption_setup(body):i=end;continue
@@ -267,6 +300,12 @@ def _strip_layout(s:str,*,text_wrappers:bool=False)->str:
    body,end=_group(s,pos)
    if end>pos:
     out.append(_strip_layout(body,text_wrappers=True) if known else s[i:end])
+    i=end;continue
+   out.append(s[i:j]);i=j;continue
+  if name=='nolinkurl':
+   body,end=_group(s,j)
+   if end>j:
+    out.append(body if not star and literal_long_identifier(body) else s[i:end])
     i=end;continue
    out.append(s[i:j]);i=j;continue
   if text_wrappers and name in TEXT_WRAPPERS|{'shortstack'}:
@@ -495,7 +534,7 @@ def _payload(s:str)->Dict[str,Any]:
    j=_optional(s,j);arg,end=_group(s,j)
    if end>j:arguments.append((context(i),name,_text_tokens(arg)));i=end;continue
   i=j
- return {'configuration_arguments':_configuration_payload(s),'macro_definitions':_macro_definitions(s),'math_body':tuple(math_body),'math_floats':tuple(sorted(Counter(math_float).items(),key=repr)),'tables':tuple(sorted(Counter(table_records).items(),key=repr)),'identifiers':_ids(s),'numbers_body':numeric_body,'numbers_floats':tuple(sorted(Counter(numeric_float).items(),key=repr)),'protected_arguments':tuple(sorted(Counter(arguments).items(),key=repr))}
+ return {'configuration_arguments':_configuration_payload(s),'macro_definitions':_macro_definitions(s),'shadowed_literal_url_invocations':_shadowed_literal_url_payload(s),'math_body':tuple(math_body),'math_floats':tuple(sorted(Counter(math_float).items(),key=repr)),'tables':tuple(sorted(Counter(table_records).items(),key=repr)),'identifiers':_ids(s),'numbers_body':numeric_body,'numbers_floats':tuple(sorted(Counter(numeric_float).items(),key=repr)),'protected_arguments':tuple(sorted(Counter(arguments).items(),key=repr))}
 
 def scientific_payload_diff(original:str,repaired:str)->Dict[str,Any]:
  before=_payload(original);after=_payload(repaired);changed=[key for key in before if before[key]!=after[key]]

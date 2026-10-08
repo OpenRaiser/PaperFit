@@ -162,6 +162,7 @@ def _opaque_end(source: str, pos: int) -> int:
 
 
 def _prose_tokens(source: str) -> tuple[str, ...]:
+    shadowed_urls = scientific.shadowed_literal_url_commands(source)
     body = _ordinary_body(source)
     # Literal minipage dimensions/alignment change presentation. Preserve the
     # complete body; dynamic headers and unbalanced environments stay opaque.
@@ -187,6 +188,10 @@ def _prose_tokens(source: str) -> tuple[str, ...]:
             continue
         name, pos = scientific._command(body, index)
         unknown = name not in _KNOWN_COMMANDS
+        if name in {'nolinkurl', 'urlstyle'}:
+            value, end = scientific._group(body, pos)
+            unknown = not (name not in shadowed_urls and end > pos and ((name == 'nolinkurl' and scientific.literal_long_identifier(value)) or
+                                         (name == 'urlstyle' and value == 'same')))
         if name in {"begin", "end"}:
             env, _ = scientific._group(body, pos)
             unknown = env not in _ORDINARY_ENVS
