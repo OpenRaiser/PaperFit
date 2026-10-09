@@ -30,12 +30,12 @@ _ORDINARY_ENVS = {
 }
 _KNOWN_COMMANDS = (
     scientific.FONT_DECL | scientific.RULES | scientific.TEXT_WRAPPERS | scientific.TEXT_SPACE_COMMANDS
-    | scientific.LAYOUT_ONE | scientific.ID_COMMANDS | scientific.PROTECTED_ARGS
+    | scientific.LAYOUT_ONE | scientific.LAYOUT_LENGTH_REGISTERS | scientific.ID_COMMANDS | scientific.PROTECTED_ARGS
     | {"begin", "end", "setlength", "addtolength", "setcounter", "captionsetup",
        "usepackage", "RequirePackage", "documentclass", "bibliographystyle",
        "includegraphics", "resizebox", "scalebox", "rotatebox", "parbox",
        "raisebox", "shortstack", "multirow", "multicolumn", "footnotemark",
-       "allowbreak", "linebreak", "nolinebreak", "looseness", "selectfont",
+       "allowbreak", "linebreak", "nolinebreak", "looseness", "selectfont", "relax",
        "tabcolsep", "widowpenalty", "clubpenalty", "displaywidowpenalty",
        "brokenpenalty", "interlinepenalty", "item", "begingroup", "endgroup", "\\", "-"}
 )
@@ -160,7 +160,7 @@ def _opaque_end(source: str, pos: int) -> int:
         if end > pos:
             pos = end
             continue
-        return pos
+        return max(pos, scientific.opaque_layout_child_end(source, pos))
 
 
 def _prose_tokens(source: str) -> tuple[str, ...]:
@@ -197,8 +197,8 @@ def _prose_tokens(source: str) -> tuple[str, ...]:
             continue
         name, pos = scientific._command(body, index)
         star = pos < len(body) and body[pos] == '*'
-        if name == 'emergencystretch' and not star:
-            end = scientific.emergency_stretch_end(body, pos, opaque_commands=shadowed)
+        if name in scientific.LAYOUT_LENGTH_REGISTERS and not star:
+            end = scientific.layout_assignment_end(body, pos, name, opaque_commands=shadowed)
             if end is not None:
                 index = end
                 continue
@@ -208,13 +208,20 @@ def _prose_tokens(source: str) -> tuple[str, ...]:
             pieces.append(' ')
             index = pos
             continue
-        if name in {'setlength', 'addtolength'} and name not in shadowed:
-            end = scientific.layout_length_end(body, pos, opaque_commands=shadowed)
+        if name in {'setlength', 'addtolength'}:
+            end = scientific.layout_length_end(body, pos, opaque_commands=shadowed) if name not in shadowed and not star else None
             if end is not None:
-                # Consume the whole known invocation before its unbraced
-                # register can become an unknown prose macro token.
+                # Consume the complete known invocation before its token
+                # register can become a separate prose macro.
                 index = end
                 continue
+            end = scientific.opaque_length_args_end(body, pos + int(star))
+            value = body[index:end]
+            marker = f"{marker_prefix}{len(opaque)}"
+            opaque[marker] = re.sub(r"\s+", " ", value).strip()
+            pieces.extend((" ", marker, " "))
+            index = end
+            continue
         if name in {'begingroup', 'endgroup'} and index in group_offsets:
             # Existing literal brace normalization keeps the body tokens and
             # ordered claims. Unknown/redefined/unbalanced scopes stay opaque.

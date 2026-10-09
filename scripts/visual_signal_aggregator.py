@@ -24,7 +24,10 @@ except ImportError:
     yaml = None
 
 try:
-    import fitz  # type: ignore[import-untyped]
+    try:
+        import pymupdf as fitz
+    except ImportError:  # Older PyMuPDF distributions.
+        import fitz
 except ImportError:
     fitz = None
 

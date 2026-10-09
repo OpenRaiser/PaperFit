@@ -13,6 +13,7 @@ import re
 from typing import Any, Iterable
 
 from source_map import group, line_at, masked_tex
+import scientific_integrity as scientific
 
 _COMMAND = re.compile(r"\\(resizebox|scalebox|newpage|clearpage|pagebreak|vspace)(?![A-Za-z@])")
 _TABLE = re.compile(r"\\begin\s*\{(?:tabular\*?|tabularx|tabulary|longtable|table\*?)\}")
@@ -91,6 +92,242 @@ def _target(active: str, offset: int, body: str) -> tuple[str, str]:
     return target, context
 
 
+# Scientific token preservation deliberately normalizes font declarations.
+# This separate channel prevents a new page-fit shortcut from shrinking body
+# prose, while retaining conventional local table/float/caption typography.
+_SMALL_BODY_FONTS = {"tiny", "scriptsize", "footnotesize", "small"}
+_FONT_COMMANDS = _SMALL_BODY_FONTS | {"fontsize"}
+_LOCAL_FONT_ENVS = scientific.FLOAT_ENVS | scientific.TABLE_ENVS | {
+    "tabulary", "longtable*", "wrapfigure*", "wraptable*",
+}
+_LOCAL_FONT_ARGUMENTS = {
+    "caption", "subcaption", "footnote", "footnotetext",
+    "title", "author", "affiliation", "thanks",
+}
+_REVIEW_LENGTHS = {
+    "parskip", "baselineskip", "abovedisplayskip", "belowdisplayskip",
+    "abovedisplayshortskip", "belowdisplayshortskip",
+    "itemsep", "topsep", "parsep", "partopsep",
+}
+
+
+def _groups(active: str) -> list[tuple[int, int]]:
+    """Balanced literal/standard groups only, without executing TeX."""
+    spans: list[tuple[int, int]] = []
+    stack: list[tuple[int, str]] = []
+    index = 0
+    while index < len(active):
+        if active[index] == "\\":
+            name, end = scientific._command(active, index)
+            if name == "begingroup":
+                stack.append((index, "standard"))
+            elif name == "endgroup" and stack and stack[-1][1] == "standard":
+                spans.append((stack.pop()[0], index))
+            index = end
+            continue
+        if active[index] == "{":
+            stack.append((index, "literal"))
+        elif active[index] == "}" and stack and stack[-1][1] == "literal":
+            spans.append((stack.pop()[0], index))
+        index += 1
+    return spans
+
+
+def _font_context(active: str, offset: int, envs: list[dict[str, Any]],
+                  groups: list[tuple[int, int]]) -> tuple[bool, int]:
+    local = any(e["start"] <= offset < e["end"] and e["name"] in _LOCAL_FONT_ENVS for e in envs)
+    for marker in re.finditer(r"\\([A-Za-z@]+)", active):
+        if marker[1] not in _LOCAL_FONT_ARGUMENTS:
+            continue
+        pos = marker.end()
+        if pos < len(active) and active[pos] == "*":
+            pos += 1
+        optional = group(active, pos, "[", "]")
+        if optional:
+            pos = optional[1]
+        argument = group(active, pos)
+        if argument and pos <= offset < argument[1]:
+            local = True
+            break
+    ends = [end for start, end in groups if start < offset < end]
+    ends += [e["tail"] for e in envs if e["body"] <= offset < e["tail"]]
+    return local, min(ends, default=len(active))
+
+
+def _normal_reset_end(active: str, start: int, end: int,
+                      envs: list[dict[str, Any]],
+                      groups: list[tuple[int, int]], shadowed: set[str]) -> int:
+    if "normalsize" in shadowed:
+        return end
+    def scope(offset: int) -> tuple[Any, ...]:
+        return (tuple((left, right) for left, right in groups if left < offset < right),
+                tuple((e["start"], e["end"]) for e in envs if e["body"] <= offset < e["tail"]))
+    origin = scope(start)
+    for marker in re.finditer(r"\\normalsize(?![A-Za-z@])", active[start:end]):
+        offset = start + marker.start()
+        if scope(offset) == origin:
+            return offset
+    return end
+
+
+def _font_redefinitions(source: str) -> set[str]:
+    names: set[str] = set()
+    for record in scientific._macro_definitions(scientific.active_source(source)):
+        target = record[1] if record[0] in {"def", "gdef", "edef", "xdef", "let"} else record[2]
+        name = target.lstrip("\\")
+        if name in _FONT_COMMANDS | {"normalsize"}:
+            names.add(name)
+    if re.search(r"\\(?:csname|catcode)(?![A-Za-z@])", _active(source)):
+        names.update(_FONT_COMMANDS | {"normalsize"})
+    return names
+
+
+def _table_only_scope(active: str, start: int, end: int,
+                      envs: list[dict[str, Any]]) -> bool:
+    """A font before a bare table is local only in a bounded table-only group."""
+    tables = [e for e in envs if e["name"] in _LOCAL_FONT_ENVS
+              and start <= e["start"] and e["end"] <= end]
+    if not tables:
+        return False
+    chars = list(active[start:end])
+    for table in tables:
+        for index in range(table["start"] - start, table["end"] - start):
+            chars[index] = " "
+    remainder = "".join(chars)
+    remainder = re.sub(r"\\(?:centering|raggedright|raggedleft|arraybackslash|"
+                       r"selectfont|normalsize|small|footnotesize|scriptsize|tiny|par)"
+                       r"(?![A-Za-z@])", "", remainder)
+    return not re.sub(r"[\s{}]", "", remainder)
+
+
+def _presentation_operation(source: str, start: int, end: int, name: str,
+                            arguments: list[str], rule: str, status: str,
+                            target: str = "") -> dict[str, Any]:
+    return {
+        "command": name, "arguments": arguments, "target": target,
+        "rule": rule, "status": status, "start_offset": start, "end_offset": end,
+        "line": line_at(source, start), "source": source[start:end],
+    }
+
+
+def _body_presentation_operations(source: str, active: str) -> list[dict[str, Any]]:
+    envs = scientific._envs(active)
+    groups = _groups(active)
+    shadowed_fonts = _font_redefinitions(source)
+    operations: list[dict[str, Any]] = []
+    index = 0
+    while index < len(active):
+        if active[index] != "\\":
+            index += 1
+            continue
+        start = index
+        name, pos = scientific._command(active, index)
+        index = pos
+        if name not in _FONT_COMMANDS | _REVIEW_LENGTHS | {"setlength", "addtolength", "linespread"}:
+            continue
+        local, scope_end = _font_context(active, start, envs, groups)
+        arguments: list[str] = []
+        end = pos
+        if name in _FONT_COMMANDS:
+            lexical_end = scope_end
+            scope_end = _normal_reset_end(active, start, scope_end, envs, groups, shadowed_fonts)
+            normal_reset = scope_end < lexical_end
+            if name == "fontsize":
+                first = group(active, pos)
+                second = group(active, first[1]) if first else None
+                if first:
+                    arguments.append(_normalize(first[0]))
+                    end = first[1]
+                if second:
+                    arguments.append(_normalize(second[0]))
+                    end = second[1]
+                index = max(index, end)
+                size = re.fullmatch(r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))(?:pt)?", arguments[0]) if arguments else None
+                baseline = re.fullmatch(r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))(?:pt)?", arguments[1]) if len(arguments) == 2 else None
+                # The minimum 5pt rule applies to an explicit font point size,
+                # not native mathematical scripts or a document-wide font
+                # histogram. Relative/unknown spellings need independent review.
+                if size and float(size[1]) < 5:
+                    operations.append(_presentation_operation(
+                        source, start, end, name, arguments,
+                        "unreadable_explicit_font_size", "blocked"))
+                    continue
+                if baseline and float(baseline[1]) <= 0:
+                    operations.append(_presentation_operation(
+                        source, start, end, name, arguments,
+                        "nonpositive_font_baseline", "blocked"))
+                    continue
+                if local and name not in shadowed_fonts and size and baseline and float(baseline[1]) > 0:
+                    continue
+            elif local and name not in shadowed_fonts:
+                continue
+            if name not in shadowed_fonts and not local and ((normal_reset and not active[end:scope_end].strip()) or _table_only_scope(active, end, scope_end, envs)):
+                continue
+            affected = re.sub(r"\\(?:tiny|scriptsize|footnotesize|small|normalsize|selectfont)"
+                              r"(?![A-Za-z@])", "", active[end:scope_end])
+            target = "body_font:" + hashlib.sha256(_normalize(affected).encode("utf-8")).hexdigest()
+            operations.append(_presentation_operation(
+                source, start, end, name, arguments,
+                "opaque_font_definition" if name in shadowed_fonts else "body_font_shrink" if name in _SMALL_BODY_FONTS else "body_font_size",
+                "blocked" if name in _SMALL_BODY_FONTS and name not in shadowed_fonts else "manual_review", target))
+            continue
+        register = name
+        value = ""
+        if name in {"setlength", "addtolength"}:
+            arg = group(active, pos)
+            if arg:
+                register = arg[0].strip().lstrip("\\")
+                pos = arg[1]
+            else:
+                cursor = pos
+                while cursor < len(active) and active[cursor].isspace():
+                    cursor += 1
+                if cursor >= len(active) or active[cursor] != "\\":
+                    continue
+                register, pos = scientific._command(active, cursor)
+            length = group(active, pos)
+            if not length:
+                continue
+            value, end = length
+            index = max(index, end)
+            if register not in _REVIEW_LENGTHS:
+                continue
+            arguments = ["\\" + register, _normalize(value)]
+        elif name == "linespread":
+            length = group(active, pos)
+            if not length:
+                continue
+            value, end = length
+            arguments = [_normalize(value)]
+        else:
+            end = scientific.layout_assignment_end(active, pos, name)
+            if end is None:
+                continue
+            value = re.sub(r"^\s*=\s*", "", active[pos:end]).strip()
+            arguments = [_normalize(value)]
+        index = max(index, end)
+        literal = re.match(r"^\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))", value)
+        if literal is None:
+            continue
+        amount = float(literal[1])
+        # Finite spacing changes do not prove poor typography. Negative body
+        # gaps and line compression require actual PDF review; do not impose a
+        # fixed threshold that rejects a legitimate conference template.
+        if name == "linespread":
+            if local or amount >= 1:
+                continue
+            rule = "body_line_compression"
+            status = "blocked" if amount <= 0 else "manual_review"
+        elif register == "baselineskip" and not local and amount <= 0:
+            rule, status = "nonpositive_body_baseline", "blocked"
+        elif amount < 0:
+            rule, status = "negative_layout_spacing", "manual_review"
+        else:
+            continue
+        operations.append(_presentation_operation(source, start, end, name, arguments, rule, status))
+    return operations
+
+
 def _operations(source: str, *, bounded_layout: bool) -> list[dict[str, Any]]:
     active = _active(source)
     operations: list[dict[str, Any]] = []
@@ -149,6 +386,13 @@ def _operations(source: str, *, bounded_layout: bool) -> list[dict[str, Any]]:
             "source": source[match.start():pos],
             **({"anchor_family": anchor_family, "body_signature": hashlib.sha256(_scale_body(body).encode("utf-8")).hexdigest()} if name in {"resizebox", "scalebox"} else {}),
         })
+    operations.extend(_body_presentation_operations(source, active))
+    for declaration in scientific.arraystretch_declarations(source):
+        if declaration["value"] <= 0:
+            operations.append(_presentation_operation(
+                source, declaration["start"], declaration["end"],
+                declaration["command"], ["\\arraystretch", declaration["value_text"]],
+                "nonpositive_table_row_stretch", "blocked"))
     return operations
 
 
@@ -173,7 +417,7 @@ def _approved(operation: dict[str, Any], approvals: Iterable[dict[str, Any]], fi
             continue
         if evidence.get("visual_inspected") is not True or not evidence.get("page_images"):
             continue
-        if operation["rule"] == "restricted_spacing" and evidence.get("scope") == "local":
+        if operation["rule"] in {"restricted_spacing", "negative_layout_spacing", "body_line_compression"} and evidence.get("scope") == "local":
             return True
         if operation["command"] == "clearpage" and evidence.get("scope") == "endmatter" and evidence.get("endmatter_intrusion") is True:
             return True

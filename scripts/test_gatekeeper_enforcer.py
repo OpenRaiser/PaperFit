@@ -61,7 +61,7 @@ class GatekeeperEnforcerTest(unittest.TestCase):
                 decision["remaining_defects"],
             )
 
-    def test_main_body_page_budget_scope_does_not_block_endmatter_pages(self) -> None:
+    def test_unmeasured_main_body_goal_stays_pending_without_endmatter_defect(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir).resolve()
             data_dir = root / "data"
@@ -90,9 +90,11 @@ class GatekeeperEnforcerTest(unittest.TestCase):
             finally:
                 os.chdir(cwd)
 
-            self.assertEqual(decision["decision"], "DONE")
+            self.assertEqual(decision["decision"], "CONTINUE")
             self.assertTrue(decision["checks"]["category_A"]["pass"])
             self.assertEqual(decision["remaining_defects"], [])
+            self.assertIsNone(decision["checks"]["page_objective"]["target_met"])
+            self.assertEqual(decision["checks"]["page_objective"]["reason"], "scope_boundary_unverified")
 
     def _run_decision(self, defects: list) -> dict:
         with tempfile.TemporaryDirectory() as tmpdir:

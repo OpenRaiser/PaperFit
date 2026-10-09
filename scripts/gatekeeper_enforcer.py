@@ -24,6 +24,8 @@ from state_schema import normalize_state, validate_state
 from transactional_patch import atomic_write_text
 from layout_policy import snapshot_source_edit_checks
 from visibility_review import review_pdf_visibility
+from runtime_artifacts import collect_artifact_manifest
+from page_objective import page_objective_from_manifest
 
 
 DEFAULT_GATEKEEPER_RULES: Dict[str, Any] = {
@@ -253,17 +255,20 @@ def _load_visual_report_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
     return _load_json(path)
 
 
-def _page_budget_defect_from_state(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _page_budget_defect_from_state(state: Dict[str, Any], objective: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     task = state.get("task") or {}
     target_pages = int(task.get("target_pages") or 0)
     if target_pages <= 0:
         return None
-    if str(task.get("page_budget_scope") or "") == "main_body":
+    if str(task.get("page_budget_scope") or "") in {"main_body", "with_refs"}:
         return None
 
     visual_report = _load_visual_report_from_state(state)
-    current_pages = int(((visual_report.get("summary") or {}).get("pages_analyzed")) or 0)
-    if current_pages <= target_pages:
+    current_pages = int((objective or {}).get("measured_pages") or ((visual_report.get("summary") or {}).get("pages_analyzed")) or 0)
+    if task.get("page_policy") == "exact":
+        if current_pages <= 0 or current_pages == target_pages:
+            return None
+    elif current_pages <= target_pages:
         return None
 
     return {
@@ -340,6 +345,25 @@ def make_decision(
     if not visibility["pass"]:
         decision = "CONTINUE"
         reasons.append("physical PDF text visibility requires current evidence or host review")
+
+    task = state.get("task") or {}
+    if isinstance(main_tex, str) and main_tex.strip():
+        page_manifest = collect_artifact_manifest(Path.cwd(), main_tex, artifacts)
+    else:
+        page_manifest = {}
+    # The gatekeeper report is being produced now, so its previous timestamp
+    # cannot be a prerequisite for measuring the current PDF. Vision/render
+    # freshness remains an independent terminal gate.
+    page_checks = (page_manifest.get("freshness") or {}).get("checks") or {}
+    if page_checks:
+        current_pdf = all(page_checks.get(key, {}).get("pass") is True for key in
+                          ("pdf_exists", "pdf_not_older_than_source_set", "pdf_page_count_available"))
+        page_manifest = {**page_manifest, "freshness": {"status": "pass" if current_pdf else "stale_or_missing"}}
+    objective = page_objective_from_manifest(task, page_manifest)
+    checks["page_objective"] = {**objective, "pass": objective["target_met"]}
+    if task.get("target_pages") is not None and objective["target_met"] is not True:
+        decision = "CONTINUE"
+        reasons.append("page objective is unmet or unverified")
 
     semantic_summary = state.get("semantic_budget_summary")
     semantic_used = semantic_summary is not None or artifacts.get("semantic_patch_report") is not None
@@ -469,7 +493,7 @@ def make_decision(
         reasons.append("scientific payload preservation requires a valid baseline")
 
     defect_summary = _summarize_defects(state, defects_payload)
-    page_budget_defect = _page_budget_defect_from_state(state)
+    page_budget_defect = _page_budget_defect_from_state(state, objective)
     if page_budget_defect is not None:
         defect_summary["open_defects"].append(page_budget_defect)
         defect_summary["by_severity"]["critical"] += 1

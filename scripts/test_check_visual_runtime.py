@@ -857,6 +857,8 @@ class CheckVisualRuntimeTest(unittest.TestCase):
                 template: str | None,
                 target_pages: int | None,
                 page_dir: str,
+                page_policy: str = "at_most",
+                page_budget_scope: str | None = None,
             ) -> dict[str, object]:
                 state = {
                     "main_tex": main_tex.name,

@@ -20,7 +20,10 @@ LAYOUT_ONE={'vspace','hspace','vskip','hskip','fontsize','linespread','color','c
 RULES={'toprule','midrule','bottomrule','hline','hlineB'}
 DELIMITER_SIZE_COMMANDS={'left','right'}|{size+suffix for size in ('big','Big','bigg','Bigg') for suffix in ('','l','r','m')}
 DELIMITER_COMMANDS={'{','}','|','lbrace','rbrace','langle','rangle','lvert','rvert','lVert','rVert','vert','Vert','lfloor','rfloor','lceil','rceil','backslash'}
-LAYOUT_LENGTH_REGISTERS={'tabcolsep','arrayrulewidth','textheight','textwidth','columnsep','columnwidth','linewidth','abovecaptionskip','belowcaptionskip','floatsep','textfloatsep','intextsep','parskip','parindent','baselineskip','emergencystretch'}
+LAYOUT_LENGTH_REGISTERS={'tabcolsep','arrayrulewidth','textheight','textwidth','columnsep','columnwidth','linewidth','abovecaptionskip','belowcaptionskip','floatsep','textfloatsep','intextsep','parskip','parindent','baselineskip','emergencystretch','abovedisplayskip','belowdisplayskip','abovedisplayshortskip','belowdisplayshortskip','itemsep','topsep','parsep','partopsep','leftmargin','rightmargin','listparindent','itemindent','labelsep','labelwidth'}
+# Only standard glue registers accept stretch/shrink components. Dimension
+# registers do not consume trailing prose such as "plus 91.2".
+LAYOUT_GLUE_REGISTERS={'abovecaptionskip','belowcaptionskip','floatsep','textfloatsep','intextsep','parskip','baselineskip','abovedisplayskip','belowdisplayskip','abovedisplayshortskip','belowdisplayshortskip','itemsep','topsep','parsep','partopsep'}
 TEXT_SPACE_COMMANDS={'quad','qquad'}
 REGISTER_DECLARATIONS={'newlength','newdimen','newskip','newmuskip','dimendef','skipdef','muskipdef','countdef','chardef','mathchardef','toksdef'}
 
@@ -52,11 +55,32 @@ def _literal_dimension(value:str)->bool:
  number=r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)'
  return bool(re.fullmatch(r'\s*(?:'+number+r'\s*(?:pt|em|ex|cm|mm|in|bp|pc|dd|cc|sp)|(?:'+number+r'\s*)?\\(?:linewidth|columnwidth|textwidth|textheight))\s*',value))
 
-def layout_length_end(s:str,i:int,*,opaque_commands:frozenset[str]=frozenset())->int|None:
- """Parse a known register and literal length, with braced or token first arg.
+def _layout_dimension_pattern(*,expressions:bool=True)->str:
+ number=r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)'
+ registers='|'.join(sorted(LAYOUT_LENGTH_REGISTERS))
+ atomic=r'(?:'+number+r'\s*(?:pt|em|ex|cm|mm|in|bp|pc|dd|cc|sp)(?![A-Za-z@])|(?:'+number+r'\s*)?\\(?:'+registers+r')(?![A-Za-z@]))'
+ if not expressions:return atomic
+ # Literal dimexpr arithmetic only: no arbitrary commands, variables, units,
+ # expandable counters or zero division. This is syntax, not length approval.
+ expression=r'\\dimexpr(?![A-Za-z@])\s*'+atomic+r'(?:\s*(?:[+-]\s*'+atomic+r'|[*/]\s*[1-9]\d*(?![\d.])))*\s*\\relax(?![A-Za-z@])'
+ return r'(?:'+expression+r'|'+atomic+r')'
 
- Dynamic expressions and directly redefined registers remain opaque. This
- recognizes presentation syntax only; it does not approve spacing or templates.
+def _layout_length_pattern(register:str)->str:
+ dimension=_layout_dimension_pattern(expressions=register!='emergencystretch')
+ if register not in LAYOUT_GLUE_REGISTERS:return dimension
+ number=r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)'
+ stretch=r'(?:'+dimension+r'|'+number+r'\s*fil(?:l{0,2})(?![A-Za-z@]))'
+ return dimension+r'(?:\s+plus\s+'+stretch+r')?(?:\s+minus\s+'+stretch+r')?'
+
+def _length_commands_safe(value:str,opaque_commands:frozenset[str])->bool:
+ return not any(name in opaque_commands for name in re.findall(r'\\([A-Za-z@]+)',value))
+
+def layout_length_end(s:str,i:int,*,opaque_commands:frozenset[str]=frozenset())->int|None:
+ """Parse a known register and finite literal layout expression.
+
+ Known register references and bounded dimexpr arithmetic are presentation;
+ dynamic/redefined commands and incomplete expressions remain protected.
+ This does not approve font size, compression or template changes.
  """
  pos=i
  while pos<len(s) and s[pos].isspace():pos+=1
@@ -73,15 +97,128 @@ def layout_length_end(s:str,i:int,*,opaque_commands:frozenset[str]=frozenset())-
  if pos>=len(s) or s[pos]!='{':return None
  value,end=_group(s,pos)
  if end==pos:return None
- number=r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)'
- registers='|'.join(sorted(LAYOUT_LENGTH_REGISTERS))
- dimension=r'(?:'+number+r'\s*(?:pt|em|ex|cm|mm|in|bp|pc|dd|cc|sp)|(?:'+number+r'\s*)?\\(?:'+registers+r'))'
- # emergencystretch is a dimension register, not glue. Trailing plus/minus
- # words are not part of its standard assignment and must not disappear.
- grammar=dimension if register=='\\emergencystretch' else dimension+r'(?:\s+plus\s+'+dimension+r')?(?:\s+minus\s+'+dimension+r')?'
- if not re.fullmatch(r'\s*'+grammar+r'\s*',value):return None
- if any(name in opaque_commands for name in re.findall(r'\\([A-Za-z@]+)',value)):return None
+ if not re.fullmatch(r'\s*'+_layout_length_pattern(register[1:])+r'\s*',value):return None
+ if not _length_commands_safe(value,opaque_commands):return None
  return end
+
+def layout_assignment_end(s:str,i:int,register:str,*,opaque_commands:frozenset[str]=frozenset())->int|None:
+ """Parse a primitive assignment without swallowing following body tokens."""
+ if register not in LAYOUT_LENGTH_REGISTERS or register in opaque_commands:return None
+ # Preserve the established narrower dimension-only emergency-stretch grammar.
+ if register=='emergencystretch':return emergency_stretch_end(s,i,opaque_commands=opaque_commands)
+ value=re.match(r'\s*(?:=\s*)?'+_layout_length_pattern(register),s[i:])
+ if value is None or not _length_commands_safe(value.group(),opaque_commands):return None
+ end=i+value.end()
+ # A malformed glue component must not be partially normalized. For dimension
+ # registers, "plus/minus ..." remains ordinary protected text instead.
+ if register in LAYOUT_GLUE_REGISTERS and re.match(r'\s+(?:plus|minus)(?![A-Za-z@])',s[end:]):return None
+ return end
+
+def opaque_length_args_end(s:str,i:int)->int:
+ """Keep unsupported length-wrapper arguments intact, never reparse children.
+
+ This bounds a known wrapper's two literal arguments without approving their
+ meaning. An incomplete group/expression conservatively preserves the remaining
+ source; no text or numbers are discarded from the scientific channel.
+ """
+ pos=i
+ while pos<len(s) and s[pos].isspace():pos+=1
+ if pos>=len(s):return pos
+ if s[pos]=='{':
+  _,end=_group(s,pos)
+  if end==pos:return len(s)
+ elif s[pos]=='\\':_,end=_command(s,pos)
+ else:end=pos+1
+ pos=end
+ while pos<len(s) and s[pos].isspace():pos+=1
+ if pos>=len(s):return end
+ if s[pos]=='{':
+  _,end=_group(s,pos)
+  return end if end>pos else len(s)
+ value=re.match(_layout_length_pattern('parskip'),s[pos:])
+ if value:return pos+value.end()
+ if s[pos]=='\\':
+  name,end=_command(s,pos)
+  if name=='dimexpr':
+   terminator=re.search(r'\\relax(?![A-Za-z@])',s[end:])
+   return end+terminator.end() if terminator else len(s)
+  while True:
+   cursor=end
+   while cursor<len(s) and s[cursor].isspace():cursor+=1
+   if cursor>=len(s) or s[cursor] not in '{[':break
+   opening=s[cursor];_,stop=_group(s,cursor,opening,']' if opening=='[' else '}')
+   if stop==cursor:return len(s)
+   end=stop
+  return end
+ return pos+1
+
+def opaque_layout_child_end(s:str,i:int)->int:
+ """A reader/unknown macro may consume the next layout control as an argument.
+
+ Preserve only balanced literal groups and the adjacent known layout token with
+ its finite assignment/length arguments. Do not guess macro arity or swallow a
+ following ordinary word or scientific number outside that spelling.
+ """
+ pos=i
+ while True:
+  cursor=pos
+  while cursor<len(s) and s[cursor].isspace():cursor+=1
+  if cursor>=len(s) or s[cursor] not in '[{':break
+  opening=s[cursor];_,end=_group(s,cursor,opening,']' if opening=='[' else '}')
+  if end==cursor:return i
+  pos=end
+ cursor=pos
+ while cursor<len(s) and s[cursor].isspace():cursor+=1
+ if cursor>=len(s) or s[cursor]!='\\':return i
+ name,end=_command(s,cursor)
+ if name in LAYOUT_LENGTH_REGISTERS:
+  assignment=layout_assignment_end(s,end,name)
+  return assignment if assignment is not None else end
+ if name in {'setlength','addtolength'}:
+  if end<len(s) and s[end]=='*':end+=1
+  return opaque_length_args_end(s,end)
+ return i
+
+def arraystretch_declarations(source:str)->List[Dict[str,Any]]:
+ """Finite no-argument arraystretch declarations at executable source positions.
+
+ Candidate-head substitution is length preserving. The shared source_map mask
+ still suppresses comments, literals, stringified controls and unused enclosing
+ macro definitions. This inventories syntax, not TeX expansion or visual quality.
+ """
+ from source_map import _comment_syntax, _definition_end, group, line_at, masked_tex
+ syntax=_comment_syntax(source)
+ active=active_source(source)  # also masks literal filecontents containers
+ records=[]
+ for marker in re.finditer(r'\\(newcommand|renewcommand|providecommand|def|gdef)(?![A-Za-z@])',syntax):
+  name=marker[1];pos=marker.end()
+  while pos<len(syntax) and syntax[pos].isspace():pos+=1
+  if pos<len(syntax) and syntax[pos]=='*':pos+=1
+  target=group(syntax,pos)
+  if target:register,end=target
+  else:
+   while pos<len(syntax) and syntax[pos].isspace():pos+=1
+   if pos>=len(syntax) or syntax[pos]!='\\':continue
+   register_name,end=_command(syntax,pos);register='\\'+register_name
+  if register.strip()!='\\arraystretch':continue
+  pos=end;signature=[]
+  if name not in {'def','gdef'}:
+   for _ in range(2):
+    optional=group(syntax,pos,'[',']')
+    if optional:arg,pos=optional;signature.append(arg.strip())
+  if signature not in ([],['0']):continue
+  body=group(syntax,pos)
+  if not body:continue
+  value,end=body
+  if not re.fullmatch(r'\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*',value):continue
+  definition_end=_definition_end(syntax,marker.end(),name)
+  if definition_end!=end:continue
+  # Suppress only this head; an enclosing unused definition remains masked.
+  shielded=active[:marker.start()+1]+'Z'*len(name)+active[marker.end():]
+  if masked_tex(shielded)[marker.start()]!='\\':continue
+  records.append({'command':name,'value_text':value.strip(),'value':float(value),
+                  'start':marker.start(),'end':end,'line':line_at(source,marker.start())})
+ return records
 
 def emergency_stretch_end(s:str,i:int,*,opaque_commands:frozenset[str]=frozenset())->int|None:
  """End of an unshadowed primitive assignment to a literal known dimension.
@@ -112,11 +249,13 @@ def standard_group_offsets(s:str,*,opaque_commands:frozenset[str]=frozenset(),al
   if s[i]!='\\':i+=1;continue
   name,end=_command(s,i)
   star=end<len(s) and s[end]=='*'
-  if name in {'setlength','addtolength'} and not star and name not in opaque_commands:
-   stop=layout_length_end(s,end,opaque_commands=opaque_commands)
+  if name in {'setlength','addtolength'}:
+   stop=layout_length_end(s,end,opaque_commands=opaque_commands) if not star and name not in opaque_commands else None
    if stop is not None:i=stop;continue
-  if name=='emergencystretch' and not star:
-   stop=emergency_stretch_end(s,end,opaque_commands=opaque_commands)
+   for scope in stack:scope[1]=False
+   i=opaque_length_args_end(s,end+int(star));continue
+  if name in LAYOUT_LENGTH_REGISTERS and not star:
+   stop=layout_assignment_end(s,end,name,opaque_commands=opaque_commands)
    if stop is not None:i=stop;continue
   if name=='begingroup' and not star:stack.append([i,True])
   elif name=='endgroup' and not star:
@@ -164,7 +303,7 @@ def _shadowed_presentation_commands(source:str)->frozenset[str]:
  # Newly normalized controls must keep their literal invocation when the
  # source directly defines them. This is not macro expansion or alias tracing.
  names=set(shadowed_literal_url_commands(source))
- presentation_targets=DELIMITER_SIZE_COMMANDS|LAYOUT_LENGTH_REGISTERS|TEXT_SPACE_COMMANDS|{'parbox','setlength','addtolength','begingroup','endgroup'}
+ presentation_targets=DELIMITER_SIZE_COMMANDS|LAYOUT_LENGTH_REGISTERS|TEXT_SPACE_COMMANDS|{'parbox','setlength','addtolength','begingroup','endgroup','dimexpr','relax'}
  for record in _macro_definitions(source):
   target=record[1] if record[0] in {'def','gdef','edef','xdef','let'} else record[2]
   name=target.lstrip('\\')
@@ -352,13 +491,16 @@ def _safe_float_counter(name:str,value:str)->bool:
  return name.strip() in {'topnumber','bottomnumber','totalnumber','dbltopnumber'} and bool(re.fullmatch(r'\s*\d+\s*',value))
 
 def _strip_layout(s:str,*,text_wrappers:bool=False,opaque_commands:frozenset[str]=frozenset())->str:
- if 'tabcolsep' not in opaque_commands:s=re.sub(r'\\tabcolsep\s*(?:=\s*)?[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*(?:pt|em|ex|cm|mm|in)\b','',s)
  s=re.sub(r'\\(?:widowpenalty|clubpenalty|displaywidowpenalty|brokenpenalty|interlinepenalty)\s*(?:=\s*)?[+-]?\d+\b','',s)
  s=re.sub(r'\\(?:linebreak|nolinebreak)\s*(?:\[[0-4]\])?','',s)
  out=[];i=0
  while i<len(s):
   if s[i]!='\\':out.append(s[i]);i+=1;continue
   name,j=_command(s,i);star=j<len(s) and s[j]=='*';j+=int(star)
+  if name in {'setlength','addtolength'}:
+   end=layout_length_end(s,j,opaque_commands=opaque_commands) if not star and name not in opaque_commands else None
+   if end is not None:i=end;continue
+   end=opaque_length_args_end(s,j);out.append(s[i:end]);i=end;continue
   if name in opaque_commands:
    # The complete source has directly redefined this presentation command.
    # Preserve its literal invocation in each caption/cell/argument context,
@@ -371,10 +513,11 @@ def _strip_layout(s:str,*,text_wrappers:bool=False,opaque_commands:frozenset[str
      opening=s[pos];_,end=_group(s,pos,opening,']' if opening=='[' else '}')
      if end>pos:last=end;continue
     break
+   last=max(last,opaque_layout_child_end(s,last))
    out.append(s[i:last]);i=last;continue
   opt=_optional(s,j)
-  if name=='emergencystretch' and not star:
-   end=emergency_stretch_end(s,j,opaque_commands=opaque_commands)
+  if name in LAYOUT_LENGTH_REGISTERS and not star:
+   end=layout_assignment_end(s,j,name,opaque_commands=opaque_commands)
    if end is not None:i=end;continue
   if name in TEXT_SPACE_COMMANDS and not star:
    # These controls take no arguments: a following group remains body text.
@@ -396,9 +539,6 @@ def _strip_layout(s:str,*,text_wrappers:bool=False,opaque_commands:frozenset[str
   if name=='setcounter':
    counter,k=_group(s,j);value,end=_group(s,k)
    if end>k and _safe_float_counter(counter,value):i=end;continue
-  if name in {'setlength','addtolength'} and not star:
-   end=layout_length_end(s,j,opaque_commands=opaque_commands)
-   if end is not None:i=end;continue
   if name in {'renewcommand','newcommand','providecommand'}:
    arg,k=_group(s,j);k=_optional(s,k);_,end=_group(s,k)
    if arg in {'\\arraystretch','\\topfraction','\\bottomfraction','\\textfraction','\\floatpagefraction','\\dbltopfraction','\\dblfloatpagefraction'} and end>k:i=end;continue
@@ -478,7 +618,10 @@ def _strip_layout(s:str,*,text_wrappers:bool=False,opaque_commands:frozenset[str
     if insertion:marker+=repr(insertion)
     out.append(marker+'{'+_strip_layout(body,text_wrappers=True,opaque_commands=opaque_commands)+'}');i=end;continue
   if text_wrappers and name=='\\':i=opt;continue
-  out.append(s[i:j]);i=j
+  # A known argumentless primitive keeps the following assignment independent.
+  # All unsupported readers/macros preserve an adjacent layout-token argument.
+  end=opaque_layout_child_end(s,j) if name not in {'relax','selectfont','begingroup','endgroup'} else j
+  out.append(s[i:end]);i=end
  return ''.join(out)
 
 def _text_tokens(s:str,*,opaque_commands:frozenset[str]=frozenset())->Tuple[Any,...]:
@@ -623,7 +766,7 @@ def _macro_definitions(s:str)->Tuple[Any,...]:
     if name.endswith('environment'):
      tail,last=_group(s,end)
      if last>end:bodies.append(tail);end=last
-    known_layout = target in layout_macros and not signature and len(bodies)==1 and re.fullmatch(r'\s*(?:\d+(?:\.\d*)?|\.\d+)\s*',body)
+    known_layout = target in layout_macros and (not signature or [arg.strip() for arg in signature]==['0']) and len(bodies)==1 and re.fullmatch(r'\s*(?:\d+(?:\.\d*)?|\.\d+)\s*',body)
     if not known_layout:
      records.append((name,star,target,tuple(signature),tuple(re.sub(r'\s+',' ',v).strip() for v in bodies)))
     i=end;continue

@@ -765,6 +765,8 @@ def _run_round(
     template: Optional[str],
     target_pages: Optional[int],
     page_dir: str,
+    page_policy: str = "at_most",
+    page_budget_scope: Optional[str] = None,
 ) -> Dict[str, Any]:
     runtime = OrchestratorRuntime(state_path=str(project_root / "data" / "state.json"))
     cwd_before = Path.cwd()
@@ -776,6 +778,8 @@ def _run_round(
             page_dir=page_dir,
             template=template,
             target_pages=target_pages,
+            page_policy=page_policy,
+            page_budget_scope=page_budget_scope,
         )
     finally:
         os.chdir(cwd_before)
@@ -1096,6 +1100,8 @@ def _run_visual_only(
     main_tex: Path,
     template: Optional[str],
     target_pages: Optional[int],
+    page_policy: str = "at_most",
+    page_budget_scope: Optional[str] = None,
 ) -> Dict[str, Any]:
     pre_compile_sanitization = {
         "changed": False,
@@ -1117,6 +1123,8 @@ def _run_visual_only(
         allow_source_mutation=False,
         user_request="check-visual",
         required_phases=["observe", "diagnose", "verify"],
+        page_policy=page_policy,
+        page_budget_scope=page_budget_scope,
     )
     # `data/task.json` is the canonical runtime task. Older benchmark notes may
     # mention `data/task_visual_only.json`, but new runs no longer create it.
@@ -1155,6 +1163,8 @@ def _run_fix_layout(
     template: Optional[str],
     target_pages: Optional[int],
     max_rounds: Optional[int],
+    page_policy: str = "at_most",
+    page_budget_scope: Optional[str] = None,
 ) -> Dict[str, Any]:
     iterations: List[Dict[str, Any]] = []
     pending_verification = False
@@ -1196,6 +1206,8 @@ def _run_fix_layout(
                 template=template,
                 target_pages=target_pages,
                 page_dir=page_dir,
+                page_policy=page_policy,
+                page_budget_scope=page_budget_scope,
             )
             state_summary = _summarize_runtime_status(project_root)
         iteration: Dict[str, Any] = {
@@ -1347,6 +1359,8 @@ def _run_fix_layout(
                 template=template,
                 target_pages=target_pages,
                 page_dir=page_dir,
+                page_policy=page_policy,
+                page_budget_scope=page_budget_scope,
             )
             state_summary = _summarize_runtime_status(project_root)
             if not compile_result.get("success"):
@@ -1409,6 +1423,8 @@ def _run_typed_source_changing(
     report_output_path: str = "data/fix_layout_typed_report.json",
     report_mode: str = "typed_fix_layout",
     round_mode: Optional[str] = None,
+    page_policy: str = "at_most",
+    page_budget_scope: Optional[str] = None,
 ) -> Dict[str, Any]:
     dry_run = _typed_fix_layout_dry_run(apply_source_mutation=apply_source_mutation)
     task_spec = TaskSpec(
@@ -1430,6 +1446,8 @@ def _run_typed_source_changing(
         round_mode=round_mode,
         user_request=user_request,
         required_phases=["observe", "diagnose", "repair", "verify"],
+        page_policy=page_policy,
+        page_budget_scope=page_budget_scope,
     )
     task_spec.validate()
     _write_json(project_root / "data" / "task.json", task_spec.to_dict())
@@ -1628,6 +1646,8 @@ def _handle_paperfit_request(
     run_result_output_path: str = "data/run_result_fix_layout_typed.json",
     report_output_path: str = "data/fix_layout_typed_report.json",
     report_mode: str = "typed_fix_layout",
+    page_policy: str = "at_most",
+    page_budget_scope: Optional[str] = None,
 ) -> Dict[str, Any]:
     inferred = OrchestratorRuntime.infer_task_from_request(request)
     task_type = inferred.get("task_type")
@@ -1707,6 +1727,8 @@ def _handle_paperfit_request(
             run_result_output_path=run_result_output_path,
             report_output_path=report_output_path,
             report_mode=report_mode,
+            page_policy=page_policy,
+            page_budget_scope=page_budget_scope,
         )
 
     if task_type == "visual_only":
@@ -1715,6 +1737,8 @@ def _handle_paperfit_request(
             main_tex=main_tex,
             template=template,
             target_pages=target_pages,
+            page_policy=page_policy,
+            page_budget_scope=page_budget_scope,
         )
 
     if task_type in {"full_vto", "adjust_length", "repair_table"}:
@@ -1731,6 +1755,8 @@ def _handle_paperfit_request(
                 run_result_output_path=run_result_output_path,
                 report_output_path=report_output_path,
                 report_mode=report_mode,
+                page_policy=page_policy,
+                page_budget_scope=page_budget_scope,
             )
         fix_report = _run_fix_layout(
             project_root,
@@ -1738,6 +1764,8 @@ def _handle_paperfit_request(
             template=template,
             target_pages=target_pages or inferred.get("target_pages"),
             max_rounds=max_rounds,
+            page_policy=page_policy,
+            page_budget_scope=page_budget_scope,
         )
         completion = _layout_completion_status(fix_report)
         return {
@@ -1751,6 +1779,8 @@ def _handle_paperfit_request(
         main_tex=main_tex,
         template=template,
         target_pages=target_pages,
+        page_policy=page_policy,
+        page_budget_scope=page_budget_scope,
     )
 
 
@@ -1800,6 +1830,8 @@ def main() -> None:
     common.add_argument("--main", default=None)
     common.add_argument("--template", default=None)
     common.add_argument("--target-pages", type=int, default=None)
+    common.add_argument("--page-policy", choices=["at_most", "exact"], default="at_most")
+    common.add_argument("--page-budget-scope", choices=["main_body", "with_refs", "with_appendix"], default=None)
     common.add_argument("--page-budget", default="main_body", choices=["main_body", "with_refs", "with_appendix"])
     common.add_argument("--strict", action="store_true")
     common.add_argument("--max-rounds", type=int, default=None)
@@ -1871,6 +1903,8 @@ def main() -> None:
             run_result_output_path=run_result_output_path,
             report_output_path=report_output_path,
             report_mode=report_mode,
+            page_policy=args.page_policy,
+            page_budget_scope=args.page_budget_scope,
         )
     elif args.command == "fix-layout":
         _build_portrait(
@@ -1893,6 +1927,8 @@ def main() -> None:
                 user_request="fix-layout",
                 apply_source_mutation=args.apply,
                 round_mode=args.round_mode,
+                page_policy=args.page_policy,
+                page_budget_scope=args.page_budget_scope,
             )
         else:
             report = _run_fix_layout(
@@ -1901,6 +1937,8 @@ def main() -> None:
                 template=template,
                 target_pages=target_pages,
                 max_rounds=effective_max_rounds,
+                page_policy=args.page_policy,
+                page_budget_scope=args.page_budget_scope,
             )
             completion = _layout_completion_status(report)
             report["status"] = completion["status"]
@@ -1920,6 +1958,8 @@ def main() -> None:
             main_tex=main_tex,
             template=template,
             target_pages=target_pages,
+            page_policy=args.page_policy,
+            page_budget_scope=args.page_budget_scope,
         )
     elif args.command == "migrate-template":
         target_template = _resolve_template_key(args.target_template)
@@ -1972,6 +2012,8 @@ def main() -> None:
             run_result_output_path="data/run_result_template_migration.json",
             report_output_path="data/template_migration_typed_report.json",
             report_mode="migrate_template",
+            page_policy=args.page_policy,
+            page_budget_scope=args.page_budget_scope,
         )
     else:
         raise SystemExit(f"unsupported command: {args.command}")

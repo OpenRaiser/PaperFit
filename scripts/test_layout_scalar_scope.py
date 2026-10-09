@@ -42,12 +42,48 @@ class LayoutScalarScopeTests(unittest.TestCase):
     def test_unknown_register_or_dynamic_value_stays_opaque(self):
         forms=(r'\setlength\claim{-91.2pt}',r'\setlength{\claim}{-91.2pt}',
                r'\setlength\intextsep{\claim{91.2}}',
-               r'\setlength{\intextsep}{\dimexpr 91.2pt+2pt\relax}',
+               r'\setlength{\intextsep}{\dimexpr 91.2pt+\claim\relax}',
                r'\setlength*\intextsep{91.2pt}',r'\setlengthfoo\intextsep{91.2pt}')
         for form in forms:
             with self.subTest(form=form):
                 self.assertEqual(_strip_layout(form),form)
                 self.assert_rejected(form+' A result.',form.replace('91.2','19.2')+' A result.')
+
+    def test_bounded_dimexpr_layout_is_allowed_but_following_data_stays_protected(self):
+        before=r'\setlength{\intextsep}{\dimexpr 91.2pt+2pt\relax} Accuracy is -91.2. $x=a+b$'
+        after=before.replace('91.2pt','19.2pt')
+        self.assert_allowed(before,after)
+        for changed in (after.replace('is -91.2','is -19.2'),
+                        after.replace('is -91.2','is 91.2'),
+                        after.replace('a+b','a-b')):
+            with self.subTest(changed=changed):
+                result=self.assert_rejected(before,changed)
+                self.assertEqual(result['scientific_payload']['status'],'failed')
+        unknown=after.replace('19.2pt+2pt',r'19.2pt+\claim')
+        self.assert_rejected(after,unknown)
+
+    def test_invalid_wrapper_register_is_never_reparsed_as_direct_assignment(self):
+        for form in (r'\setlength\intextsep -91.2pt',
+                     r'\addtolength\itemsep -91.2pt',
+                     r'\setlength*\intextsep -91.2pt',
+                     r'\setlength{\intextsep}{\baselineskip=-91.2pt}',
+                     r'\setlength\intextsep{\dimexpr\baselineskip-91.2pt\claim\relax}'):
+            with self.subTest(form=form):
+                self.assertEqual(_strip_layout(form),form)
+                before=form+' Accuracy is -91.2. $x=a+b$'
+                changed=form.replace('91.2pt','19.2pt')+' Accuracy is -91.2. $x=a+b$'
+                result=self.assert_rejected(before,changed)
+                self.assertEqual(result['scientific_payload']['status'],'failed')
+                self.assertEqual(compare_layout_prose(document(before),document(changed))['status'],'failed')
+                self.assert_rejected(before,before.replace('is -91.2','is -19.2'))
+
+    def test_shadowed_wrapper_cannot_delegate_to_a_newly_known_primitive(self):
+        definition=r'\def\setlength#1#2{#2}'
+        before=definition+r'\setlength\intextsep -91.2pt Accuracy is -91.2.'
+        after=before.replace('-91.2pt','-19.2pt')
+        self.assert_rejected(before,after)
+        self.assertEqual(_strip_layout(r'\setlength\intextsep -91.2pt',opaque_commands=frozenset({'setlength'})),
+                         r'\setlength\intextsep -91.2pt')
 
     def test_malformed_length_cannot_consume_body_number(self):
         for form in (r'\setlength\intextsep -91.2pt',r'\setlength{\intextsep other}{-91.2pt}',
@@ -55,6 +91,41 @@ class LayoutScalarScopeTests(unittest.TestCase):
             with self.subTest(form=form):
                 self.assertEqual(_strip_layout(form),form)
                 self.assert_rejected(form+' Result.',form.replace('91.2','19.2')+' Result.')
+
+    def test_reader_register_tokens_do_not_turn_visible_numbers_into_layout(self):
+        for prefix in (r'\the',r'\the '):
+            before=prefix+r'\itemsep=91.2pt Accuracy is -91.2.'
+            after=before.replace('=91.2pt','=19.2pt')
+            with self.subTest(prefix=prefix):
+                self.assertEqual(_strip_layout(before),before)
+                result=self.assert_rejected(before,after)
+                self.assertEqual(result['scientific_payload']['status'],'failed')
+                self.assertEqual(result['layout_prose']['status'],'failed')
+
+    def test_unknown_unbraced_macro_arguments_preserve_layout_like_numeric_payload(self):
+        declaration=r'\newcommand{\score}[2]{#2}'
+        for spelling in (r'\score\itemsep91.2pt',
+                         r'\score \itemsep=91.2pt',
+                         r'\score{Method}\itemsep=91.2pt',
+                         r'\score\setlength{\itemsep}{91.2pt}',
+                         r'\score \setlength\itemsep{91.2pt}'):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(_strip_layout(spelling),spelling)
+                before=declaration+spelling+' Accuracy is -91.2.'
+                after=before.replace('91.2pt','19.2pt')
+                result=self.assert_rejected(before,after)
+                self.assertEqual(result['scientific_payload']['status'],'failed')
+                self.assertEqual(result['layout_prose']['status'],'failed')
+                self.assert_rejected(before,before.replace('is -91.2','is -19.2'))
+
+    def test_known_argumentless_controls_keep_standalone_lengths_independent(self):
+        for prefix in ('',r'\relax ',r'\centering ',r'\selectfont '):
+            for command in (r'\itemsep=4pt',r'\setlength{\itemsep}{4pt}'):
+                with self.subTest(prefix=prefix,command=command):
+                    before=prefix+command+' Accuracy is -91.2.'
+                    self.assert_allowed(before,before.replace('4pt','2pt'))
+        before=r'\def\relax#1{#1}\relax\itemsep=91.2pt Accuracy is -91.2.'
+        self.assert_rejected(before,before.replace('91.2pt','19.2pt'))
 
     def test_length_normalization_does_not_hide_body_number_sign_or_formula(self):
         before=r'\setlength\intextsep{-10pt} Accuracy is -91.2. $x=a+b$'

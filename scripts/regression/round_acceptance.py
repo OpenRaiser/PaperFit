@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from page_objective import page_distance
 
 
 @dataclass
@@ -17,6 +18,9 @@ class RoundEvidence:
     page_count_before: Optional[int] = None
     page_count_after: Optional[int] = None
     target_pages: Optional[int] = None
+    page_policy: str = "at_most"
+    page_budget_scope: Optional[str] = None
+    measured_scope: str = "with_appendix"
 
     # Overfull（归因后的可见计数，不是 raw）
     overfull_before: Optional[int] = None
@@ -50,15 +54,19 @@ class RoundEvidence:
 
     @property
     def page_distance_before(self) -> Optional[int]:
+        if self.page_budget_scope and self.page_budget_scope != self.measured_scope:
+            return None
         if self.page_count_before is None or self.target_pages is None:
             return None
-        return abs(self.page_count_before - self.target_pages)
+        return page_distance(self.page_count_before, self.target_pages, self.page_policy)
 
     @property
     def page_distance_after(self) -> Optional[int]:
+        if self.page_budget_scope and self.page_budget_scope != self.measured_scope:
+            return None
         if self.page_count_after is None or self.target_pages is None:
             return None
-        return abs(self.page_count_after - self.target_pages)
+        return page_distance(self.page_count_after, self.target_pages, self.page_policy)
 
 
 @dataclass
@@ -232,6 +240,8 @@ def build_round_evidence_from_state(
     return RoundEvidence(
         page_count_before=_pages(state_before, rule_report_before),
         page_count_after=_pages(state_after, rule_report_after),
+        page_policy=(state_before.get("task") or {}).get("page_policy") or "at_most",
+        page_budget_scope=(state_before.get("task") or {}).get("page_budget_scope"),
         target_pages=int(target) if target else None,
         overfull_before=_overfull(rule_report_before),
         overfull_after=_overfull(rule_report_after),

@@ -21,6 +21,7 @@ TASK_FIELDS = (
     "strict_mode",
     "column_type",
     "page_budget_scope",
+    "page_policy",
     "portrait_path",
     "portrait_refreshed_at",
     "portrait_scanned",
@@ -85,6 +86,7 @@ TERMINAL_SUCCESS_GUARD_FIELDS = (
     "failure_type",
     "reason",
     "artifact_freshness",
+    "page_objective",
 )
 POST_REPAIR_HARD_GUARD_FIELDS = (
     "status",
@@ -134,6 +136,7 @@ def build_default_state(
     max_rounds: int = 10,
     column_type: Optional[str] = None,
     page_budget_scope: Optional[str] = None,
+    page_policy: str = "at_most",
 ) -> Dict[str, Any]:
     return {
         "project": "PaperFit",
@@ -148,6 +151,7 @@ def build_default_state(
             "strict_mode": strict_mode,
             "column_type": column_type,
             "page_budget_scope": page_budget_scope,
+            "page_policy": page_policy,
             "portrait_path": None,
             "portrait_refreshed_at": None,
             "portrait_scanned": None,
@@ -278,6 +282,7 @@ def normalize_state(state: Dict[str, Any]) -> Dict[str, Any]:
         max_rounds=int(normalized.get("max_rounds") or 10),
         column_type=task.get("column_type"),
         page_budget_scope=task.get("page_budget_scope"),
+        page_policy=task.get("page_policy") or "at_most",
     )
     defaults["created_at"] = normalized.get("created_at") or defaults["created_at"]
     defaults["updated_at"] = normalized.get("updated_at") or defaults["updated_at"]
@@ -302,6 +307,13 @@ def validate_state(state: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(current.get("task"), dict):
         errors.append("task must be an object")
     else:
+        if current["task"].get("page_policy") not in {"at_most", "exact"}:
+            errors.append("task.page_policy must be at_most or exact")
+        target = current["task"].get("target_pages")
+        if target is not None and (type(target) is not int or target < 1):
+            errors.append("task.target_pages must be a positive integer")
+        if current["task"].get("page_budget_scope") not in {None, "main_body", "with_refs", "with_appendix"}:
+            errors.append("unsupported task.page_budget_scope")
         unknown_task_fields = sorted(set(current["task"].keys()) - set(TASK_FIELDS))
         if unknown_task_fields:
             errors.append("task contains unknown keys: " + ", ".join(unknown_task_fields))

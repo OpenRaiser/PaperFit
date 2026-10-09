@@ -467,7 +467,8 @@ class CurrentEvidenceFreshnessTests(unittest.TestCase):
     def test_unavailable_pdf_page_count_cannot_clean_matching_snapshot(self):
         from unittest.mock import patch
         root, data, _ = self.fresh_fixture()
-        with patch.dict('sys.modules', {'fitz': None}):
+        # Both supported import names must be absent to simulate a missing dependency.
+        with patch.dict('sys.modules', {'pymupdf': None, 'fitz': None}):
             self.record_manifest(root, data)
             result = build_host_context(root/'main.tex', root=root)
         self.assertTrue(result['artifact_freshness']['identity']['pdf_matches_snapshot'])

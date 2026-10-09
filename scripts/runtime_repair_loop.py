@@ -7,8 +7,10 @@ from typing import Any, Dict, List
 
 try:
     from runtime_approval import build_approval_scope_carry_forward_check
+    from page_objective import page_objective_from_manifest
 except ModuleNotFoundError:  # package import during unit tests
     from .runtime_approval import build_approval_scope_carry_forward_check
+    from .page_objective import page_objective_from_manifest
 
 
 SOURCE_CHANGING_TASK_TYPES = {
@@ -124,8 +126,14 @@ def _round_improved(metrics: Dict[str, Any]) -> Optional[bool]:
     defects_before = _as_int(metrics.get("defects_remaining_before"), -1)
     defects_after = _as_int(metrics.get("defects_remaining_after"), -1)
     visual_pairs = _comparable_visual_pairs(metrics)
+    before_distance = metrics.get("page_gap_before", metrics.get("page_distance_before"))
+    after_distance = metrics.get("page_gap_after", metrics.get("page_distance_after"))
+    page_pair = (type(before_distance) is int and type(after_distance) is int
+                 and before_distance >= 0 and after_distance >= 0)
+    if page_pair and after_distance < before_distance:
+        return True
     if overfull_before < 0 or overfull_after < 0:
-        if (defects_before < 0 or defects_after < 0) and not visual_pairs:
+        if (defects_before < 0 or defects_after < 0) and not visual_pairs and not page_pair:
             return None
     improved = False
     if overfull_before >= 0 and overfull_after >= 0 and overfull_after < overfull_before:
@@ -205,7 +213,9 @@ def build_repair_loop_policy(
     execution_mode = "report_only" if dry_run else "bounded_apply"
 
     stop_condition = "continue"
-    gatekeeper_done = str(status or "").lower() == "done" or str(gatekeeper_decision or "").upper() == "DONE"
+    objective = page_objective_from_manifest(task, artifact_manifest)
+    objective_pending = task.get("target_pages") is not None and objective["target_met"] is not True
+    gatekeeper_done = (str(status or "").lower() == "done" or str(gatekeeper_decision or "").upper() == "DONE") and not objective_pending
     freshness_status = freshness.get("status")
 
     failure_tracking = state.get("failure_tracking") or {}
@@ -297,7 +307,7 @@ def build_repair_loop_policy(
         "source_mutation_executed": applied_count > 0,
         "candidate_approval_scope_gate_pass": approval_scope_gate is None or approval_scope_gate.get("status") == "pass",  # approval_required 也算未过
         "within_round_limit": current_round < max_rounds,
-        "gatekeeper_continue": str(gatekeeper_decision or "").upper() == "CONTINUE",
+        "gatekeeper_continue": str(gatekeeper_decision or "").upper() == "CONTINUE" or objective_pending,
         "runtime_execution_mode_can_auto_apply": runtime_execution_mode_can_auto_apply,
     }
     readiness_status = "ready" if all(readiness_checks.values()) else "blocked"
@@ -311,6 +321,7 @@ def build_repair_loop_policy(
         "schema_version": "1.0",
         "execution_mode": execution_mode,
         "task_type": task_type,
+        "page_objective": objective,
         "round_limit": max_rounds,
         "current_round": current_round,
         "candidate_batch_limit": 0 if dry_run else DEFAULT_CANDIDATE_BATCH_LIMIT,

@@ -219,6 +219,8 @@ function addWorkflowOptions(command, { includeSaveAs = false } = {}) {
     .option('--main <path>', '主 .tex 文件')
     .option('--template <template>', '模板键，如 NeurIPS2025')
     .option('--target-pages <n>', '目标页数')
+    .option('--page-policy <policy>', '页数目标: at_most (默认) | exact')
+    .option('--page-budget-scope <scope>', '目标计页范围: main_body | with_refs | with_appendix')
     .option('--page-budget <scope>', '页数口径: main_body | with_refs | with_appendix')
     .option('--strict', '严格模式')
     .option('--max-rounds <n>', '最大轮次')
@@ -759,6 +761,32 @@ addWorkflowOptions(
 )
   .action(() => {
     forwardBundledPythonScript('migrate-template', path.join('scripts', 'paperfit_command.py'));
+  });
+
+program
+  .command('page-fit')
+  .description('只读页数目标与末页诊断工具箱；由宿主审查候选，不自动接受或改源码')
+  .option('--main <path>', '主 .tex 文件')
+  .option('--root <path>', '论文工程根目录')
+  .option('--log <path>', '候选编译日志')
+  .option('--target-pages <n>', '目标页数')
+  .option('--page-policy <policy>', 'exact | at_most')
+  .option('--page-budget-scope <scope>', 'main_body | with_refs | with_appendix')
+  .option('--pdf <path>', '当前候选 PDF')
+  .option('--before-pdf <path>', '对照 PDF')
+  .option('--attempt-tier <tier>', '宿主尝试级别')
+  .option('--defects-stable', '宿主已稳定处理可读性缺陷；不证明源码与 PDF 绑定')
+  .option('--data-dir <path>', '当前运行证据目录')
+  .option('--output <path>', 'JSON 输出文件')
+  .allowUnknownOption(true)
+  .allowExcessArguments(true)
+  .action(() => {
+    const position = process.argv.indexOf('page-fit');
+    const args = position >= 0 ? process.argv.slice(position + 1) : [];
+    const result = spawnSync(pythonRunner(), [path.join(packageRoot(), 'scripts', 'page_fit_toolbox.py'), ...args], {
+      stdio: 'inherit', cwd: process.cwd(), env: process.env, windowsHide: true,
+    });
+    process.exit(result.status === null ? 1 : (result.status ?? 1));
   });
 
 // run — 包内 scripts/ 下的工具；工作目录为当前目录（论文项目根）

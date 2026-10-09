@@ -9,9 +9,11 @@ from typing import Any, Dict, Optional
 
 try:
     from runtime_artifacts import collect_artifact_manifest
+    from page_objective import page_objective_from_manifest
     from runtime_approval import build_approval_object
 except ModuleNotFoundError:  # package import during unit tests
     from .runtime_artifacts import collect_artifact_manifest
+    from .page_objective import page_objective_from_manifest
     from .runtime_approval import build_approval_object
 
 
@@ -306,6 +308,17 @@ def build_runtime_status(
         runtime_state = "EVALUATING"
     elif gatekeeper_decision == "BLOCKED":
         runtime_state = "BLOCKED"
+    page_manifest = collect_artifact_manifest(root, str(state.get("main_tex") or ""), artifacts) if state.get("main_tex") else {}
+    if page_manifest and freshness.get("status") != "pass":
+        page_manifest["freshness"] = freshness
+    objective = page_objective_from_manifest(task, page_manifest)
+    objective_pending = task.get("target_pages") is not None and objective["target_met"] is not True
+    if runtime_state == "DONE" and objective_pending:
+        runtime_state = "EVALUATING"
+        terminal_success_guard = {"status": "revalidation_required",
+            "failure_type": "current_page_objective_not_met",
+            "reason": "Page target is unmet or unverified for the current PDF",
+            "page_objective": objective}
     needs_revalidation = runtime_state == "DONE" and freshness.get("status") == "stale_or_missing"
     if needs_revalidation:
         runtime_state = "EVALUATING"
@@ -412,9 +425,11 @@ def build_runtime_status(
             "type": task.get("type"),
             "target_pages": task.get("target_pages"),
             "page_budget_scope": task.get("page_budget_scope"),
+            "page_policy": task.get("page_policy") or "at_most",
             "template": task.get("template"),
         },
         "status": runtime_state,
+        "page_objective": objective,
         "gatekeeper_decision": gatekeeper_decision,
         "status_consistency": status_consistency,
         "gatekeeper": {

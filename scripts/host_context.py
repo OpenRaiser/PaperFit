@@ -9,11 +9,17 @@ try:
     from runtime_artifacts import collect_artifact_manifest
     from visibility_review import review_pdf_visibility
     from pdf_layout_profile import profile_pdf_layout
+    from page_objective import evaluate_page_objective
+    from runtime_types import TaskSpec
+    from state_schema import validate_state
 except ImportError:
     from .source_map import build_source_map, within
     from .runtime_artifacts import collect_artifact_manifest
     from .visibility_review import review_pdf_visibility
     from .pdf_layout_profile import profile_pdf_layout
+    from .page_objective import evaluate_page_objective
+    from .runtime_types import TaskSpec
+    from .state_schema import validate_state
 
 def load_report(path: Path) -> tuple[dict[str, Any], str]:
     if not path.is_file():
@@ -164,8 +170,33 @@ def bind_visibility_to_current_source(visibility: dict[str, Any], freshness: dic
     return result
 
 
+def _current_task_objective(main: Path, root: Path, data_dir: Path) -> dict[str, Any]:
+    if not within(data_dir, root):
+        return {}
+    candidates = [p for p in (data_dir / "task.json", data_dir / "state.json")
+                  if p.is_file() and within(p.resolve(), root)]
+    for path in sorted(candidates, key=lambda p: p.stat().st_mtime_ns, reverse=True):
+        payload, status = load_report(path)
+        if status != "available":
+            continue
+        try:
+            if path.name == "state.json":
+                state = validate_state(payload)
+                task, task_main = state["task"], state["main_tex"]
+            else:
+                spec = TaskSpec.from_dict(payload)
+                task, task_main = spec.to_dict(), spec.main_tex
+            if isinstance(task_main, str) and (root / task_main).resolve() == main and within(main, root):
+                return dict(task)
+        except (ValueError, TypeError, OSError):
+            continue
+    return {}
+
+
 def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path | None = None,
-                       pdf: Path | None = None, limit: int = 30) -> dict[str, Any]:
+                       pdf: Path | None = None, limit: int = 30,
+                       target_pages: int | None = None, page_policy: str | None = None,
+                       page_budget_scope: str | None = None) -> dict[str, Any]:
     if limit < 1:
         raise ValueError("limit must be positive")
     main = main.resolve()
@@ -249,8 +280,17 @@ def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path |
         visibility.get('applicable_to_current_source')
         if layout_profile.get('pdf_sha256') and layout_profile['pdf_sha256'] == visibility.get('pdf_sha256')
         else None)
+    task = _current_task_objective(main, root, data_dir) if target_pages is None else {}
+    objective = evaluate_page_objective(
+        target_pages=target_pages if target_pages is not None else task.get("target_pages"),
+        page_policy=page_policy or task.get("page_policy") or "at_most",
+        page_budget_scope=page_budget_scope or task.get("page_budget_scope"),
+        page_count=layout_profile.get("page_count"), pdf_sha256=layout_profile.get("pdf_sha256"),
+        evidence_status="current" if layout_profile.get("applicable_to_current_source") is True else "unknown",
+        measurement_source="host_current_pdf")
     return {
         "schema_version": "1.0", "main": sources["main"],
+        "page_objective": objective,
         "project_root": str(root), "project_root_resolution": root_resolution,
         "selected_pdf": str(selected_pdf),
         "pdf_selection": "explicit" if pdf is not None else "source_neighbor",
@@ -284,12 +324,17 @@ def main() -> None:
     parser.add_argument("--root", help="Project/compilation root; defaults to cwd when it contains main, otherwise main.parent")
     parser.add_argument("--data-dir")
     parser.add_argument("--pdf", help="Explicit PDF from an isolated build; selection alone does not establish current-source binding")
+    parser.add_argument("--target-pages", type=int)
+    parser.add_argument("--page-policy", choices=["at_most", "exact"])
+    parser.add_argument("--page-budget-scope", choices=["main_body", "with_refs", "with_appendix"])
     parser.add_argument("--limit", type=int, default=30)
     parser.add_argument("--output")
     args = parser.parse_args()
     payload = build_host_context(Path(args.main), root=Path(args.root) if args.root else None,
                                  data_dir=Path(args.data_dir) if args.data_dir else None,
-                                 pdf=Path(args.pdf) if args.pdf else None, limit=args.limit)
+                                 pdf=Path(args.pdf) if args.pdf else None, limit=args.limit,
+                                 target_pages=args.target_pages, page_policy=args.page_policy,
+                                 page_budget_scope=args.page_budget_scope)
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if args.output:
         dest = Path(args.output)

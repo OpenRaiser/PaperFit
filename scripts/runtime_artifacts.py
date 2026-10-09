@@ -55,7 +55,10 @@ def _pdf_entry(path: Optional[Path], project_root: Path) -> Dict[str, Any]:
     if not entry["exists"]:
         return entry
     try:
-        import fitz
+        try:
+            import pymupdf as fitz
+        except ImportError:  # Older PyMuPDF distributions.
+            import fitz
 
         with fitz.open(path) as document:
             if not document.is_pdf or document.needs_pass or document.page_count <= 0:

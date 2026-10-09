@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from runtime_artifacts import collect_artifact_manifest
+from page_objective import page_objective_from_manifest, page_distance
 from runtime_actions import (
     collect_runtime_environment,
     compile_latex,
@@ -402,6 +403,7 @@ class OrchestratorRuntime:
         max_rounds: int = 10,
         column_type: Optional[str] = None,
         page_budget_scope: Optional[str] = None,
+        page_policy: str = "at_most",
     ) -> Dict[str, Any]:
         state = self.manager.init_state(
             main_tex=main_tex,
@@ -412,6 +414,7 @@ class OrchestratorRuntime:
             max_rounds=max_rounds,
             column_type=column_type,
             page_budget_scope=page_budget_scope,
+            page_policy=page_policy,
         )
         self.manager.update({"status": "INITIALIZED", "agents_this_round": ["orchestrator-agent"]})
         return self.manager.load()
@@ -442,7 +445,7 @@ class OrchestratorRuntime:
 
     def apply_gatekeeper_decision(self, decision: str, report_path: Optional[str] = None) -> Dict[str, Any]:
         self.manager.load()
-        normalized = decision.upper()
+        normalized = self.manager.guard_page_objective_decision(decision.upper())
         patch: Dict[str, Any] = {
             "last_gatekeeper_decision": normalized,
             "status": "DONE" if normalized == "DONE" else ("BLOCKED" if normalized == "BLOCKED" else "EVALUATING"),
@@ -729,6 +732,7 @@ class OrchestratorRuntime:
                 strict_mode=task_spec.strict_mode,
                 max_rounds=task_spec.max_rounds,
                 page_budget_scope=task_spec.page_budget_scope,
+                page_policy=task_spec.page_policy,
             )
             self.set_artifact("task_spec", task_spec_path.as_posix())
 
@@ -790,7 +794,10 @@ class OrchestratorRuntime:
                 "BLOCKED": "gatekeeper_blocked",
             }.get(decision, "gatekeeper_continue")
             if terminal_guard_failure is not None:
-                event = "gatekeeper_blocked"
+                goal_pending = terminal_guard_failure.get("failure_type") == "page_objective_pending"
+                event = "gatekeeper_continue" if goal_pending else "gatekeeper_blocked"
+                if goal_pending:
+                    decision = "CONTINUE"
             runtime_state = VISUAL_ONLY_STATE_MACHINE.transition(runtime_state, event)
             if terminal_guard_failure is not None:
                 state = self._record_terminal_visual_guard_failure(terminal_guard_failure)
@@ -914,6 +921,7 @@ class OrchestratorRuntime:
                 strict_mode=task_spec.strict_mode,
                 max_rounds=task_spec.max_rounds,
                 page_budget_scope=task_spec.page_budget_scope,
+                page_policy=task_spec.page_policy,
             )
             self._restore_retryable_post_repair_hard_guard(retryable_post_repair_hard_guard)
             self.set_artifact("task_spec", task_spec_path.as_posix())
@@ -1232,7 +1240,10 @@ class OrchestratorRuntime:
                     before_visual = self._load_optional_json(
                         Path.cwd() / str((state.get("artifacts") or {}).get("visual_signal_report") or "data/visual_signal_report.json")
                     )
-                    before_pages = int(((before_visual or {}).get("summary") or {}).get("pages_analyzed") or 0)
+                    before_manifest = collect_artifact_manifest(Path.cwd(), task_spec.main_tex, state.get("artifacts") or {})
+                    before_objective = page_objective_from_manifest(task_spec.to_dict(), before_manifest)
+                    measured_before = before_objective.get("measured_pages")
+                    before_pages = measured_before if type(measured_before) is int else 0
                     before_structural = self._round_structural_counts(state)
                     before_undefined = self._round_undefined_ref_counts(state)
                     before_severe = self._severe_overfull_counts(state)
@@ -1242,9 +1253,11 @@ class OrchestratorRuntime:
                             "round": repair_round_count,
                             "page_count_before": before_pages if before_pages > 0 else None,
                             "target_pages": task_spec.target_pages,
+                            "page_policy": task_spec.page_policy,
+                            "page_objective_before": before_objective,
                             "page_gap_before": (
-                                abs(before_pages - task_spec.target_pages)
-                                if before_pages > 0 and task_spec.target_pages is not None
+                                page_distance(before_pages, task_spec.target_pages, task_spec.page_policy)
+                                if before_pages > 0 and task_spec.target_pages is not None and task_spec.page_budget_scope not in {"main_body", "with_refs"}
                                 else None
                             ),
                             "overfull_hbox_total_before": int(before_rule_summary.get("overfull_hbox_total") or 0),
@@ -1699,7 +1712,10 @@ class OrchestratorRuntime:
                     "BLOCKED": "gatekeeper_blocked",
                 }.get(decision, "gatekeeper_continue")
                 if terminal_guard_failure is not None:
-                    event = "gatekeeper_blocked"
+                    goal_pending = terminal_guard_failure.get("failure_type") == "page_objective_pending"
+                    event = "gatekeeper_continue" if goal_pending else "gatekeeper_blocked"
+                    if goal_pending:
+                        decision = "CONTINUE"
                 runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, event)
                 if terminal_guard_failure is not None:
                     state = self._record_terminal_visual_guard_failure(terminal_guard_failure)
@@ -2281,10 +2297,17 @@ class OrchestratorRuntime:
         latest["object_counts_after"] = after_structural
         latest["severe_overfull_after"] = after_severe
         latest["total_overflow_pt_after"] = float(after_rule_summary.get("total_overflow_pt") or 0.0)
+        live_manifest = collect_artifact_manifest(Path.cwd(), task_spec.main_tex, state.get("artifacts") or {})
+        live_objective = page_objective_from_manifest(task_spec.to_dict(), live_manifest)
+        physical_pages = live_objective.get("measured_pages")
+        actual_pages = physical_pages if type(physical_pages) is int else 0
+        scoped_count_unavailable = task_spec.page_budget_scope in {"main_body", "with_refs"}
+        latest["page_policy"] = task_spec.page_policy
+        latest["page_objective_after"] = live_objective
         latest["page_count_after"] = actual_pages if actual_pages > 0 else None
         latest["page_gap_after"] = (
-            abs(actual_pages - task_spec.target_pages)
-            if actual_pages > 0 and task_spec.target_pages is not None
+            page_distance(actual_pages, task_spec.target_pages, task_spec.page_policy)
+            if actual_pages > 0 and task_spec.target_pages is not None and not scoped_count_unavailable
             else None
         )
         phased_summary = state.get("repair_execution_summary") or {}
@@ -2305,6 +2328,8 @@ class OrchestratorRuntime:
             # 页数证据缺失时传 None：验收函数 fail-closed，绝不回退旧值放行
             page_count_after=actual_pages if actual_pages > 0 else None,
             target_pages=task_spec.target_pages,
+            page_policy=task_spec.page_policy,
+            page_budget_scope=task_spec.page_budget_scope,
             overfull_before=latest.get("overfull_hbox_total_before"),
             overfull_after=latest.get("overfull_hbox_total_after"),
             severe_overfull_before=latest.get("severe_overfull_before"),
@@ -2334,6 +2359,19 @@ class OrchestratorRuntime:
             return None
         freshness = (artifact_manifest.get("freshness") or {}) if isinstance(artifact_manifest, dict) else {}
         if freshness.get("status") == "pass":
+            try:
+                task = self.manager.load().get("task") or {}
+            except FileNotFoundError:
+                task = {}
+            objective = page_objective_from_manifest(task, artifact_manifest)
+            if task.get("target_pages") is not None and objective["target_met"] is not True:
+                return {
+                    "failure_type": "page_objective_pending",
+                    "reason": "page_target_unmet_or_unverified",
+                    "gatekeeper_decision": "DONE", "page_objective": objective,
+                    "next_actions": ["Compare retained candidates against the exact page target and readability",
+                                     "Establish scoped page-count evidence when the target excludes endmatter"],
+                }
             diagnosis = artifact_manifest.get("vision_diagnosis") or {}
             if diagnosis.get("configured") and diagnosis.get("status") != "completed":
                 return {
@@ -2362,18 +2400,22 @@ class OrchestratorRuntime:
         }
 
     def _record_terminal_visual_guard_failure(self, failure: Dict[str, Any]) -> Dict[str, Any]:
-        self.manager.update_failure_tracking(
-            decision="BLOCKED",
-            failure_type=str(failure.get("failure_type") or "terminal_success_without_fresh_visual_evidence"),
-        )
+        goal_pending = failure.get("failure_type") == "page_objective_pending"
+        if not goal_pending:
+            self.manager.update_failure_tracking(
+                decision="BLOCKED",
+                failure_type=str(failure.get("failure_type") or "terminal_success_without_fresh_visual_evidence"),
+            )
         self.manager.update(
             {
-                "status": "BLOCKED",
+                "status": "EVALUATING" if goal_pending else "BLOCKED",
+                **({"last_gatekeeper_decision": "CONTINUE"} if goal_pending else {}),
                 "terminal_success_guard": {
-                    "status": "blocked",
+                    "status": "goal_pending" if goal_pending else "blocked",
                     "failure_type": failure.get("failure_type"),
                     "reason": failure.get("reason"),
                     "artifact_freshness": failure.get("artifact_freshness"),
+                    "page_objective": failure.get("page_objective"),
                 },
             }
         )
@@ -2690,12 +2732,16 @@ class OrchestratorRuntime:
         record_history: bool = True,
         emit_event: Optional[Callable[..., Dict[str, Any]]] = None,
         runtime_actions: Optional[Dict[str, Any]] = None,
+        page_policy: Optional[str] = None,
+        page_budget_scope: Optional[str] = None,
     ) -> Dict[str, Any]:
         if initialize_task:
             self.init_task(
                 main_tex=main_tex,
                 template=template,
                 target_pages=target_pages,
+                page_policy=page_policy or "at_most",
+                page_budget_scope=page_budget_scope,
             )
         else:
             self.manager.load()
@@ -2961,6 +3007,8 @@ class OrchestratorRuntime:
         gatekeeper_output: Optional[str] = None,
         emit_event: Optional[Callable[..., Dict[str, Any]]] = None,
         runtime_actions: Optional[Dict[str, Any]] = None,
+        page_policy: Optional[str] = None,
+        page_budget_scope: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Compatibility wrapper for older callers.
 
@@ -2973,6 +3021,8 @@ class OrchestratorRuntime:
             page_dir=page_dir,
             template=template,
             target_pages=target_pages,
+            page_policy=page_policy,
+            page_budget_scope=page_budget_scope,
             crossrefs_output=crossrefs_output,
             rule_report_output=rule_report_output,
             column_void_report=column_void_report,
@@ -2998,8 +3048,10 @@ class OrchestratorRuntime:
         gatekeeper_output: Optional[str] = None,
         emit_event: Optional[Callable[..., Dict[str, Any]]] = None,
         runtime_actions: Optional[Dict[str, Any]] = None,
+        page_policy: Optional[str] = None,
+        page_budget_scope: Optional[str] = None,
     ) -> Dict[str, Any]:
-        self._ensure_initialized_state(main_tex=main_tex, template=template, target_pages=target_pages)
+        self._ensure_initialized_state(main_tex=main_tex, template=template, target_pages=target_pages, page_policy=page_policy, page_budget_scope=page_budget_scope)
         self.start_round()
 
         state = self.inspect_project(
@@ -3121,14 +3173,26 @@ class OrchestratorRuntime:
         main_tex: str,
         template: Optional[str] = None,
         target_pages: Optional[int] = None,
+        page_policy: Optional[str] = None,
+        page_budget_scope: Optional[str] = None,
     ) -> Dict[str, Any]:
         try:
             state = self.manager.load()
             if not state.get("main_tex"):
                 raise FileNotFoundError
+            updates = {}
+            if target_pages is not None:
+                updates["target_pages"] = target_pages
+            if page_policy is not None:
+                updates["page_policy"] = page_policy
+            if page_budget_scope is not None:
+                updates["page_budget_scope"] = page_budget_scope
+            if updates:
+                self.manager.update({"task": updates})
+                state = self.manager.load()
             return state
         except FileNotFoundError:
-            return self.init_task(main_tex=main_tex, template=template, target_pages=target_pages)
+            return self.init_task(main_tex=main_tex, template=template, target_pages=target_pages, page_policy=page_policy or "at_most", page_budget_scope=page_budget_scope)
 
     def _load_optional_json(self, path: Path) -> Dict[str, Any]:
         if not path.is_file():
@@ -3537,6 +3601,7 @@ def main() -> None:
     init_parser.add_argument("--strict", action="store_true")
     init_parser.add_argument("--max-rounds", type=int, default=10)
     init_parser.add_argument("--column-type", choices=["single", "double"], default=None)
+    init_parser.add_argument("--page-policy", choices=["at_most", "exact"], default="at_most")
     init_parser.add_argument("--page-budget", dest="page_budget_scope", default=None)
 
     subparsers.add_parser("start-round", help="Advance to the next round and reset round-scoped fields")
@@ -3593,6 +3658,8 @@ def main() -> None:
     inspect_parser.add_argument("--page-dir", default=None)
     inspect_parser.add_argument("--template", default=None)
     inspect_parser.add_argument("--target-pages", type=int, default=None)
+    inspect_parser.add_argument("--page-policy", choices=["at_most", "exact"], default=None)
+    inspect_parser.add_argument("--page-budget-scope", choices=["main_body", "with_refs", "with_appendix"], default=None)
     inspect_parser.add_argument("--crossrefs-output", default=None)
     inspect_parser.add_argument("--rule-report-output", default=None)
 
@@ -3611,6 +3678,8 @@ def main() -> None:
     run_round_parser.add_argument("--page-dir", default=None)
     run_round_parser.add_argument("--template", default=None)
     run_round_parser.add_argument("--target-pages", type=int, default=None)
+    run_round_parser.add_argument("--page-policy", choices=["at_most", "exact"], default=None)
+    run_round_parser.add_argument("--page-budget-scope", choices=["main_body", "with_refs", "with_appendix"], default=None)
     run_round_parser.add_argument("--crossrefs-output", default=None)
     run_round_parser.add_argument("--rule-report-output", default=None)
     run_round_parser.add_argument("--column-void-report", default=None)
@@ -3661,6 +3730,7 @@ def main() -> None:
             max_rounds=args.max_rounds,
             column_type=args.column_type,
             page_budget_scope=args.page_budget_scope,
+            page_policy=args.page_policy,
         )
     elif args.command == "start-round":
         out = runtime.start_round()
@@ -3708,6 +3778,8 @@ def main() -> None:
             page_dir=args.page_dir,
             template=args.template,
             target_pages=args.target_pages,
+            page_policy=args.page_policy,
+            page_budget_scope=args.page_budget_scope,
             crossrefs_output=args.crossrefs_output,
             rule_report_output=args.rule_report_output,
         )
@@ -3720,6 +3792,8 @@ def main() -> None:
             page_dir=args.page_dir,
             template=args.template,
             target_pages=args.target_pages,
+            page_policy=args.page_policy,
+            page_budget_scope=args.page_budget_scope,
             crossrefs_output=args.crossrefs_output,
             rule_report_output=args.rule_report_output,
             column_void_report=args.column_void_report,

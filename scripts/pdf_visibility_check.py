@@ -16,7 +16,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 try:
-    import fitz
+    try:
+        import pymupdf as fitz
+    except ImportError:  # Older PyMuPDF distributions.
+        import fitz
 except ImportError:
     fitz = None
 

@@ -12,7 +12,10 @@ import math
 from pathlib import Path
 import re
 from typing import Any
-import fitz
+try:
+    import pymupdf as fitz
+except ImportError:  # Compatibility with older PyMuPDF distributions.
+    import fitz
 
 
 def _sha(path: Path) -> str:

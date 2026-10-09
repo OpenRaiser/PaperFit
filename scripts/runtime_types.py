@@ -185,6 +185,7 @@ class TaskSpec:
     template: Optional[str] = None
     target_pages: Optional[int] = None
     page_budget_scope: Optional[str] = None
+    page_policy: str = "at_most"
     page_dir: str = "data/pages"
     log_file: Optional[str] = None
     column_void_report: Optional[str] = None
@@ -224,6 +225,7 @@ class TaskSpec:
             template=payload.get("template"),
             target_pages=target_pages,
             page_budget_scope=payload.get("page_budget_scope"),
+            page_policy=str(payload.get("page_policy") or "at_most"),
             page_dir=str(payload.get("page_dir") or "data/pages"),
             log_file=payload.get("log_file"),
             column_void_report=payload.get("column_void_report"),
@@ -245,6 +247,12 @@ class TaskSpec:
             raise ValueError(f"Unsupported task_type: {self.task_type}")
         if not self.main_tex:
             raise ValueError("TaskSpec.main_tex must be non-empty")
+        if self.page_policy not in {"at_most", "exact"}:
+            raise ValueError("TaskSpec.page_policy must be at_most or exact")
+        if self.target_pages is not None and (type(self.target_pages) is not int or self.target_pages < 1):
+            raise ValueError("TaskSpec.target_pages must be a positive integer")
+        if self.page_budget_scope not in {None, "main_body", "with_refs", "with_appendix"}:
+            raise ValueError("Unsupported page_budget_scope")
         if self.max_rounds < 1:
             raise ValueError("TaskSpec.max_rounds must be >= 1")
         if self.round_mode is not None:
@@ -274,6 +282,7 @@ class TaskSpec:
             "template": self.template,
             "target_pages": self.target_pages,
             "page_budget_scope": self.page_budget_scope,
+            "page_policy": self.page_policy,
             "page_dir": self.page_dir,
             "log_file": self.log_file,
             "column_void_report": self.column_void_report,
