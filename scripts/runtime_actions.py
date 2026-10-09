@@ -17,8 +17,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
+    from tex_engine import ENGINES, resolve_tex_engine
     from diagnosis_ingest import classify_compile_case
 except ModuleNotFoundError:  # package import during unit tests
+    from .tex_engine import ENGINES, resolve_tex_engine
     from .diagnosis_ingest import classify_compile_case
 
 
@@ -143,7 +145,6 @@ def clean_main_build_artifacts(project_root: Path, *, main_tex: Path) -> None:
     main_path = main_tex if main_tex.is_absolute() else project_root / main_tex
     for suffix in [
         ".aux",
-        ".bbl",
         ".bcf",
         ".blg",
         ".fdb_latexmk",
@@ -174,7 +175,7 @@ def pdf_page_count(pdf_path: Path) -> Optional[int]:
     return None
 
 
-def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False) -> Dict[str, Any]:
+def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False, engine: Optional[str] = None) -> Dict[str, Any]:
     """Compile without changing manuscript source.
 
     Nonstop mode can produce a diagnostic preview after an error. That preview
@@ -183,14 +184,20 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
     project_root = project_root.resolve()
     main_tex = (main_tex if main_tex.is_absolute() else project_root / main_tex).resolve()
     build_root = main_tex.parent
+    engine = resolve_tex_engine(main_tex, engine)
     main_relative = main_tex.relative_to(project_root).as_posix()
     timeout_sec = int(os.environ.get("PAPERFIT_COMPILE_TIMEOUT_SEC", "240"))
     if os.environ.get("PAPERFIT_BOUNDED_COMPILE") == "1":
-        bounded = compile_latex_bounded(project_root, main_tex=main_tex, timeout_sec=timeout_sec)
+        bounded = compile_latex_bounded(project_root, main_tex=main_tex, timeout_sec=timeout_sec, engine=engine)
         if bounded.get("available"):
             return bounded
 
-    cmd = ["latexmk", "-pdf", "-interaction=nonstopmode"]
+    try:
+        from compile_inputs import NativeCompileEvidence
+    except ModuleNotFoundError:
+        from .compile_inputs import NativeCompileEvidence
+    evidence = NativeCompileEvidence(project_root, main_tex, compiler="latexmk")
+    cmd = ["latexmk", ENGINES[engine], "-interaction=nonstopmode", "-recorder"]
     if not tolerant:
         cmd.append("-halt-on-error")
     cmd.append(main_tex.name)
@@ -237,55 +244,9 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
 
     case = classify_compile_case(combined_log, success=success)
 
-    # compile_result.v2：结构化尝试记录（journal 追加 + 全字段返回，旧键全保留）
-    try:
-        from compile_result import (
-            CompileAttempt,
-            diff_source_fingerprints,
-            source_fingerprint,
-        )
-
-        attempt = CompileAttempt(project_root, main_tex=main_relative, compiler="latexmk")
-        fingerprint_store = project_root / "data" / "compile" / "last_fingerprint.json"
-        prev_fp: Dict[str, str] = {}
-        if fingerprint_store.is_file():
-            try:
-                prev_fp = json.loads(fingerprint_store.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                prev_fp = {}
-        current_fp = source_fingerprint(project_root, main_relative)
-        changed_files = diff_source_fingerprints(prev_fp, current_fp) if prev_fp else []
-        native_log = main_tex.with_suffix(".log")
-        v2 = attempt.finalize(
-            command=cmd,
-            cwd=str(build_root),
-            returncode=result.returncode,
-            timed_out=timed_out,
-            stdout=result.stdout or "",
-            stderr=result.stderr or "",
-            log_source=native_log if native_log.is_file() else None,
-            log_text=combined_log if not native_log.is_file() else "",
-            pdf_path=pdf_path if pdf_path.is_file() else None,
-            success=success,
-            changed_files=changed_files,
-            extra={
-                "success": success,
-                "tolerant": tolerant,
-                "case_status": case["case_status"],
-                "restored_baseline_pdf": restored_baseline,
-                "pdf_fresh": pdf_fresh,
-                "pdf_path": str(pdf_path) if success else None,
-                "preview_pdf_path": preview_pdf_path,
-                "partial_pdf_available": partial_pdf_available,
-            },
-        )
-        fingerprint_store.parent.mkdir(parents=True, exist_ok=True)
-        fingerprint_store.write_text(json.dumps(current_fp, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        v2 = {}
-
     report = {
         "success": success,
+        "engine": engine,
         "tolerant": tolerant,
         "restored_baseline_pdf": restored_baseline,
         "baseline_pdf": str(baseline_pdf) if had_baseline else None,
@@ -307,17 +268,23 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
         "pdf_path": str(pdf_path) if success else None,
         "compile_log": str(compile_log),
     }
-    report.update(v2)
-    return report
+    return evidence.finalize(report, page_count=pdf_page_count(pdf_path) if pdf_path.is_file() else None,
+                             stdout=result.stdout or '', stderr=result.stderr or '')
 
 
-def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) -> Dict[str, Any]:
+def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int, engine: Optional[str] = None) -> Dict[str, Any]:
     project_root = project_root.resolve()
     main_tex = (main_tex if main_tex.is_absolute() else project_root / main_tex).resolve()
     build_root = main_tex.parent
-    pdflatex = shutil.which("pdflatex")
+    engine = resolve_tex_engine(main_tex, engine)
+    pdflatex = shutil.which(engine)
     if not pdflatex:
         return {"available": False}
+    try:
+        from compile_inputs import NativeCompileEvidence
+    except ModuleNotFoundError:
+        from .compile_inputs import NativeCompileEvidence
+    evidence = NativeCompileEvidence(project_root, main_tex, compiler=engine)
     pdf_path = main_tex.with_suffix(".pdf")
     good_pdf_path = main_tex.with_suffix(".paperfit-good.pdf")
     clean_main_build_artifacts(project_root, main_tex=main_tex)
@@ -329,6 +296,8 @@ def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: in
 
     pass_timeout = max(60, min(timeout_sec, 240))
     passes: List[Dict[str, Any]] = []
+    full_stdout: List[str] = []
+    full_stderr: List[str] = []
     timed_out = False
     fatal_error = False
     restored_good_pdf = False
@@ -336,6 +305,8 @@ def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: in
 
     def _record(result: subprocess.CompletedProcess[str]) -> None:
         nonlocal timed_out, fatal_error
+        full_stdout.append(result.stdout or '')
+        full_stderr.append(result.stderr or '')
         timed_out = timed_out or result.returncode == 124
         combined = (result.stdout or "") + "\n" + (result.stderr or "")
         fatal_error = fatal_error or any(
@@ -418,9 +389,10 @@ def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: in
         for item in passes
     )
     case = classify_compile_case(combined_log, success=success)
-    return {
+    report = {
         "available": True,
         "success": success,
+        "engine": engine,
         "command": [item.get("command") for item in passes],
         "cwd": str(build_root),
         "returncode": 0 if success else (124 if timed_out else int((passes[-1] if passes else {}).get("returncode") or 1)),
@@ -442,6 +414,9 @@ def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: in
         "pdf_path": str(pdf_path) if success else None,
         "compile_log": str(compile_log),
     }
+
+    return evidence.finalize(report, page_count=page_count,
+                             stdout='\n'.join(full_stdout), stderr='\n'.join(full_stderr))
 
 
 def render_pdf_pages(project_root: Path, *, pdf_path: Path, output_dir: str = "data/pages") -> Dict[str, Any]:

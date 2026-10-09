@@ -144,8 +144,21 @@ class PageFitToolboxTest(unittest.TestCase):
                 build_toolbox(self.main,target_pages=1,attempt_tier=tier)
 
 
-    def snapshot_current_artifacts(self):
+    def snapshot_current_artifacts(self, *, native=True):
         """Real identity collector; no stub for the toolbox binding decision."""
+        if native:
+            # A synthetic native attempt, not a runtime snapshot claiming it
+            # compiled. The PDF is a real test PDF; no TeX process is invoked.
+            from compile_inputs import NativeCompileEvidence
+            from compile_result import source_fingerprint
+            evidence = NativeCompileEvidence(self.root, self.main, compiler='latexmk')
+            names = source_fingerprint(self.root, self.main.relative_to(self.root).as_posix())
+            self.main.with_suffix('.fls').write_text('PWD '+str(self.main.parent)+'\n'+
+                ''.join('INPUT '+str(self.root/name)+'\n' for name in names), encoding='utf-8')
+            with fitz.open(self.main.with_suffix('.pdf')) as document:
+                count = len(document)
+            evidence.finalize({'success':True, 'engine':'pdflatex', 'command':['latexmk','-pdf','-recorder',self.main.name],
+                'cwd':str(self.main.parent), 'returncode':0, 'timeout':False}, page_count=count)
         data = self.root / 'data'
         (data / 'pages').mkdir(parents=True, exist_ok=True)
         with fitz.open(self.main.with_suffix('.pdf')) as document:
@@ -169,7 +182,7 @@ class PageFitToolboxTest(unittest.TestCase):
         self.pdf()
         self.snapshot_current_artifacts()
         report = build_toolbox(self.main, root=self.root, target_pages=1, defects_stable=True)
-        self.assertEqual(report['pdf_identity']['source_pdf_binding'], 'verified_runtime_snapshot')
+        self.assertEqual(report['pdf_identity']['source_pdf_binding'], 'verified_native_inputs')
         self.assertIs(report['page_objective']['target_met'], True)
         self.assertEqual(report['phase'], 'verify_goal')
         self.assertFalse(report['automatic_acceptance'])
@@ -200,6 +213,15 @@ class PageFitToolboxTest(unittest.TestCase):
         report = build_toolbox(self.main, root=self.root, target_pages=1, defects_stable=True)
         self.assertEqual(report['observed_pdf_objective']['direction'], 'compress')
         self.assertEqual(report['page_objective']['status'], 'unknown')
+        self.assertEqual(report['phase'], 'needs_current_build')
+
+    def test_historical_runtime_snapshot_alone_retains_observation_but_not_current_goal(self):
+        self.pdf()
+        self.snapshot_current_artifacts(native=False)
+        report = build_toolbox(self.main, root=self.root, target_pages=1, defects_stable=True)
+        self.assertTrue(report['observed_pdf_objective']['met'])
+        self.assertIsNone(report['page_objective']['target_met'])
+        self.assertEqual(report['native_build_binding']['status'], 'unknown')
         self.assertEqual(report['phase'], 'needs_current_build')
 
     def test_subdirectory_main_uses_compile_working_directory_include(self):

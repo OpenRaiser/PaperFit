@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 try:
+    from tex_engine import ENGINES, resolve_tex_engine
     from diagnosis_ingest import classify_compile_case
     from orchestrator_runtime import OrchestratorRuntime
     from paperfit_portrait import load_templates
@@ -29,6 +30,7 @@ try:
     from runtime_status import build_runtime_status
     from runtime_types import TaskSpec
 except ModuleNotFoundError:  # package import during focused tests
+    from .tex_engine import ENGINES, resolve_tex_engine
     from .diagnosis_ingest import classify_compile_case
     from .orchestrator_runtime import OrchestratorRuntime
     from .paperfit_portrait import load_templates
@@ -300,21 +302,28 @@ def _install_missing_sty(names: List[str]) -> List[str]:
     return installed
 
 
-def _compile(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
+def _compile(project_root: Path, *, main_tex: Path, engine: Optional[str] = None) -> Dict[str, Any]:
     project_root = project_root.resolve()
     main_tex = (main_tex if main_tex.is_absolute() else project_root / main_tex).resolve()
     build_root = main_tex.parent
+    engine = resolve_tex_engine(main_tex, engine)
     timeout_sec = int(os.environ.get("PAPERFIT_COMPILE_TIMEOUT_SEC", "240"))
     if os.environ.get("PAPERFIT_BOUNDED_COMPILE") == "1":
-        bounded = _compile_bounded(project_root, main_tex=main_tex, timeout_sec=timeout_sec)
+        bounded = _compile_bounded(project_root, main_tex=main_tex, timeout_sec=timeout_sec, engine=engine)
         if bounded.get("available"):
             return bounded
 
+    try:
+        from compile_inputs import NativeCompileEvidence
+    except ModuleNotFoundError:
+        from .compile_inputs import NativeCompileEvidence
+    evidence = NativeCompileEvidence(project_root, main_tex, compiler="latexmk")
     cmd = [
         "latexmk",
-        "-pdf",
+        ENGINES[engine],
         "-interaction=nonstopmode",
         "-halt-on-error",
+        "-recorder",
         main_tex.name,
     ]
     pdf_path = main_tex.with_suffix(".pdf")
@@ -331,13 +340,14 @@ def _compile(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
     combined_log = (result.stdout or "") + "\n" + (result.stderr or "")
     fatal_patterns = [
         "Fatal error occurred",
+        "Undefined control sequence",
         "Emergency stop",
         "! LaTeX Error:",
         " ==> Fatal error",
     ]
     fatal_error = any(pattern in combined_log for pattern in fatal_patterns)
     partial_pdf_available = bool(timed_out and pdf_path.is_file() and not fatal_error)
-    success = (result.returncode == 0 and pdf_path.is_file()) or partial_pdf_available
+    success = bool(result.returncode == 0 and pdf_path.is_file() and not fatal_error)
     if not success:
         missing_sty = missing_public_sty_names(combined_log)
         if missing_sty:
@@ -349,10 +359,12 @@ def _compile(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
                 timed_out = result.returncode == 124
                 fatal_error = any(pattern in combined_log for pattern in fatal_patterns)
                 partial_pdf_available = bool(timed_out and pdf_path.is_file() and not fatal_error)
-                success = (result.returncode == 0 and pdf_path.is_file()) or partial_pdf_available
+                success = bool(result.returncode == 0 and pdf_path.is_file() and not fatal_error)
     case = classify_compile_case(combined_log, success=success)
-    return {
+    report = {
         "success": success,
+        "engine": engine,
+        "preview_pdf_path": str(pdf_path) if pdf_path.is_file() and not success else None,
         "case_status": case["case_status"],
         "missing_sty": case["missing_sty"],
         "missing_images": case["missing_images"],
@@ -370,12 +382,14 @@ def _compile(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
         "compile_log": str(compile_log),
     }
 
+    return evidence.finalize(report, page_count=_pdf_page_count(pdf_path) if pdf_path.is_file() else None,
+                             stdout=result.stdout or '', stderr=result.stderr or '')
+
 
 def _clean_main_build_artifacts(project_root: Path, *, main_tex: Path) -> None:
     main_path = main_tex if main_tex.is_absolute() else project_root / main_tex
     for suffix in [
         ".aux",
-        ".bbl",
         ".bcf",
         ".blg",
         ".fdb_latexmk",
@@ -406,13 +420,19 @@ def _pdf_page_count(pdf_path: Path) -> Optional[int]:
     return None
 
 
-def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) -> Dict[str, Any]:
+def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int, engine: Optional[str] = None) -> Dict[str, Any]:
     project_root = project_root.resolve()
     main_tex = (main_tex if main_tex.is_absolute() else project_root / main_tex).resolve()
     build_root = main_tex.parent
-    pdflatex = shutil.which("pdflatex")
+    engine = resolve_tex_engine(main_tex, engine)
+    pdflatex = shutil.which(engine)
     if not pdflatex:
         return {"available": False}
+    try:
+        from compile_inputs import NativeCompileEvidence
+    except ModuleNotFoundError:
+        from .compile_inputs import NativeCompileEvidence
+    evidence = NativeCompileEvidence(project_root, main_tex, compiler=engine)
     pdf_path = main_tex.with_suffix(".pdf")
     good_pdf_path = main_tex.with_suffix(".paperfit-good.pdf")
     _clean_main_build_artifacts(project_root, main_tex=main_tex)
@@ -424,6 +444,8 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) ->
 
     pass_timeout = max(60, min(timeout_sec, 240))
     passes: List[Dict[str, Any]] = []
+    full_stdout: List[str] = []
+    full_stderr: List[str] = []
     timed_out = False
     fatal_error = False
     restored_good_pdf = False
@@ -431,6 +453,8 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) ->
 
     def _record(result: subprocess.CompletedProcess[str]) -> None:
         nonlocal timed_out, fatal_error
+        full_stdout.append(result.stdout or '')
+        full_stderr.append(result.stderr or '')
         timed_out = timed_out or result.returncode == 124
         combined = (result.stdout or "") + "\n" + (result.stderr or "")
         fatal_error = fatal_error or any(
@@ -503,10 +527,13 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) ->
         encoding="utf-8",
     )
     page_count = _pdf_page_count(pdf_path)
-    success = page_count is not None and not fatal_error
-    return {
+    success = bool(page_count is not None and page_count > 0 and not fatal_error
+                   and not timed_out and not restored_good_pdf
+                   and passes and all(item.get("returncode") == 0 for item in passes))
+    report = {
         "available": True,
         "success": success,
+        "engine": engine,
         "command": [item.get("command") for item in passes],
         "cwd": str(build_root),
         "returncode": 0 if success else (124 if timed_out else int((passes[-1] if passes else {}).get("returncode") or 1)),
@@ -514,7 +541,8 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) ->
         "timeout_sec": timeout_sec,
         "bounded_compile": True,
         "restored_good_pdf": restored_good_pdf,
-        "partial_pdf_available": False,
+        "partial_pdf_available": bool(timed_out and page_count and not fatal_error),
+        "pdf_fresh": bool(page_count and not restored_good_pdf),
         "fatal_error": fatal_error,
         "passes": passes,
         "stdout_tail": "\n".join(str(item.get("stdout_tail") or "") for item in passes)[-4000:],
@@ -523,6 +551,9 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) ->
         "pdf_path": str(pdf_path) if success else None,
         "compile_log": str(compile_log),
     }
+
+    return evidence.finalize(report, page_count=page_count,
+                             stdout='\n'.join(full_stdout), stderr='\n'.join(full_stderr))
 
 
 def _sanitize_precompile_sources(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
@@ -802,18 +833,19 @@ def _execute_repair_plan(project_root: Path, *, main_tex: Path, max_candidates: 
 
 
 def _copy_project(src_root: Path, dst_root: Path) -> Path:
+    src_root, dst_root = src_root.resolve(), dst_root.resolve()
+    if dst_root.is_relative_to(src_root):
+        raise ValueError("save-as target must be outside the source project; choose a sibling or external directory")
     if dst_root.exists():
         raise FileExistsError(f"save-as target already exists: {dst_root}")
     ignore = shutil.ignore_patterns(
         "*.aux",
-        "*.bbl",
         "*.blg",
         "*.fdb_latexmk",
         "*.fls",
         "*.log",
         "*.out",
         "*.synctex.gz",
-        "data",
         "archives",
         "page_images",
         "data/pages*",
@@ -1829,6 +1861,8 @@ def main() -> None:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--main", default=None)
     common.add_argument("--template", default=None)
+    common.add_argument("--engine", choices=sorted(ENGINES), default=None,
+                        help="Preserve the manuscript engine; alternatively set PAPERFIT_TEX_ENGINE")
     common.add_argument("--target-pages", type=int, default=None)
     common.add_argument("--page-policy", choices=["at_most", "exact"], default="at_most")
     common.add_argument("--page-budget-scope", choices=["main_body", "with_refs", "with_appendix"], default=None)
@@ -1863,6 +1897,8 @@ def main() -> None:
     migrate_parser.add_argument("target_template")
 
     args = parser.parse_args()
+    if args.engine:
+        os.environ["PAPERFIT_TEX_ENGINE"] = args.engine
 
     project_root = Path.cwd().resolve()
     main_tex = _detect_main_tex(project_root, args.main)

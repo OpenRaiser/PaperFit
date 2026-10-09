@@ -45,6 +45,29 @@ class IntegrityOutputTest(unittest.TestCase):
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertEqual(baseline.read_bytes(), prior)
 
+    def test_new_review_flags_cannot_overwrite_their_review_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            before, after = directory / 'before.tex', directory / 'after.tex'
+            source = r'\documentclass{article}\begin{document}Result is 91.2.\end{document}'
+            for path in (before, after):
+                path.write_text(source, encoding='utf-8')
+            for flag in ('--layout-review-json', '--source-review-json'):
+                with self.subTest(flag=flag):
+                    review = directory / (flag.removeprefix('--') + '.json')
+                    prior = b'{"author_review": "preserve these bytes"}'
+                    review.write_bytes(prior)
+                    result = subprocess.run([sys.executable, '-X', 'utf8', '-B',
+                        str(Path(__file__).with_name('content_integrity_check.py')),
+                        'diff', str(before), str(after), '--root', str(directory),
+                        flag, str(review), '--output', str(review)],
+                        capture_output=True, text=True, timeout=30)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn('report output cannot replace', result.stderr)
+                    self.assertEqual(review.read_bytes(), prior)
+                    self.assertEqual(before.read_text(encoding='utf-8'), source)
+                    self.assertEqual(after.read_text(encoding='utf-8'), source)
+
 
 if __name__ == '__main__':
     unittest.main()

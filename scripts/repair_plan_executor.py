@@ -24,7 +24,8 @@ from fixer_registry import (
 from transactional_patch import atomic_write_text
 from visual_action_plan import document_scope_b1_authorized
 from source_map import masked_tex, within
-from layout_policy import combine_policy_reports, compare_layout_policy
+from layout_policy import combine_policy_reports, compare_layout_policy, _review_json, _relative_path
+from source_review import load_source_review
 from runtime_snapshots import discover_source_files
 from scientific_integrity import scientific_payload_diff
 
@@ -789,6 +790,59 @@ def _has_structure_regression(diff: Dict[str, Any]) -> bool:
     return has_structure_regression(diff)
 
 
+def _explicit_review_inputs(root: Path, main_tex: str, layout_paths=(), source_paths=()):
+    """Load only explicitly requested, project-contained, main-matched receipts."""
+    expected = _relative_path(root, main_tex)
+    approvals, context, source_reviews = [], None, []
+    for path in layout_paths:
+        request = _review_json(root / _relative_path(root, path))
+        candidate = request.get("context")
+        if (not isinstance(candidate, dict) or
+                set(candidate) - {"main_tex", "page_images_dir", "compile_journal"} or
+                not {"main_tex", "page_images_dir"} <= set(candidate) or
+                any(not isinstance(value, str) or not value.strip() for value in candidate.values())):
+            raise ValueError("layout review context incomplete or unsupported")
+        if _relative_path(root, candidate["main_tex"]) != expected:
+            raise ValueError("layout review main differs from the actual task main")
+        for value in candidate.values():
+            _relative_path(root, value)
+        if context is not None and context != candidate:
+            raise ValueError("layout reviews use different compile/page contexts")
+        context = candidate
+        if any(not isinstance(item, dict) for item in request["approvals"]):
+            raise ValueError("layout review approvals must be objects")
+        approvals.extend(request["approvals"])
+    for path in source_paths:
+        request = load_source_review(root / _relative_path(root, path))
+        candidate = request.get("context")
+        if (not isinstance(candidate, dict) or set(candidate) != {"main_tex", "page_images_dir", "compile_journal"}
+                or any(not isinstance(value, str) or not value.strip() for value in candidate.values())):
+            raise ValueError("source review context incomplete or unsupported")
+        if _relative_path(root, candidate["main_tex"]) != expected:
+            raise ValueError("source review main differs from the actual task main")
+        for value in candidate.values():
+            _relative_path(root, value)
+        _relative_path(root, request.get("file", ""))
+        source_reviews.append(request)
+    return approvals, context, source_reviews
+
+
+def _matched_source_review(source_reviews, file: str):
+    matching = [item for item in source_reviews or () if isinstance(item, dict) and item.get("file") == file]
+    # Ambiguous input must not select whichever approval happens to come first.
+    return matching[0] if len(matching) == 1 else None
+
+
+def _main_matched_context(root: Path, main: Path, context):
+    if not isinstance(context, dict):
+        return None
+    try:
+        expected = main.resolve().relative_to(root).as_posix()
+        return context if _relative_path(root, context.get("main_tex", "")) == expected else None
+    except (ValueError, TypeError):
+        return None
+
+
 def _enforce_structure_integrity(
     *,
     main_tex: str,
@@ -797,25 +851,43 @@ def _enforce_structure_integrity(
     original_bytes: Optional[bytes] = None,
     original_sources: Optional[Dict[Path, bytes]] = None,
     layout_policy_approvals: Optional[List[Dict[str, Any]]] = None,
+    project_root: Optional[Path] = None,
+    review_context: Optional[Dict[str, str]] = None,
+    source_reviews: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    tex_path = Path(main_tex)
+    tex_path = (Path(project_root) / main_tex).resolve() if project_root is not None else Path(main_tex)
+    root = Path(project_root).resolve() if project_root is not None else Path.cwd().resolve() if within(tex_path.resolve(), Path.cwd().resolve()) else tex_path.resolve().parent
+    if not within(tex_path.resolve(), root):
+        raise ValueError("main TeX outside project root")
     if not tex_path.is_file():
-        integrity = {
-            "checked": False,
-            "status": "skipped",
-            "reason": f"main tex not found: {main_tex}",
-        }
-        report["content_integrity"] = integrity
+        # The caller captured this tracked file before execution. Its removal is
+        # a source loss, not an unverified presentation change awaiting review.
+        sources = original_sources or {tex_path.resolve(): original_bytes if original_bytes is not None else original_tex.encode("utf-8")}
+        if any(not within(source.resolve(), root) for source in sources):
+            raise ValueError("refusing rollback outside project root")
+        for source, baseline_bytes in sources.items():
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes(baseline_bytes)
+        report.update(status="failed", success=False, applied_count=0, rollback_reason="tracked_source_deleted")
+        report["content_integrity"] = {"checked": False, "status": "failed", "rollback_performed": True,
+                                       "reason": f"tracked main tex removed: {main_tex}"}
         return report
 
     final_tex = tex_path.read_text(encoding="utf-8")
-    root = Path.cwd().resolve() if within(tex_path.resolve(), Path.cwd().resolve()) else tex_path.resolve().parent
-    diff = compute_content_diff(original_tex, final_tex, layout_policy_approvals=layout_policy_approvals or (), file=tex_path.resolve().relative_to(root).as_posix(), layout_only=True)
+    review_context = _main_matched_context(root, tex_path, review_context)
+    relative_main = tex_path.resolve().relative_to(root).as_posix()
+    source_reviews = [item for item in source_reviews or () if isinstance(item, dict) and _main_matched_context(root, tex_path, item.get("context")) is not None]
+    diff = compute_content_diff(
+        original_tex, final_tex, layout_policy_approvals=[item for item in layout_policy_approvals or () if isinstance(item, dict) and item.get("file") == relative_main],
+        file=relative_main, layout_only=True, project_root=root, review_context=review_context,
+        source_review=_matched_source_review(source_reviews, relative_main),
+    )
     sources = original_sources or {tex_path.resolve(): original_bytes if original_bytes is not None else original_tex.encode("utf-8")}
     policy_reports = []
     prose_reports = []
     scientific_reports = []
-    from layout_prose_integrity import compare_layout_prose
+    file_diffs = []
+    tracked_source_deleted = False
     for source, baseline_bytes in sources.items():
         if source.suffix.lower() != ".tex":
             continue
@@ -823,6 +895,7 @@ def _enforce_structure_integrity(
             raise ValueError(f"tracked source outside project root: {source}")
         relative = source.resolve().relative_to(root).as_posix()
         if not source.is_file():
+            tracked_source_deleted = True
             unavailable = {"file": relative, "checked": False, "status": "manual_review", "reason": "tracked TeX source unavailable"}
             policy_reports.append({**unavailable, "findings": [{"file": relative, "status": "manual_review", "rule": "tracked_source_unavailable", "reason": unavailable["reason"]}]})
             prose_reports.append(dict(unavailable))
@@ -831,39 +904,51 @@ def _enforce_structure_integrity(
         repaired_bytes = source.read_bytes()
         before_source = baseline_bytes.decode("utf-8", errors="surrogateescape")
         after_source = repaired_bytes.decode("utf-8", errors="surrogateescape")
-        policy_reports.append(compare_layout_policy(
-            before_source, after_source,
-            approvals=layout_policy_approvals or (), file=relative,
-        ))
-        prose_reports.append({"file": relative, **compare_layout_prose(before_source, after_source)})
         if source.resolve() == tex_path.resolve():
-            scientific_result = diff["scientific_payload"]
+            file_diff = diff
         elif baseline_bytes == repaired_bytes:
-            scientific_result = {"checked": True, "status": "pass", "comparison": "unchanged_source"}
+            unchanged = {"checked": True, "status": "pass", "comparison": "unchanged_source", "findings": []}
+            file_diff = {"scientific_payload": dict(unchanged), "layout_prose": dict(unchanged), "layout_policy": dict(unchanged)}
         else:
-            scientific_result = scientific_payload_diff(before_source, after_source)
-        scientific_reports.append({"file": relative, **scientific_result})
+            file_diff = compute_content_diff(
+                before_source, after_source, file=relative, layout_only=True,
+                layout_policy_approvals=[item for item in layout_policy_approvals or () if isinstance(item, dict) and item.get("file") == relative],
+                project_root=root, review_context=review_context,
+                source_review=_matched_source_review(source_reviews, relative),
+            )
+        file_diffs.append({"file": relative, "diff": file_diff})
+        policy_reports.append(file_diff["layout_policy"])
+        prose_reports.append({"file": relative, **file_diff["layout_prose"]})
+        scientific_reports.append({"file": relative, **file_diff["scientific_payload"]})
     policy = combine_policy_reports(policy_reports)
     policy["rollback_performed"] = False
     report["layout_policy"] = policy
     prose_findings = [item for item in prose_reports if item.get("status") != "pass"]
     prose_checked = bool(prose_reports) and all(item.get("checked") is True for item in prose_reports)
-    prose = {"checked": prose_checked, "status": "manual_review" if not prose_checked else "blocked" if prose_findings else "pass", "findings": prose_findings, "rollback_performed": False}
+    prose = {"checked": prose_checked, "status": "blocked" if any(item.get("status") in {"failed", "blocked"} for item in prose_reports) else "manual_review" if not prose_checked or prose_findings else "pass", "findings": prose_findings, "file_reports": prose_reports, "rollback_performed": False}
     report["layout_prose"] = prose
     scientific_findings = [item for item in scientific_reports if item.get("status") != "pass"]
     scientific_checked = bool(scientific_reports) and all(item.get("checked") is True for item in scientific_reports)
-    scientific = {"checked": scientific_checked, "status": "manual_review" if not scientific_checked else "blocked" if scientific_findings else "pass", "findings": scientific_findings, "rollback_performed": False}
+    scientific = {"checked": scientific_checked, "status": "blocked" if any(item.get("status") in {"failed", "blocked"} for item in scientific_reports) else "manual_review" if not scientific_checked or scientific_findings else "pass", "findings": scientific_findings, "file_reports": scientific_reports, "rollback_performed": False}
     report["scientific_payload"] = scientific
     integrity = {
         "checked": True,
         "status": "pass",
         "rollback_performed": False,
         "diff": diff,
+        "file_diffs": file_diffs,
     }
 
-    scientific_failed = (final_tex != original_tex and (_has_structure_regression(diff) or has_scientific_regression(diff))) or scientific["status"] != "pass"
-    policy_failed = policy["status"] != "pass"
-    prose_failed = prose["status"] != "pass"
+    # Reviewable uncertainty preserves the candidate for an actual native build
+    # and full-page review. Confirmed content loss or forbidden operations still
+    # restore every tracked source byte.
+    scientific_failed = tracked_source_deleted or scientific["status"] == "blocked" or any(
+        entry["diff"].get("action_required") == "auto_rollback" and
+        (_has_structure_regression(entry["diff"]) or has_scientific_regression(entry["diff"]))
+        for entry in file_diffs
+    )
+    policy_failed = policy["status"] == "blocked"
+    prose_failed = prose["status"] == "blocked"
     if scientific_failed or policy_failed or prose_failed:
         if original_bytes is not None:
             tex_path.write_bytes(original_bytes)
@@ -883,6 +968,7 @@ def _enforce_structure_integrity(
             integrity["rollback_performed"] = True
             integrity["failure_reasons"] = [f"{item['file']}: {reason}" for item in scientific_findings for reason in item.get("regression_reasons", [])] or (diff.get("violation") or {}).get("reasons") or ["scientific validation or structure regression detected"]
         report["status"] = "failed"
+        report["success"] = False
         report["applied_count"] = 0
         report["fix_report"] = {
             **(report.get("fix_report") or {}),
@@ -901,6 +987,15 @@ def _enforce_structure_integrity(
             "status": "failed" if report.get("global_report") else "noop",
         }
         report["rollback_reason"] = "layout_policy_violation" if policy_failed and not scientific_failed else "layout_prose_changed" if prose_failed and not scientific_failed else "scientific_integrity_violation" if scientific_findings or has_scientific_regression(diff) else "structure_integrity_violation"
+
+    elif any(channel["status"] == "manual_review" for channel in (policy, prose, scientific)) or any(
+        entry["diff"].get("action_required") == "manual_review" for entry in file_diffs
+    ):
+        integrity["status"] = "manual_review"
+        report["status"] = "manual_review"
+        report["success"] = False
+        report["review_required"] = True
+        report["review_note"] = "Candidate retained; compile and inspect every current page before submitting an explicitly bound review."
 
     report["content_integrity"] = integrity
     return report
@@ -954,14 +1049,29 @@ def execute_repair_plan(
     target_pages: Optional[int] = None,
     max_candidates: int = 5,
     layout_policy_approvals: Optional[List[Dict[str, Any]]] = None,
+    project_root: Optional[Path] = None,
+    review_context: Optional[Dict[str, str]] = None,
+    source_reviews: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
+    if project_root is not None:
+        project_root = Path(project_root).resolve()
+        path = (project_root / main_tex).resolve()
+        if not within(path, project_root):
+            raise ValueError("main TeX outside project root")
+        main_tex = str(path)
+    if project_root is not None:
+        repair_plan_path = str(Path(project_root) / repair_plan_path)
+        output_path = str(Path(project_root) / output_path)
     plan = _load_json(repair_plan_path)
     review_skipped = len((plan.get("candidates") or [])) - len(_actionable_candidates(plan))
     tex_path = Path(main_tex)
     original_bytes = tex_path.read_bytes() if tex_path.is_file() else b""
     original_tex = original_bytes.decode("utf-8")
-    source_root = Path.cwd().resolve() if within(tex_path.resolve(), Path.cwd().resolve()) else tex_path.resolve().parent
+    source_root = Path(project_root).resolve() if project_root is not None else Path.cwd().resolve() if within(tex_path.resolve(), Path.cwd().resolve()) else tex_path.resolve().parent
     original_sources = {source: source.read_bytes() for source in discover_source_files(source_root, str(tex_path.resolve()))}
+    protected_outputs = {tex_path.resolve(), Path(repair_plan_path).resolve(), *original_sources}
+    if Path(output_path).resolve() in protected_outputs:
+        raise ValueError('repair report cannot replace a manuscript or repair plan input')
     if _plan_uses_conflict_batch(plan):
         
         
@@ -1152,6 +1262,7 @@ def execute_repair_plan(
         original_bytes=original_bytes,
         original_sources=original_sources,
         layout_policy_approvals=layout_policy_approvals,
+        project_root=source_root, review_context=review_context, source_reviews=source_reviews,
     )
 
     out = Path(output_path)
@@ -1169,16 +1280,39 @@ def main() -> None:
     parser.add_argument("--target-pages", type=int, default=None)
     parser.add_argument("--max-candidates", type=int, default=5)
     parser.add_argument("--layout-policy-approvals", default=None, help="Separate host-reviewed exact spacing/endmatter evidence JSON")
+    parser.add_argument("--root", type=Path, default=None, help="Project root for nested sources and explicit review evidence")
+    parser.add_argument("--layout-review-json", action="append", default=[], help="Strict current-source/PDF/all-pages bound layout review; repeat for changed files")
+    parser.add_argument("--source-review-json", action="append", default=[], help="Explicit classified-source uncertainty review; repeat for changed files")
     args = parser.parse_args()
+    main = Path(args.main_tex)
+    root = args.root.resolve() if args.root is not None else Path.cwd().resolve() if within(main.resolve(), Path.cwd().resolve()) else main.resolve().parent
+    main = (root / main).resolve() if args.root is not None else main.resolve()
+    try:
+        output = (root / args.output).resolve() if args.root is not None else Path(args.output).resolve()
+        review_inputs = [root / value for value in (
+            args.layout_policy_approvals, *args.layout_review_json, *args.source_review_json) if value]
+        protected = {main, (root / args.repair_plan).resolve(),
+                     *(path.resolve() for path in review_inputs),
+                     *(path.resolve() for path in discover_source_files(root, str(main)))}
+        if output in protected:
+            raise ValueError('repair report cannot replace a manuscript, repair plan or review input')
+        if args.layout_review_json and args.layout_policy_approvals:
+            raise ValueError("use strict --layout-review-json separately from legacy --layout-policy-approvals")
+        approvals, context, source_reviews = _explicit_review_inputs(root, str(main), args.layout_review_json, args.source_review_json)
+        if args.layout_policy_approvals:
+            approvals = _load_json(str(root / args.layout_policy_approvals)).get("approvals") or []
+    except (OSError, ValueError, TypeError, UnicodeError) as error:
+        parser.error(str(error))
 
     report = execute_repair_plan(
         repair_plan_path=args.repair_plan,
-        main_tex=args.main_tex,
-        output_path=args.output,
+        main_tex=str(main),
+        output_path=str(root / args.output) if args.root is not None else args.output,
         column_type=args.column_type,
         target_pages=args.target_pages,
         max_candidates=args.max_candidates,
-        layout_policy_approvals=(_load_json(args.layout_policy_approvals).get("approvals") or []) if args.layout_policy_approvals else None,
+        layout_policy_approvals=approvals,
+        project_root=root, review_context=context, source_reviews=source_reviews,
     )
     print(json.dumps(report, indent=2, ensure_ascii=False))
 

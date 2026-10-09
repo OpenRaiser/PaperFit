@@ -13,6 +13,7 @@ try:
     from runtime_types import TaskSpec
     from state_schema import validate_state
     from isolated_build import verify_isolated_build, is_included_input_path
+    from compile_inputs import verify_native_build
 except ImportError:
     from .source_map import build_source_map, within
     from .runtime_artifacts import collect_artifact_manifest
@@ -22,6 +23,7 @@ except ImportError:
     from .runtime_types import TaskSpec
     from .state_schema import validate_state
     from .isolated_build import verify_isolated_build, is_included_input_path
+    from .compile_inputs import verify_native_build
 
 def load_report(path: Path) -> tuple[dict[str, Any], str]:
     if not path.is_file():
@@ -151,18 +153,16 @@ def evidence_freshness(main: Path, root: Path, data_dir: Path) -> dict[str, Any]
             "recorded_blocking_checks": recorded_blocking, "identity": identity}
 
 def bind_visibility_to_current_source(visibility: dict[str, Any], freshness: dict[str, Any], *,
-                                      isolated_binding: dict[str, Any] | None = None) -> dict[str, Any]:
+                                      isolated_binding: dict[str, Any] | None = None,
+                                      native_binding: dict[str, Any] | None = None) -> dict[str, Any]:
     """Geometry of a neighboring PDF does not establish a current source build."""
     result = dict(visibility)
-    identity = freshness.get("identity", {})
-    checks = freshness.get("checks", {})
     runtime_bound = (result.get('pdf_location') != 'external' and
-             freshness.get("manifest_status") == "available" and
-             all(identity.get(name + "_matches_snapshot") is True
-                 for name in ("main_tex", "source_set", "pdf")) and
-             checks.get("pdf_not_older_than_source_set", {}).get("pass") is True and
+             native_binding is not None and native_binding.get('status') == 'current' and
+             native_binding.get('source_pdf_binding') == 'verified_native_inputs' and
+             result.get('pdf_path') == native_binding.get('pdf_path') and
              bool(result.get("pdf_sha256")) and
-             result.get("pdf_sha256") == identity.get("pdf", {}).get("sha256"))
+             result.get("pdf_sha256") == native_binding.get('pdf_sha256'))
     isolated_bound = (isolated_binding is not None and
                       isolated_binding.get('status') == 'current' and
                       isolated_binding.get('source_pdf_binding') == 'verified_isolated_build' and
@@ -173,7 +173,7 @@ def bind_visibility_to_current_source(visibility: dict[str, Any], freshness: dic
     bound = isolated_bound if isolated_binding is not None else runtime_bound
     result["applicable_to_current_source"] = True if bound else None
     result["source_pdf_binding"] = (
-        'verified_isolated_build' if isolated_bound else 'verified_runtime_snapshot' if bound else 'unverified')
+        'verified_isolated_build' if isolated_bound else 'verified_native_inputs' if bound else 'unverified')
     if bound and 'geometry_status' in result:
         result['status'] = result['geometry_status']
         result['pass'] = bool(result.get('geometry_pass'))
@@ -186,6 +186,8 @@ def bind_visibility_to_current_source(visibility: dict[str, Any], freshness: dic
         result["applicability_reason"] = "Selected PDF geometry is retained, but its binding to the current source build is not verified."
         if isolated_binding is not None:
             result['binding_reason'] = isolated_binding.get('reason') or 'isolated_build_pdf_identity_not_verified'
+        elif native_binding is not None:
+            result['binding_reason'] = native_binding.get('reason') or 'native_build_pdf_identity_not_verified'
     return result
 
 
@@ -296,12 +298,14 @@ def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path |
                     main.with_suffix('.pdf'))
     isolated_binding = (verify_isolated_build(main, root=root, pdf=selected_pdf, build_dir=build_dir)
                         if build_dir is not None else None)
-    visibility = bind_visibility_to_current_source(
-        review_pdf_visibility(selected_pdf, root=root,
+    geometry = review_pdf_visibility(selected_pdf, root=root,
                               reviews_path=data_dir / 'pdf_visibility_reviews.json',
-                              allow_external_pdf=pdf is not None or build_dir is not None), freshness,
-        isolated_binding=isolated_binding)
+                              allow_external_pdf=pdf is not None or build_dir is not None)
     layout_profile = profile_pdf_layout(selected_pdf)
+    native_binding = (verify_native_build(main, root=root, pdf=selected_pdf)
+                      if isolated_binding is None else None)
+    visibility = bind_visibility_to_current_source(geometry, freshness,
+        isolated_binding=isolated_binding, native_binding=native_binding)
     layout_profile['applicable_to_current_source'] = (
         visibility.get('applicable_to_current_source')
         if layout_profile.get('pdf_sha256') and layout_profile['pdf_sha256'] == visibility.get('pdf_sha256')
@@ -321,6 +325,7 @@ def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path |
         "selected_pdf": str(selected_pdf),
         "pdf_selection": "explicit" if pdf is not None else "isolated_build" if build_dir is not None else "source_neighbor",
         "isolated_build_binding": isolated_binding,
+        "native_build_binding": native_binding,
         "reports": {"action_plan": plan_status, "visual": visual_status,
                     "full_action_plan": str(data_dir / "visual_action_plan.json"),
                     "full_visual_report": str(data_dir / "visual_signal_report.json")},

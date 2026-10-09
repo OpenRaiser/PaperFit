@@ -556,7 +556,11 @@ class CurrentEvidenceFreshnessTests(unittest.TestCase):
 
 class PDFSourceBindingTests(unittest.TestCase):
     def report(self):
-        return {"status": "pass", "pass": True, "pdf_sha256": "a" * 64, "findings": []}
+        return {"status": "pass", "pass": True, "pdf_path":"/synthetic/main.pdf", "pdf_sha256": "a" * 64, "findings": []}
+
+    def native(self):
+        return {'status':'current', 'source_pdf_binding':'verified_native_inputs',
+                'pdf_path':'/synthetic/main.pdf', 'pdf_sha256':'a'*64}
 
     def snapshot(self):
         return {"manifest_status": "available", "identity": {
@@ -574,26 +578,32 @@ class PDFSourceBindingTests(unittest.TestCase):
         self.assertIsNone(result["applicable_to_current_source"])
 
     def test_current_pdf_geometry_does_not_require_available_vlm(self):
-        result = bind_visibility_to_current_source(self.report(), self.snapshot())
+        result = bind_visibility_to_current_source(self.report(), {}, native_binding=self.native())
         self.assertTrue(result["applicable_to_current_source"])
         self.assertEqual(result["status"], "pass")
         self.assertTrue(result["pass"])
 
     def test_edited_source_and_changed_pdf_cannot_inherit_old_binding(self):
-        for changed in ("main_tex_matches_snapshot", "source_set_matches_snapshot", "pdf_matches_snapshot"):
+        for changed in ("status", "source_pdf_binding", "pdf_path"):
             with self.subTest(changed=changed):
-                snapshot = self.snapshot(); snapshot["identity"][changed] = False
-                result = bind_visibility_to_current_source(self.report(), snapshot)
+                native = self.native(); native[changed] = 'unverified'
+                result = bind_visibility_to_current_source(self.report(), self.snapshot(), native_binding=native)
                 self.assertEqual(result["status"], "unverified_current_source")
                 self.assertFalse(result["pass"])
 
-    def test_geometry_hash_and_source_timestamp_must_match_binding(self):
-        for altered in ("pdf_hash", "source_timestamp"):
+    def test_geometry_hash_and_selected_path_must_match_native_binding(self):
+        for altered in ("pdf_hash", "pdf_path"):
             with self.subTest(altered=altered):
-                snapshot = self.snapshot()
-                if altered == "pdf_hash": snapshot["identity"]["pdf"]["sha256"] = "b" * 64
-                else: snapshot["checks"]["pdf_not_older_than_source_set"]["pass"] = False
-                self.assertFalse(bind_visibility_to_current_source(self.report(), snapshot)["pass"])
+                native = self.native()
+                if altered == "pdf_hash": native['pdf_sha256'] = "b" * 64
+                else: native['pdf_path'] = '/synthetic/other.pdf'
+                self.assertFalse(bind_visibility_to_current_source(self.report(), self.snapshot(), native_binding=native)["pass"])
+
+    def test_runtime_snapshot_cannot_substitute_for_native_input_receipt(self):
+        result = bind_visibility_to_current_source(self.report(), self.snapshot())
+        self.assertFalse(result['pass'])
+        self.assertTrue(result['geometry_pass'])
+        self.assertIsNone(result['applicable_to_current_source'])
 
 
 if __name__ == '__main__':

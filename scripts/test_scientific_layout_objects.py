@@ -168,6 +168,59 @@ class ScientificLayoutObjectTests(unittest.TestCase):
         self.assertEqual([(g["path"], g["star"], g["options"]) for g in graphics], [("a.pdf", True, "[width=.4\\linewidth,trim=1 2 3 4]"), ("b.pdf", False, "")])
         self.assertEqual(scientific.scientific_payload_diff(source, source.replace(r"\includegraphics*", r"\includegraphics", 1))["status"], "failed")
 
+    def test_identified_migration_cannot_waive_caption_star_short_or_refs(self):
+        body = r"\caption[Exact 91.2]{Results \ref{eq:a} then \ref{eq:b}}\label{tab:a}\begin{tabular}{lr}A&91.2\\\end{tabular}"
+        before = r"\begin{table}" + body + r"\end{table}"
+        for after in (body.replace(r"\caption", r"\caption*", 1),
+                      body.replace("Exact 91.2", "Exact 92.2"),
+                      body.replace("eq:a", "SWAP").replace("eq:b", "eq:a").replace("SWAP", "eq:b")):
+            with self.subTest(after=after):
+                report = scientific.scientific_payload_diff(before, after)
+                self.assertEqual(report["status"], "failed", report)
+                self.assertNotEqual(report["layout_equivalence"]["status"], "proven", report)
+        report = scientific.scientific_payload_diff(before.replace(r"\caption", r"\caption*", 1), body)
+        self.assertEqual(report["status"], "failed", report)
+        self.assertNotEqual(report["layout_equivalence"]["status"], "proven", report)
+
+    def test_global_conditional_or_nested_length_definitions_stay_shadowed(self):
+        declarations = [r"\begin{table}\global\def\tabcolsep{2pt}\end{table}",
+                        r"\newcommand{\install}{\begin{table}\def\tabcolsep{2pt}\end{table}}",
+                        r"\begin{table}\ifcondition\def\tabcolsep{2pt}\fi\end{table}"]
+        for declaration in declarations:
+            with self.subTest(declaration=declaration):
+                before = declaration + r"\setlength{\tabcolsep}{3pt}"
+                after = before.replace(r"\tabcolsep}{3pt}", r"\tabcolsep}{4pt}")
+                self.assertEqual(scientific.scientific_payload_diff(before, after)["status"], "failed")
+
+    def test_identified_proof_cannot_waive_other_object_or_asset_changes(self):
+        body = r"\caption{Exact values}\label{tab:first}\begin{tabular}{lr}A&91.2\\\end{tabular}"
+        before = r"\begin{table}" + body + r"\end{table}" + combined(math_a=r"$x+1$ The method does not improve.")
+        after = body + combined(math_a=r"$x+1$ The method does not improve.")
+        for changed in (after.replace("does not improve", "does improve"),
+                        after.replace("82.4", "83.4"),
+                        after.replace("$x+1$", "$x-1$")):
+            with self.subTest(changed=changed):
+                report = scientific.scientific_payload_diff(before, changed)
+                self.assertEqual(report["status"], "failed", report)
+                self.assertNotEqual(report["layout_equivalence"]["status"], "proven", report)
+        asset = r"\begin{figure}\includegraphics{a.pdf}\caption{Measured object}\label{fig:a}\end{figure}"
+        report = scientific.scientific_payload_diff(before + asset, after + asset.replace("a.pdf", "b.pdf"))
+        self.assertEqual(report["status"], "failed", report)
+        self.assertNotEqual(report["layout_equivalence"]["status"], "proven", report)
+
+    def test_cell_reference_order_is_attached_to_the_exact_cell(self):
+        body = TABLE_A.replace("A$", r"A\ref{eq:a} then \ref{eq:b}$")
+        before = r"\begin{table}" + object_body("tab:a", body) + r"\end{table}"
+        after = before.replace("eq:a", "SWAP").replace("eq:b", "eq:a").replace("SWAP", "eq:b")
+        self.assertEqual(scientific.scientific_payload_diff(before, after)["status"], "failed")
+
+    def test_shadowed_adjustbox_options_are_not_standard_layout(self):
+        prefix = r"\newenvironment{adjustbox}[1]{#1}{}"
+        before = prefix + r"\begin{table}\begin{adjustbox}{width=91.2pt}" + TABLE_A + r"\end{adjustbox}\caption{Results}\label{tab:a}\end{table}"
+        self.assertFalse(scientific.standard_layout_object_inventory(before)["complete"])
+        after = before.replace("width=91.2pt", "width=92.2pt")
+        self.assertEqual(scientific.scientific_payload_diff(before, after)["status"], "failed")
+
 
 if __name__ == "__main__":
     unittest.main()

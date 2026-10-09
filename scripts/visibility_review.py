@@ -61,7 +61,8 @@ def _current_page_image(visual: dict[str, Any], pdf: Path, root: Path, page: int
 
 def review_pdf_visibility(pdf: Path, *, root: Path,
                           reviews_path: Path | None = None,
-                          allow_external_pdf: bool = False) -> dict[str, Any]:
+                          allow_external_pdf: bool = False,
+                          allow_external_measurement: bool = False) -> dict[str, Any]:
     """Observe an explicitly selected external PDF without asserting its build.
 
     Runtime callers retain the project boundary by default. Opting into an
@@ -74,17 +75,18 @@ def review_pdf_visibility(pdf: Path, *, root: Path,
         return {'checked': False, 'status': 'unavailable', 'pass': False,
                 'reason': 'pdf_path_unavailable', 'findings': []}
     external = not pdf.is_relative_to(root)
-    if external and not allow_external_pdf:
+    if external and not (allow_external_pdf or allow_external_measurement):
         return {'checked': False, 'status': 'unavailable', 'pass': False,
                 'reason': 'pdf_outside_project', 'findings': []}
     report = check_pdf_visibility(pdf)
     report['pdf_location'] = 'external' if external else 'project'
+    report['artifact_location'] = 'external_explicit_pdf' if external else 'project_pdf'
     for finding in report['findings']:
         finding['finding_id'] = finding_id(finding)
         finding['review_status'] = 'pending'
     entries: list[Any] = []
-    review_status = 'not_provided'
-    if reviews_path is not None:
+    review_status = 'external_measurement_only' if external else 'not_provided'
+    if reviews_path is not None and not external:
         try:
             target = reviews_path.resolve()
             if target.is_relative_to(root) and target.is_file() and target.stat().st_size <= 1024 * 1024:

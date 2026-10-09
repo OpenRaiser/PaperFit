@@ -277,11 +277,22 @@ def structure_regression_reasons(diff: Dict) -> List[str]:
     rearrangement = structure.get('container_rearrangement') or {}
     logical_objects_preserved = rearrangement.get('status') == 'supported_objects_preserved'
 
-    if before.get("figure_count") != after.get("figure_count") and not logical_objects_preserved:
+    proof = (diff.get("scientific_payload") or {}).get("layout_equivalence") or {}
+    objects = proof.get("objects", []) if proof.get("checked") is True and proof.get("status") == "proven" else []
+    # Remove only independently proven wrapper contributions from the count
+    # comparison. Unbound floats/graphics and bibliography placement remain hard.
+    def remaining_count(side, family):
+        value = (before if side == "before" else after).get(family + "_count")
+        if not isinstance(value, int):
+            return value
+        return value - sum(str(obj.get(side + "_scope")) in FLOAT_ENVS
+                           and str(obj.get(side + "_scope")).removesuffix('*').endswith(family)
+                           for obj in objects)
+    if remaining_count("before", "figure") != remaining_count("after", "figure") and not logical_objects_preserved:
         reasons.append(
             f"Figure environment count changed: {before.get('figure_count')} -> {after.get('figure_count')}"
         )
-    if before.get("table_count") != after.get("table_count") and not logical_objects_preserved:
+    if remaining_count("before", "table") != remaining_count("after", "table") and not logical_objects_preserved:
         reasons.append(
             f"Table environment count changed: {before.get('table_count')} -> {after.get('table_count')}"
         )
@@ -294,8 +305,9 @@ def structure_regression_reasons(diff: Dict) -> List[str]:
             f"{checked_graphics_count} -> {after.get('includegraphics_count')}"
         )
 
-    removed_figure_labels = structure.get("removed_figure_labels") or []
-    removed_table_labels = structure.get("removed_table_labels") or []
+    proven_labels = {obj.get("label") for obj in objects}
+    removed_figure_labels = [label for label in structure.get("removed_figure_labels") or [] if label not in proven_labels]
+    removed_table_labels = [label for label in structure.get("removed_table_labels") or [] if label not in proven_labels]
     removed_graphics_files = [asset for asset in structure.get("removed_graphics_files") or []
                              if asset != restored_asset]
     before_bibliography = before.get("bibliography") or {}
@@ -596,6 +608,13 @@ def verify_missing_graphic_restoration(original: str, repaired: str, evidence_pa
                 after_directory = path.parent
         if loaded['before'] != original or loaded['after'] != repaired:
             raise ValueError('evidence_does_not_bind_current_source_pair')
+        # Give the specific unsupported-command reason before the aggregate
+        # protection result. Both paths still refuse this restoration exception.
+        for source in (original, repaired):
+            for record in _macro_definitions(active_source(source)):
+                target = record[1] if record[0] in {'def', 'gdef', 'edef', 'xdef', 'let'} else record[2]
+                if target.lstrip('\\') == 'includegraphics':
+                    raise ValueError('includegraphics_redefinition_requires_review')
         if not all(report.get('checked') is True and report.get('status') == 'pass'
                    for report in (scientific_payload, layout_prose, layout_policy)):
             raise ValueError('independent_protection_did_not_pass')
@@ -647,10 +666,6 @@ def verify_missing_graphic_restoration(original: str, repaired: str, evidence_pa
             raise ValueError('asset_not_confirmed_absent_inside_project')
         if re.search(r'\\(?:graphicspath|DeclareGraphicsExtensions)\b', active_source(original) + active_source(repaired)):
             raise ValueError('graphics_search_configuration_requires_review')
-        for record in _macro_definitions(active_source(original)):
-            target = record[1] if record[0] in {'def', 'gdef', 'edef', 'xdef', 'let'} else record[2]
-            if target.lstrip('\\') == 'includegraphics':
-                raise ValueError('includegraphics_redefinition_requires_review')
         if probe.get('schema') != 'paperfit_asset_recovery_probe.v1' or probe.get('asset') != asset:
             raise ValueError('provenance_record_asset_mismatch')
         if not any(isinstance(row, dict) and row.get('line') == reference_line and row.get('text') == lines['reference']
@@ -665,7 +680,7 @@ def verify_missing_graphic_restoration(original: str, repaired: str, evidence_pa
     return result
 
 
-def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_approvals=(), file: str = "", layout_only: bool = False, source_restoration_evidence_path: Optional[str] = None) -> Dict:
+def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_approvals=(), file: str = "", layout_only: bool = False, source_restoration_evidence_path: Optional[str] = None, project_root=None, review_context=None, source_review=None) -> Dict:
     """
     Compute the difference between original and repaired content.
 
@@ -697,8 +712,12 @@ def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_
     post_hash = semantic_hash(repaired_tex)
 
     scientific_payload = scientific_payload_diff(original_tex, repaired_tex)
-    layout_policy = compare_layout_policy(original_tex, repaired_tex, approvals=layout_policy_approvals, file=file)
+    layout_policy = compare_layout_policy(original_tex, repaired_tex, approvals=layout_policy_approvals, file=file, project_root=project_root, review_context=review_context)
     layout_prose = compare_layout_prose(original_tex, repaired_tex)
+    from source_review import apply_source_review, reviewable_uncertainty
+    scientific_payload, layout_prose, source_review_result = apply_source_review(
+        original_tex, repaired_tex, project_root=project_root, file=file,
+        review=source_review, scientific=scientific_payload, prose=layout_prose)
     source_restoration = (verify_missing_graphic_restoration(original_tex, repaired_tex, source_restoration_evidence_path,
                           scientific_payload=scientific_payload, layout_prose=layout_prose, layout_policy=layout_policy)
                           if source_restoration_evidence_path else {'checked': False, 'status': 'not_used'})
@@ -719,18 +738,21 @@ def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_
     }
     structure_changes['container_rearrangement'] = _container_rearrangement(
         original_tex, repaired_tex, science=scientific_payload, prose=layout_prose, policy=layout_policy)
-    structure_reasons = structure_regression_reasons({"structure_changes": structure_changes, "source_restoration": source_restoration})
+    structure_reasons = structure_regression_reasons({"structure_changes": structure_changes, "source_restoration": source_restoration, "scientific_payload": scientific_payload})
     layout_structure_changed = bool(structure_reasons)
 
     if scientific_payload["regression_reasons"]:
-        violation_level = 3
-        action_required = "auto_rollback"
+        uncertain_length = any((scientific_payload.get(name) or {}).get("status") == "pending" for name in ("layout_argument_uncertainty", "reference_anchor_uncertainty", "combined_layout_uncertainty", "reference_font_hook_uncertainty", "template_parameter_uncertainty"))
+        # Opaque-adjacent length syntax is unresolved, not an automatic rollback
+        # instruction. It remains a failed scientific check until host review.
+        violation_level = 2 if uncertain_length else 3
+        action_required = "manual_review" if uncertain_length else "auto_rollback"
         violation_reasons.extend(scientific_payload["regression_reasons"])
     if layout_structure_changed:
         violation_level = 3
         action_required = 'auto_rollback'
         violation_reasons.extend(structure_reasons)
-    elif pre_hash != post_hash and not scientific_payload["regression_reasons"]:
+    elif pre_hash != post_hash and not scientific_payload["regression_reasons"] and not ((scientific_payload.get("layout_equivalence", {}).get("status") == "proven" or source_review_result.get("status") == "verified") and layout_prose.get("status") == "pass"):
         if deleted_sentences:
             violation_reasons.append(f"Deleted {len(deleted_sentences)} sentence(s)")
         if abs(word_count_change_pct) > 15:
@@ -746,10 +768,19 @@ def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_
             violation_reasons.append(f"Word count changed by {word_count_change_pct:.1f}% (<5%)")
             action_required = 'log_only'
 
+    source_uncertainty = reviewable_uncertainty(original_tex, repaired_tex) if (
+        (layout_prose.get("status") != "pass" or scientific_payload.get("reference_font_hook_uncertainty", {}).get("status") == "pending")
+        and source_review_result.get("status") != "verified"
+    ) else {"eligible": False, "kinds": []}
+
     # A layout shortcut can preserve all scientific content and still violate
     # repair policy. Keep its evidence separate from content violation levels.
-    if layout_policy["status"] == "blocked" or (layout_only and layout_prose.get("checked") is True and layout_prose["status"] != "pass"):
+    if layout_policy["status"] == "blocked" or (layout_only and layout_prose.get("checked") is True and layout_prose["status"] != "pass" and not source_uncertainty["eligible"]):
         action_required = "auto_rollback"
+    elif source_uncertainty["eligible"] and action_required != "auto_rollback":
+        action_required = "manual_review"
+    elif source_uncertainty["eligible"] and not scientific_payload["regression_reasons"] and not layout_structure_changed:
+        action_required = "manual_review"
     elif (layout_policy["status"] == "manual_review" or (layout_only and layout_prose.get("checked") is not True)) and action_required != "auto_rollback":
         action_required = "manual_review"
     if source_restoration_evidence_path and source_restoration['status'] != 'verified' and action_required != 'auto_rollback':
@@ -761,6 +792,8 @@ def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_
         'layout_policy': layout_policy,
         'layout_prose': layout_prose,
         'source_restoration': source_restoration,
+        'source_review': source_review_result,
+        'source_uncertainty': source_uncertainty,
         'hash_comparison': {
             'pre_hash': pre_hash,
             'post_hash': post_hash,
@@ -1011,8 +1044,28 @@ def cmd_diff(args):
     with open(args.repaired, 'r', encoding='utf-8') as f:
         repaired = f.read()
 
-    result = compute_content_diff(original, repaired, layout_only=True,
-                                  source_restoration_evidence_path=getattr(args, 'source_restoration_evidence', None))
+    root = Path(args.root).resolve() if getattr(args, 'root', None) else None
+    approvals, context, source_review, relative = (), None, None, ""
+    if getattr(args, 'layout_review_json', None) or getattr(args, 'source_review_json', None):
+        if root is None:
+            raise ValueError("--root is required for explicit host review")
+        from layout_policy import _relative_path, _review_json
+        from source_review import load_source_review
+        relative = _relative_path(root, str(Path(args.repaired).resolve()))
+        if getattr(args, 'layout_review_json', None):
+            review = _review_json(root / _relative_path(root, args.layout_review_json))
+            if review.get("file") != relative:
+                raise ValueError("layout review is for another source file")
+            approvals, context = review["approvals"], review.get("context")
+        if getattr(args, 'source_review_json', None):
+            source_review = load_source_review(root / _relative_path(root, args.source_review_json))
+    elif root is not None:
+        from layout_policy import _relative_path
+        relative = _relative_path(root, str(Path(args.repaired).resolve()))
+    result = compute_content_diff(original, repaired, layout_only=True, file=relative,
+                                  source_restoration_evidence_path=getattr(args, 'source_restoration_evidence', None),
+                                  project_root=root, review_context=context, layout_policy_approvals=approvals,
+                                  source_review=source_review)
     result['original_file'] = args.original
     result['repaired_file'] = args.repaired
 
@@ -1067,6 +1120,9 @@ def main():
     diff_parser.add_argument('repaired', help='Repaired .tex file')
     diff_parser.add_argument('--output', '-o', help='Output JSON file')
     diff_parser.add_argument('--source-restoration-evidence', help='Hash-bound local original-source/archive evidence for one inactive missing graphic restoration')
+    diff_parser.add_argument('--root', help='Project root; required for current-build host review')
+    diff_parser.add_argument('--layout-review-json', help='Strict source/PDF/all-pages bound layout review request inside root')
+    diff_parser.add_argument('--source-review-json', help='Explicit classified-source uncertainty review inside root; raw reports retained')
     diff_parser.set_defaults(func=cmd_diff)
 
     # 'critical' command

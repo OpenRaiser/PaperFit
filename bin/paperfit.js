@@ -217,6 +217,7 @@ function forwardBundledPythonScript(commandName, scriptRelativePath) {
 function addWorkflowOptions(command, { includeSaveAs = false } = {}) {
   command
     .option('--main <path>', '主 .tex 文件')
+    .option('--engine <name>', 'TeX engine: pdflatex | xelatex | lualatex; preserve the manuscript compiler')
     .option('--template <template>', '模板键，如 NeurIPS2025')
     .option('--target-pages <n>', '目标页数')
     .option('--page-policy <policy>', '页数目标: at_most (默认) | exact')

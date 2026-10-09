@@ -17,6 +17,7 @@ try:
     from source_map import build_source_map, group, masked_tex, within, _conditional_ranges
     from scientific_integrity import arraystretch_declarations
     from isolated_build import is_included_input_path, verify_isolated_build
+    from compile_inputs import verify_native_build
 except ImportError:
     from .candidate_compare import compare_candidates
     from .pdf_layout_profile import profile_pdf_layout
@@ -25,6 +26,7 @@ except ImportError:
     from .source_map import build_source_map, group, masked_tex, within, _conditional_ranges
     from .scientific_integrity import arraystretch_declarations
     from .isolated_build import is_included_input_path, verify_isolated_build
+    from .compile_inputs import verify_native_build
 
 REGISTERS = {
     'textfloatsep', 'floatsep', 'intextsep', 'dbltextfloatsep', 'dblfloatsep',
@@ -199,12 +201,7 @@ def build_toolbox(main: Path, *, root: Path | None = None, pdf: Path | None = No
     met = (count == target_pages if page_policy == 'exact' else count <= target_pages) if comparable else None
     direction = ('compress' if count > target_pages else 'expand' if count < target_pages and page_policy == 'exact' else 'hold') if comparable else 'unknown'
     freshness = evidence_freshness(main, root, (data_dir or root/'data').resolve())
-    identity = freshness.get('identity', {})
-    bound = (freshness.get('manifest_status') == 'available' and
-             all(identity.get(name+'_matches_snapshot') is True for name in ('main_tex','source_set','pdf')) and
-             freshness.get('checks', {}).get('pdf_not_older_than_source_set', {}).get('pass') is True and
-             bool(profile.get('pdf_sha256')) and profile['pdf_sha256'] == identity.get('pdf', {}).get('sha256') and
-             pdf == main.with_suffix('.pdf'))
+    bound = False
     isolated = (verify_isolated_build(main, root=root, pdf=pdf, build_dir=build_dir)
                 if build_dir is not None else None)
     if isolated is not None:
@@ -224,6 +221,10 @@ def build_toolbox(main: Path, *, root: Path | None = None, pdf: Path | None = No
                             reason='compile_log_changed_during_diagnostic_read')
         else:
             log_hints['source_pdf_binding'] = 'verified_isolated_build'
+    native = verify_native_build(main, root=root, pdf=pdf) if isolated is None else None
+    if native is not None:
+        bound = (native.get('status') == 'current' and native.get('source_pdf_binding') == 'verified_native_inputs'
+                 and bool(profile.get('pdf_sha256')) and profile['pdf_sha256'] == native.get('pdf_sha256'))
     objective = evaluate_page_objective(target_pages=target_pages, page_policy=page_policy,
         page_budget_scope=page_budget_scope, page_count=count, measured_scope='with_appendix',
         evidence_status='current' if bound else 'unverified_source_binding',
@@ -249,9 +250,10 @@ def build_toolbox(main: Path, *, root: Path | None = None, pdf: Path | None = No
         'main': str(main), 'root': str(root), 'root_resolution': root_resolution,
         'source_inventory': inventory,
         'pdf_identity': {'path': str(pdf), 'sha256': profile.get('pdf_sha256'),
-                         'source_pdf_binding': ('verified_isolated_build' if isolated else 'verified_runtime_snapshot') if bound else 'not_verified'},
+                         'source_pdf_binding': ('verified_isolated_build' if isolated else 'verified_native_inputs') if bound else 'not_verified'},
         'page_objective': objective, 'artifact_freshness': freshness,
         'isolated_build_binding': isolated,
+        'native_build_binding': native,
         'observed_pdf_objective': {'policy': page_policy, 'scope': page_budget_scope,
                            'target_pages': target_pages, 'physical_pdf_pages': count,
                            'measured_scope_pages': count if comparable else None,
@@ -297,7 +299,7 @@ def main() -> int:
     parser.add_argument('--main', type=Path, required=True)
     parser.add_argument('--root', type=Path)
     parser.add_argument('--pdf', type=Path)
-    parser.add_argument('--data-dir', type=Path, help='Existing runtime evidence directory for source/PDF binding')
+    parser.add_argument('--data-dir', type=Path, help='Existing runtime snapshots for historical evidence; native binding uses the project data/compile journal')
     parser.add_argument('--build-dir', type=Path, help='Explicit isolated-build directory with compiled input/PDF hashes')
     parser.add_argument('--target-pages', type=int, required=True)
     parser.add_argument('--page-policy', choices=['exact', 'at_most'], default='exact')

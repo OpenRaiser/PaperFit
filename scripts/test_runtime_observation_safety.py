@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import errno
 import io
@@ -21,7 +21,7 @@ import vlm_diagnosis
 
 
 class CompileObservationSafetyTest(unittest.TestCase):
-    def run_compile(self, root, *, returncode=1, log='! Undefined control sequence.\nl.3 \\IEEEmembership\n', create_pdf=True, baseline=False, tolerant=True):
+    def run_compile(self, root, *, returncode=1, log='! Undefined control sequence.\nl.3 \\IEEEmembership\n', create_pdf=True, baseline=False, tolerant=True, record_inputs=False):
         main = root / 'main.tex'
         source = '\\documentclass{article}\n\\begin{document}\n\\IEEEmembership{Member, IEEE}\n\\end{document}\n'
         main.write_text(source, encoding='utf-8')
@@ -30,6 +30,8 @@ class CompileObservationSafetyTest(unittest.TestCase):
         def run(cmd, *, cwd, timeout=None):
             if create_pdf:
                 (root / 'main.pdf').write_bytes(b'%PDF-new')
+            if record_inputs:
+                (root / 'main.fls').write_text('PWD ' + str(root) + '\nINPUT main.tex\n', encoding='utf-8')
             return subprocess.CompletedProcess(cmd, returncode, log, '')
         with mock.patch.dict(os.environ, {'PAPERFIT_BOUNDED_COMPILE': '0'}), \
                 mock.patch.object(runtime_actions, 'run_command', side_effect=run) as runner, \
@@ -76,10 +78,18 @@ class CompileObservationSafetyTest(unittest.TestCase):
 
     def test_completed_fresh_pdf_is_successful(self):
         with tempfile.TemporaryDirectory() as tmp:
-            report = self.run_compile(Path(tmp), returncode=0, log='Output written on main.pdf (1 page).')
+            report = self.run_compile(Path(tmp), returncode=0, log='Output written on main.pdf (1 page).', record_inputs=True)
             self.assertTrue(report['success'])
             self.assertTrue(report['pdf_fresh'])
             self.assertIsNone(report['preview_pdf_path'])
+
+    def test_completed_pdf_without_recorded_inputs_remains_unknown_preview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = self.run_compile(Path(tmp), returncode=0, log='Output written on main.pdf (1 page).')
+            self.assertTrue(report['success'])
+            self.assertTrue(report['pdf_fresh'])
+            self.assertTrue(report['preview_pdf_path'])
+            self.assertFalse(report['compile_inputs']['bound'])
 
 
 class TemplateRecoverySafetyTest(unittest.TestCase):

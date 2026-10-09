@@ -389,7 +389,7 @@ class ExplicitIsolatedPDFTests(unittest.TestCase):
         external_review=self.base/'review.json'
         external_review.write_text(json.dumps({'schema':'paperfit_visibility_reviews.v1','pdf_sha256':sha(self.pdf),'reviews':[]}),encoding='utf-8')
         result=review_pdf_visibility(self.pdf,root=self.root,reviews_path=external_review,allow_external_pdf=True)
-        self.assertEqual(result['review_report_status'],'missing_or_external')
+        self.assertEqual(result['review_report_status'],'external_measurement_only')
         self.assertFalse(result['pass'])
 
 

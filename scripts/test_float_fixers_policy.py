@@ -412,9 +412,13 @@ class CaptionGraphicCompileTest(unittest.TestCase):
                       + r"\end{document}" + "\n")
             def compile_source(content):
                 (root / "main.tex").write_text(content, encoding="utf-8")
-                result = subprocess.run(_caption_test_engine(), cwd=root, capture_output=True, timeout=180,
-                                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-                self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace")[-1000:])
+                # Native pdfLaTeX needs a second pass to resolve Figure references.
+                # Comparing its first-pass bold ?? against a resolved digit would
+                # mistake reference convergence for an unwanted font change.
+                for _pass in range(2):
+                    result = subprocess.run(_caption_test_engine(), cwd=root, capture_output=True, timeout=180,
+                                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+                    self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace")[-1000:])
                 reader = PdfReader(str(root / "main.pdf"))
                 font_names = set()
                 for page in reader.pages:
@@ -423,6 +427,7 @@ class CaptionGraphicCompileTest(unittest.TestCase):
                         if font.get("/BaseFont"):
                             font_names.add(re.sub(r"^/[A-Z]{6}\+", "", str(font["/BaseFont"])))
                 log = (root / "main.log").read_text(encoding="utf-8", errors="replace")
+                self.assertNotIn("There were undefined references", log)
                 return log, len(reader.pages), font_names
             before_log, before_pages, before_fonts = compile_source(source)
             self.assertIn(r"Overfull \hbox", before_log)
