@@ -146,11 +146,11 @@ class EmergencyTextSpacingIntegrityTest(unittest.TestCase):
                 self.assert_not_preserved(before, document(r'\emergencystretch=2em ' + self.body, definition))
                 self.assert_not_preserved(before, document(r'\quad ' + self.body, definition))
 
-    def test_presentation_recognition_does_not_allow_new_scaling(self):
+    def test_presentation_recognition_does_not_autoapprove_new_scaling(self):
         table = r'\begin{tabular}{lr}Method&Score\\A&91.2\\\end{tabular}'
         before = document(self.body + table)
         after = document(r'\emergencystretch=2em ' + self.body + r'\resizebox{.1\linewidth}{!}{' + table + '}')
-        self.assertEqual(compare_layout_policy(before, after)['status'], 'blocked')
+        self.assertEqual(compare_layout_policy(before, after)['status'], 'manual_review')
 
     def test_commented_redefinitions_do_not_shadow_standard_controls(self):
         self.assert_preserved(document(self.body, '% ' + r'\def\emergencystretch{not}' + '\n'),

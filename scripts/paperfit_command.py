@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 try:
+    from tex_engine import ENGINES, resolve_tex_engine
     from diagnosis_ingest import classify_compile_case
     from orchestrator_runtime import OrchestratorRuntime
     from paperfit_portrait import load_templates
@@ -29,6 +30,7 @@ try:
     from runtime_status import build_runtime_status
     from runtime_types import TaskSpec
 except ModuleNotFoundError:  # package import during focused tests
+    from .tex_engine import ENGINES, resolve_tex_engine
     from .diagnosis_ingest import classify_compile_case
     from .orchestrator_runtime import OrchestratorRuntime
     from .paperfit_portrait import load_templates
@@ -304,6 +306,7 @@ def _compile(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
     project_root = project_root.resolve()
     main_tex = (main_tex if main_tex.is_absolute() else project_root / main_tex).resolve()
     build_root = main_tex.parent
+    engine = resolve_tex_engine(main_tex)
     timeout_sec = int(os.environ.get("PAPERFIT_COMPILE_TIMEOUT_SEC", "240"))
     if os.environ.get("PAPERFIT_BOUNDED_COMPILE") == "1":
         bounded = _compile_bounded(project_root, main_tex=main_tex, timeout_sec=timeout_sec)
@@ -312,7 +315,7 @@ def _compile(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
 
     cmd = [
         "latexmk",
-        "-pdf",
+        ENGINES[engine],
         "-interaction=nonstopmode",
         "-halt-on-error",
         main_tex.name,
@@ -331,13 +334,14 @@ def _compile(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
     combined_log = (result.stdout or "") + "\n" + (result.stderr or "")
     fatal_patterns = [
         "Fatal error occurred",
+        "Undefined control sequence",
         "Emergency stop",
         "! LaTeX Error:",
         " ==> Fatal error",
     ]
     fatal_error = any(pattern in combined_log for pattern in fatal_patterns)
     partial_pdf_available = bool(timed_out and pdf_path.is_file() and not fatal_error)
-    success = (result.returncode == 0 and pdf_path.is_file()) or partial_pdf_available
+    success = bool(result.returncode == 0 and pdf_path.is_file() and not fatal_error)
     if not success:
         missing_sty = missing_public_sty_names(combined_log)
         if missing_sty:
@@ -349,10 +353,12 @@ def _compile(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
                 timed_out = result.returncode == 124
                 fatal_error = any(pattern in combined_log for pattern in fatal_patterns)
                 partial_pdf_available = bool(timed_out and pdf_path.is_file() and not fatal_error)
-                success = (result.returncode == 0 and pdf_path.is_file()) or partial_pdf_available
+                success = bool(result.returncode == 0 and pdf_path.is_file() and not fatal_error)
     case = classify_compile_case(combined_log, success=success)
     return {
         "success": success,
+        "engine": engine,
+        "preview_pdf_path": str(pdf_path) if pdf_path.is_file() and not success else None,
         "case_status": case["case_status"],
         "missing_sty": case["missing_sty"],
         "missing_images": case["missing_images"],
@@ -410,7 +416,8 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) ->
     project_root = project_root.resolve()
     main_tex = (main_tex if main_tex.is_absolute() else project_root / main_tex).resolve()
     build_root = main_tex.parent
-    pdflatex = shutil.which("pdflatex")
+    engine = resolve_tex_engine(main_tex)
+    pdflatex = shutil.which(engine)
     if not pdflatex:
         return {"available": False}
     pdf_path = main_tex.with_suffix(".pdf")
@@ -1829,6 +1836,8 @@ def main() -> None:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--main", default=None)
     common.add_argument("--template", default=None)
+    common.add_argument("--engine", choices=sorted(ENGINES), default=None,
+                        help="Preserve the manuscript engine; alternatively set PAPERFIT_TEX_ENGINE")
     common.add_argument("--target-pages", type=int, default=None)
     common.add_argument("--page-policy", choices=["at_most", "exact"], default="at_most")
     common.add_argument("--page-budget-scope", choices=["main_body", "with_refs", "with_appendix"], default=None)
@@ -1863,6 +1872,8 @@ def main() -> None:
     migrate_parser.add_argument("target_template")
 
     args = parser.parse_args()
+    if args.engine:
+        os.environ["PAPERFIT_TEX_ENGINE"] = args.engine
 
     project_root = Path.cwd().resolve()
     main_tex = _detect_main_tex(project_root, args.main)

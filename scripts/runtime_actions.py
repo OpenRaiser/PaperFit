@@ -17,8 +17,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
+    from tex_engine import ENGINES, resolve_tex_engine
     from diagnosis_ingest import classify_compile_case
 except ModuleNotFoundError:  # package import during unit tests
+    from .tex_engine import ENGINES, resolve_tex_engine
     from .diagnosis_ingest import classify_compile_case
 
 
@@ -174,7 +176,7 @@ def pdf_page_count(pdf_path: Path) -> Optional[int]:
     return None
 
 
-def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False) -> Dict[str, Any]:
+def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False, engine: Optional[str] = None) -> Dict[str, Any]:
     """Compile without changing manuscript source.
 
     Nonstop mode can produce a diagnostic preview after an error. That preview
@@ -183,14 +185,24 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
     project_root = project_root.resolve()
     main_tex = (main_tex if main_tex.is_absolute() else project_root / main_tex).resolve()
     build_root = main_tex.parent
+    engine = resolve_tex_engine(main_tex, engine)
     main_relative = main_tex.relative_to(project_root).as_posix()
     timeout_sec = int(os.environ.get("PAPERFIT_COMPILE_TIMEOUT_SEC", "240"))
     if os.environ.get("PAPERFIT_BOUNDED_COMPILE") == "1":
-        bounded = compile_latex_bounded(project_root, main_tex=main_tex, timeout_sec=timeout_sec)
+        bounded = compile_latex_bounded(project_root, main_tex=main_tex, timeout_sec=timeout_sec, engine=engine)
         if bounded.get("available"):
             return bounded
 
-    cmd = ["latexmk", "-pdf", "-interaction=nonstopmode"]
+    try:
+        from compile_result import CompileAttempt, source_fingerprint, diff_source_fingerprints
+        from compile_inputs import snapshot_project_inputs, bind_compile_inputs
+    except ModuleNotFoundError:
+        from .compile_result import CompileAttempt, source_fingerprint, diff_source_fingerprints
+        from .compile_inputs import snapshot_project_inputs, bind_compile_inputs
+    compile_start_fingerprint = source_fingerprint(project_root, main_relative)
+    input_fingerprint_before = snapshot_project_inputs(project_root, main_tex)
+    compile_attempt = CompileAttempt(project_root, main_tex=main_relative, compiler="latexmk")
+    cmd = ["latexmk", ENGINES[engine], "-interaction=nonstopmode", "-recorder"]
     if not tolerant:
         cmd.append("-halt-on-error")
     cmd.append(main_tex.name)
@@ -239,13 +251,7 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
 
     # compile_result.v2：结构化尝试记录（journal 追加 + 全字段返回，旧键全保留）
     try:
-        from compile_result import (
-            CompileAttempt,
-            diff_source_fingerprints,
-            source_fingerprint,
-        )
-
-        attempt = CompileAttempt(project_root, main_tex=main_relative, compiler="latexmk")
+        attempt = compile_attempt
         fingerprint_store = project_root / "data" / "compile" / "last_fingerprint.json"
         prev_fp: Dict[str, str] = {}
         if fingerprint_store.is_file():
@@ -254,6 +260,14 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
             except (json.JSONDecodeError, OSError):
                 prev_fp = {}
         current_fp = source_fingerprint(project_root, main_relative)
+        input_binding = bind_compile_inputs(project_root, main_tex, input_fingerprint_before)
+        source_unchanged = bool(compile_start_fingerprint) and compile_start_fingerprint == current_fp
+        imported_inputs_changed = any(input_binding["before"].get(path) != digest
+                                      for path, digest in input_binding["after"].items())
+        if not source_unchanged or imported_inputs_changed:
+            success = False
+            preview_pdf_path = str(pdf_path) if pdf_path.is_file() else None
+            case = classify_compile_case(combined_log, success=False)
         changed_files = diff_source_fingerprints(prev_fp, current_fp) if prev_fp else []
         native_log = main_tex.with_suffix(".log")
         v2 = attempt.finalize(
@@ -270,6 +284,12 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
             changed_files=changed_files,
             extra={
                 "success": success,
+                "engine": engine,
+                "source_fingerprint": current_fp,
+                "source_fingerprint_before": compile_start_fingerprint,
+                "source_unchanged_during_compile": source_unchanged,
+                "compile_inputs": input_binding,
+                "imported_inputs_changed_during_compile": imported_inputs_changed,
                 "tolerant": tolerant,
                 "case_status": case["case_status"],
                 "restored_baseline_pdf": restored_baseline,
@@ -286,6 +306,7 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
 
     report = {
         "success": success,
+        "engine": engine,
         "tolerant": tolerant,
         "restored_baseline_pdf": restored_baseline,
         "baseline_pdf": str(baseline_pdf) if had_baseline else None,
@@ -311,11 +332,12 @@ def compile_latex(project_root: Path, *, main_tex: Path, tolerant: bool = False)
     return report
 
 
-def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) -> Dict[str, Any]:
+def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int, engine: Optional[str] = None) -> Dict[str, Any]:
     project_root = project_root.resolve()
     main_tex = (main_tex if main_tex.is_absolute() else project_root / main_tex).resolve()
     build_root = main_tex.parent
-    pdflatex = shutil.which("pdflatex")
+    engine = resolve_tex_engine(main_tex, engine)
+    pdflatex = shutil.which(engine)
     if not pdflatex:
         return {"available": False}
     pdf_path = main_tex.with_suffix(".pdf")

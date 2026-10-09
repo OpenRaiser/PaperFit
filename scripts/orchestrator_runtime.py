@@ -9,6 +9,8 @@ state mutations that must stay consistent regardless of prompt text.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import shutil
 import json
 import os
 import re
@@ -91,6 +93,24 @@ def _infer_column_type(main_tex_path: Path) -> Optional[str]:
     if match.group(1) in {"ieeecls", "lnecols"}:
         return "double"
     return "single"
+
+
+def _eligible_pending_source_checks(checks: Dict[str, Any]) -> bool:
+    """Only a verified, readable baseline with pending supported checks qualifies.
+
+    Missing sources/baselines and confirmed forbidden/content changes cannot use
+    this path to avoid rollback. This is pending evidence, never acceptance.
+    """
+    channels = [checks.get(name) or {} for name in ("layout_policy", "layout_prose", "scientific_payload")]
+    return (checks.get("checked") is True and checks.get("status") == "manual_review"
+            and all(item.get("checked") is True and item.get("status") in {"pass", "manual_review"} for item in channels))
+
+
+class _SourceReviewPending(RuntimeError):
+    def __init__(self, report: Dict[str, Any], checks: Dict[str, Any]):
+        super().__init__("source candidate requires explicit host review")
+        self.report = report
+        self.checks = checks
 
 
 class OrchestratorRuntime:
@@ -564,6 +584,23 @@ class OrchestratorRuntime:
             self.manager.ingest_repair_execution_report(output_path)
             self.set_next_actions(["Regenerate repair plan before applying source mutations"])
             return self.manager.load()
+        subset_reports: List[Dict[str, Any]] = []
+        def execute_until_review(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+            from repair_plan_executor import execute_repair_plan
+            from layout_policy import snapshot_source_edit_checks
+            report = execute_repair_plan(*args, **kwargs)
+            subset_reports.append({"path": str(args[2]), "report": report})
+            if report.get("status") == "manual_review":
+                live = self.manager.load()
+                baseline = (live.get("content_integrity") or {}).get("rollback_target")
+                if not baseline:
+                    baseline = ((live.get("artifacts") or {}).get("pre_repair_snapshot") or {}).get("rollback_target")
+                checks = snapshot_source_edit_checks(Path.cwd(), baseline) if baseline else {}
+                if _eligible_pending_source_checks(checks):
+                    # Stop before a trial gate or the next source-edit unit can
+                    # mislabel this candidate accepted or undo it on page gap.
+                    raise _SourceReviewPending(report, checks)
+            return report
         try:
             from phased_repair import execute_phased_repair
 
@@ -576,10 +613,23 @@ class OrchestratorRuntime:
                 max_local_batch=16,
                 max_layout_candidates=max(8, max_candidates),
                 max_global_candidates=2,
+                execute_fn=execute_until_review,
                 report_path=Path.cwd() / "data" / "phased_repair_report.json",
             )
             out_path = Path.cwd() / output_path
             out_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            self.manager.ingest_repair_execution_report(output_path)
+            return self.manager.load()
+        except _SourceReviewPending as pending:
+            summary = {**pending.report, "status": "manual_review", "success": False,
+                       "execution_mode": "phased_atomic_pending", "review_required": True,
+                       "accepted_count": 0, "rejected_count": 0, "rolled_back_count": 0,
+                       "applied_count": sum(int(item["report"].get("applied_count") or 0) for item in subset_reports),
+                       "subset_reports": subset_reports, "source_edit_checks": pending.checks,
+                       "review_note": "Phased edits stopped before trial acceptance; candidate is retained for a current native build and explicit full-page review."}
+            for path in (Path.cwd() / "data" / "phased_repair_report.json", Path.cwd() / output_path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
             self.manager.ingest_repair_execution_report(output_path)
             return self.manager.load()
         except Exception as phased_exc:
@@ -897,6 +947,7 @@ class OrchestratorRuntime:
                 return event
 
             runtime_state = "INIT"
+            source_review_pending = None
             emit_runtime_event(
                 "task_started",
                 state=runtime_state,
@@ -1323,7 +1374,7 @@ class OrchestratorRuntime:
                     self._record_runtime_action(
                         "repair_plan_executor",
                         {
-                            "success": True,
+                            "success": str(repair_summary.get("status") or "") not in {"manual_review", "failed", "error"},
                             "input_artifacts": {
                                 "repair_plan": (state.get("artifacts") or {}).get("repair_plan"),
                                 "main_tex": task_spec.main_tex,
@@ -1418,7 +1469,12 @@ class OrchestratorRuntime:
                         emit_event=emit_runtime_event,
                         runtime_actions=runtime_actions,
                     )
-                    post_repair_hard_guard_failure = self._post_repair_hard_guard_failure(
+                    from layout_policy import snapshot_source_edit_checks
+                    pending_checks = snapshot_source_edit_checks(project_root, str(snapshot.get("rollback_target") or ""))
+                    # A quarantined candidate gets one observation, not automatic
+                    # healing, acceptance or rollback from visual/page-gap gates.
+                    # Confirmed source loss still follows the original hard path.
+                    post_repair_hard_guard_failure = None if _eligible_pending_source_checks(pending_checks) else self._post_repair_hard_guard_failure(
                         post_observe=post_observe,
                         rollback_target=str(snapshot.get("rollback_target") or ""),
                     )
@@ -1623,6 +1679,21 @@ class OrchestratorRuntime:
                             task_spec=task_spec,
                             latest=latest,
                         )
+                        current_checks = latest.get("source_edit_checks_after") or {}
+                        if _eligible_pending_source_checks(current_checks):
+                            latest["acceptance"] = {"status": "manual_review", "accepted": False,
+                                                   "rollback_required": False, "reason": "explicit_source_or_layout_review_required"}
+                            source_review_pending = self._retain_source_review_checkpoint(
+                                project_root=project_root, task_spec=task_spec, run_id=run_id,
+                                round_number=repair_round_count, baseline=str(snapshot.get("rollback_target") or ""),
+                                source_checks=current_checks, post_observe=post_observe,
+                            )
+                            state = self.manager.load()
+                            record = round_execution_records[-1]
+                            record.update(status="manual_review", accepted=0, pending=int(record.get("applied") or 0), rollback_scope="none")
+                            self._record_runtime_action("source_review_pending", {"success": False, **source_review_pending},
+                                phase="verify", state="VERIFYING", emit_event=emit_runtime_event, runtime_actions=runtime_actions)
+                            break
                         acceptance = evaluate_round_acceptance(acceptance_evidence)
                         if not acceptance.accepted and acceptance.rollback_required:
                             
@@ -1794,6 +1865,13 @@ class OrchestratorRuntime:
                 round_metrics=round_metrics,
             )
             result_payload = result.to_dict()
+            if source_review_pending is not None:
+                result_payload.update(success=False, review_required=True, source_review_pending=source_review_pending)
+                result_payload["failure"] = {"failure_type": "source_review_pending",
+                                             "reason": "retained_candidate_requires_explicit_host_review",
+                                             "next_actions": state.get("next_actions") or []}
+                result_payload["repair_loop_policy"].update(stop_condition="source_review_pending",
+                    next_round_allowed=False, next_round_reason="explicit_host_review_required")
             
             result_payload["round_execution_records"] = [dict(rec) for rec in round_execution_records]
             result_payload["execution_totals"] = {
@@ -1817,6 +1895,48 @@ class OrchestratorRuntime:
             return result_payload
         finally:
             os.chdir(cwd_before)
+
+    def _retain_source_review_checkpoint(self, *, project_root: Path, task_spec: TaskSpec,
+                                         run_id: str, round_number: int, baseline: str,
+                                         source_checks: Dict[str, Any], post_observe: Dict[str, Any]) -> Dict[str, Any]:
+        """Preserve pending source/artifacts without signing or weakening review."""
+        root = project_root.resolve()
+        snapshot = create_pre_repair_snapshot(project_root=root, main_tex=task_spec.main_tex,
+            snapshot_id=f"pending_{round_number}_{datetime.now().strftime('%H%M%S_%f')}", snapshot_root=env_snapshot_root())
+        checkpoint = Path(snapshot["snapshot_dir"])
+        if not checkpoint.is_absolute():
+            checkpoint = root / checkpoint
+        artifact_manifest = collect_artifact_manifest(root, task_spec.main_tex, self.manager.load().get("artifacts") or {})
+        copies = []
+        targets = [(root / task_spec.main_tex).with_suffix('.pdf'), (root / task_spec.main_tex).with_suffix('.log')]
+        page_dir = root / task_spec.page_dir
+        if page_dir.resolve().is_relative_to(root) and page_dir.is_dir():
+            targets.extend(sorted(page_dir.glob('page_*.png')))
+        for original in targets:
+            if not original.is_file() or not original.resolve().is_relative_to(root):
+                continue
+            relative = original.resolve().relative_to(root)
+            target = checkpoint / 'artifacts' / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(original, target)
+            copies.append({"original_path": relative.as_posix(), "copy_path": str(target),
+                           "sha256": hashlib.sha256(target.read_bytes()).hexdigest()})
+        record = {"schema_version": "source_review_checkpoint.v1", "status": "manual_review", "success": False,
+                  "run_id": run_id, "round": round_number, "baseline_rollback_target": baseline,
+                  "source_snapshot": snapshot, "artifact_copies": copies, "artifact_manifest": artifact_manifest,
+                  "source_edit_checks": source_checks, "observation": post_observe,
+                  "approval_generated": False, "goal_acceptance_checked": False}
+        report_path = checkpoint / 'pending_review.json'
+        report_path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding='utf-8')
+        record["report_path"] = str(report_path)
+        self.manager.update({"status": "EVALUATING", "last_gatekeeper_decision": "CONTINUE",
+                             "pre_repair_snapshot": {"pending_review_checkpoint": {"report_path": str(report_path), "snapshot_manifest": snapshot["rollback_target"], "status": "manual_review"}},
+                             "failure_tracking": {"manual_review_required": True, "last_failure_type": "source_review_pending"},
+                             "content_integrity": {"validation_status": "mutation_manual_review", "action_taken": "manual_review", "rollback_target": baseline,
+                                                   "reason": "Candidate retained for explicit current-source/native-compile/all-pages host review"}})
+        self.set_next_actions(["Inspect the retained current source and every compiled page, including the pending visual/page-budget findings",
+                               "Generate and validate explicitly source/PDF/all-pages bound layout/source review requests before accepting this candidate"])
+        return record
 
     def _heal_endmatter_float_intrusion(
         self,

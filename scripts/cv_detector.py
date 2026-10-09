@@ -233,6 +233,7 @@ class CVDefectDetector:
             "page_width": int(w),
             "page_height": int(h),
             "content_area_ratio": float(round(content_area / float(max(page_area, 1)), 4)),
+            "trailing_whitespace": self.measure_trailing_whitespace(),
             "float_bbox_count": len(float_bboxes),
             "float_area_ratio": float(round(float_area / float(max(page_area, 1)), 4)),
             "band_density_top": float(round(band_means[0], 4)) if len(band_means) > 0 else 0.0,
@@ -317,104 +318,98 @@ class CVDefectDetector:
         self.gray = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
         return True
 
-    def detect_whitespace(self, threshold: Optional[float] = None) -> List[DefectDetection]:
-        """
-        检测页面留白比例
+    def measure_trailing_whitespace(self) -> Dict[str, Any]:
+        """Measure a continuous ink-free tail, not the proportion of white pixels.
 
-        Args:
-            threshold: 留白比例阈值，超过则报告
-
-        Returns:
-            检测结果列表
+        A small isolated centered bottom band can be a page number. Its preceding
+        gap is reported separately as a heuristic requiring host image review;
+        no text/image pixels are removed or asserted to be a footer.
         """
         if self.gray is None and not self.load_image():
-            return []
+            return {}
+        h, w = self.gray.shape
+        pixel_threshold = int(self.thresholds["whitespace_pixel_threshold"])
+        ink = self.gray <= pixel_threshold
+        rows = np.flatnonzero(np.any(ink, axis=1))
+        raw_bottom = int(rows[-1] + 1) if rows.size else 0
+        tail_start, tail_end = raw_bottom, int(h)
+        footer_candidate = None
+        if rows.size:
+            # Consecutive ink rows form bands. A footer-like band must be small,
+            # isolated, near the bottom and centered. Wide lines/captions remain
+            # content. Without OCR, even this narrow candidate is uncertain.
+            cuts = np.flatnonzero(np.diff(rows) > 1) + 1
+            bands = np.split(rows, cuts)
+            last = bands[-1]
+            y0, y1 = int(last[0]), int(last[-1] + 1)
+            xs = np.flatnonzero(np.any(ink[y0:y1], axis=0))
+            x0, x1 = int(xs[0]), int(xs[-1] + 1)
+            prior_bottom = int(bands[-2][-1] + 1) if len(bands) > 1 else None
+            if (prior_bottom is not None and y0 >= h * 0.88
+                    and y1 - y0 <= max(3, h * 0.025)
+                    and x1 - x0 <= max(3, w * 0.06)
+                    and w * 0.35 <= (x0 + x1) / 2 <= w * 0.65
+                    and y0 - prior_bottom >= h * 0.08):
+                footer_candidate = [x0, y0, x1, y1]
+                tail_start, tail_end = prior_bottom, y0
+        start_ratio = float(self.thresholds["bottom_region_start_ratio"])
+        bottom = self.gray[int(h * start_ratio):, :]
+        height = max(0, tail_end - tail_start)
+        return {
+            "whitespace_ratio": height / float(max(h, 1)),
+            "trailing_pixels": int(height * w),
+            "total_pixels": int(h * w),
+            "content_bottom_px": raw_bottom,
+            "raw_trailing_whitespace_ratio": (h - raw_bottom) / float(max(h, 1)),
+            "continuous_blank_start_px": int(tail_start),
+            "continuous_blank_end_px": int(tail_end),
+            "continuous_blank_height_px": int(height),
+            "bottom_whitespace_ratio": float(np.mean(bottom > pixel_threshold)) if bottom.size else 0.0,
+            "region_start_ratio": start_ratio,
+            "white_pixel_ratio_role": "auxiliary_only",
+            "footer_candidate_bbox": footer_candidate,
+            "footer_classification": "unverified_small_isolated_band" if footer_candidate else "none",
+            "host_review_required": footer_candidate is not None,
+            "measurement": "continuous_ink_free_rows",
+        }
+
+    def _detect_continuous_trailing_whitespace(
+        self, defect_id: str, threshold: Optional[float] = None
+    ) -> List[DefectDetection]:
         if not self._is_last_page_context():
             return []
-
-        # A2 is trailing whitespace, not the full-page white-pixel ratio. In
-        # academic PDFs most pixels are naturally white because of margins and
-        # line spacing; using whole-page white pixels makes normal pages look
-        # like 80-95% whitespace and blocks template migration falsely.
-        pixel_threshold = int(self.thresholds["whitespace_pixel_threshold"])
-        threshold = float(
-            threshold if threshold is not None else self.thresholds["trailing_whitespace_threshold"]
-        )
-        _, binary = cv2.threshold(self.gray, pixel_threshold, 255, cv2.THRESH_BINARY_INV)
-        content_rows = np.where(np.any(binary > 0, axis=1))[0]
-        if len(content_rows) == 0:
-            content_bottom = 0
-            trailing_pixels = self.gray.size
-        else:
-            content_bottom = int(content_rows.max())
-            trailing_pixels = int(max(0, self.gray.shape[0] - content_bottom - 1) * self.gray.shape[1])
-        total_pixels = self.gray.size
-        whitespace_ratio = trailing_pixels / float(max(total_pixels, 1))
-
+        metrics = self.measure_trailing_whitespace()
+        if not metrics:
+            return []
+        # Both public A2 entry points use the same whole-page tail-height unit.
+        # The legacy bottom white-pixel threshold is not a tail measurement.
+        threshold = float(threshold if threshold is not None else self.thresholds["trailing_whitespace_threshold"])
+        ratio = metrics["whitespace_ratio"]
+        metrics["threshold"] = threshold
+        if ratio <= threshold:
+            return []
+        review = metrics["host_review_required"]
         detection = DefectDetection(
-            defect_id="A2-trailing-whitespace",
-            category="A",
-            severity="minor" if whitespace_ratio < max(0.45, float(self.thresholds["trailing_whitespace_major_ratio"])) else "major",
-            page=self.page_number,
-            confidence=1.0,
-            description=f"页面留白比例：{whitespace_ratio:.2%}",
-            metrics={
-                "whitespace_ratio": whitespace_ratio,
-                "trailing_pixels": int(trailing_pixels),
-                "total_pixels": int(total_pixels),
-                "content_bottom_px": int(content_bottom),
-                "threshold": threshold,
-            }
+            defect_id=defect_id, category="A",
+            severity="minor" if ratio < max(0.45, float(self.thresholds["trailing_whitespace_major_ratio"])) else "major",
+            page=self.page_number, confidence=0.65 if review else 1.0,
+            bbox=(0, metrics["continuous_blank_start_px"], self.gray.shape[1], metrics["continuous_blank_end_px"]),
+            description=(f"Continuous blank tail: {ratio:.2%}" +
+                         ("; small bottom band may be a footer, host review required" if review else "")),
+            metrics=metrics,
         )
+        self.detections.append(detection)
+        return [detection]
 
-        if whitespace_ratio > threshold:
-            self.detections.append(detection)
-
-        return [detection] if whitespace_ratio > threshold else []
+    def detect_whitespace(self, threshold: Optional[float] = None) -> List[DefectDetection]:
+        """Report last-page continuous trailing whitespace."""
+        return self._detect_continuous_trailing_whitespace("A2-trailing-whitespace", threshold)
 
     def detect_trailing_whitespace_bottom(
-        self,
-        threshold: Optional[float] = None
+        self, threshold: Optional[float] = None
     ) -> List[DefectDetection]:
-        """
-        检测页面底部留白（末页留白专用）
-
-        分析页面底部 30% 区域的留白比例
-        """
-        if self.gray is None and not self.load_image():
-            return []
-        if not self._is_last_page_context():
-            return []
-
-        h, w = self.gray.shape
-        start_ratio = float(self.thresholds["bottom_region_start_ratio"])
-        threshold = float(
-            threshold if threshold is not None else self.thresholds["bottom_whitespace_threshold"]
-        )
-        pixel_threshold = int(self.thresholds["whitespace_pixel_threshold"])
-        bottom_region = self.gray[int(h * start_ratio):, :]
-
-        white_pixels = np.sum(bottom_region > pixel_threshold)
-        total_pixels = bottom_region.size
-        bottom_whitespace_ratio = white_pixels / total_pixels
-
-        detection = DefectDetection(
-            defect_id="A2-bottom-whitespace",
-            category="A",
-            severity="minor",
-            page=self.page_number,
-            confidence=1.0,
-            description=f"页面底部留白比例：{bottom_whitespace_ratio:.2%}",
-            metrics={
-                "bottom_whitespace_ratio": bottom_whitespace_ratio,
-                "region_start_ratio": start_ratio,
-            }
-        )
-
-        if bottom_whitespace_ratio > threshold:
-            self.detections.append(detection)
-            return [detection]
-        return []
+        """Use the same continuous tail measurement as detect_whitespace."""
+        return self._detect_continuous_trailing_whitespace("A2-bottom-whitespace", threshold)
 
     def detect_overflow(
         self,

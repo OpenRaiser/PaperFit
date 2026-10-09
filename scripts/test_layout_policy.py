@@ -28,28 +28,29 @@ def manuscript(body: str) -> str:
 
 
 class LayoutPolicyTest(unittest.TestCase):
-    def test_new_table_scaling_blocks_while_scientific_payload_stays_pass(self) -> None:
+    def test_new_table_scaling_requires_review_while_scientific_payload_stays_pass(self) -> None:
         before = manuscript(TABLE)
         for wrapper in [r"\resizebox{0.1\linewidth}{!}{" + TABULAR + "}", r"\scalebox{0.1}{" + TABULAR + "}"]:
             with self.subTest(wrapper=wrapper):
                 diff = compute_content_diff(before, before.replace(TABULAR, wrapper))
                 self.assertEqual(diff["scientific_payload"]["status"], "pass")
-                self.assertEqual(diff["layout_policy"]["status"], "blocked")
+                self.assertEqual(diff["layout_policy"]["status"], "manual_review")
+                # A pending presentation policy never overrides other content/structure gates.
                 self.assertEqual(diff["action_required"], "auto_rollback")
 
     def test_graphic_scale_arguments_are_compared_but_native_width_is_allowed(self) -> None:
         image = r"\includegraphics[width=0.8\linewidth]{plot.pdf}"
         before = manuscript(image)
         after = manuscript(r"\scalebox{0.1}[0.2]{" + image + "}")
-        self.assertEqual(compare_layout_policy(before, after)["status"], "blocked")
-        self.assertEqual(compare_layout_policy(after, after.replace("{0.1}", "{0.2}"))["status"], "blocked")
+        self.assertEqual(compare_layout_policy(before, after)["status"], "manual_review")
+        self.assertEqual(compare_layout_policy(after, after.replace("{0.1}", "{0.2}"))["status"], "manual_review")
         self.assertEqual(compare_layout_policy(before, before.replace("0.8", "0.7"))["status"], "pass")
 
     def test_existing_violations_and_their_removal_are_allowed(self) -> None:
         scaled = manuscript(TABLE.replace(TABULAR, r"\resizebox{0.2\linewidth}{!}{" + TABULAR + "}"))
         self.assertEqual(compare_layout_policy(scaled, scaled + "% a comment\n")["status"], "pass")
         self.assertEqual(compare_layout_policy(scaled, manuscript(TABLE))["status"], "pass")
-        self.assertEqual(compare_layout_policy(scaled, scaled.replace("0.2", "0.1"))["status"], "blocked")
+        self.assertEqual(compare_layout_policy(scaled, scaled.replace("0.2", "0.1"))["status"], "manual_review")
 
     def test_comments_literals_definitions_and_control_symbols_preserve_offsets(self) -> None:
         inactive = (
@@ -71,7 +72,7 @@ class LayoutPolicyTest(unittest.TestCase):
 
     def test_bounded_pagination_and_spacing_require_policy_evidence(self) -> None:
         for command in [r"\newpage", r"\pagebreak", r"\pagebreak[4]"]:
-            self.assertEqual(compare_layout_policy("", command)["status"], "blocked")
+            self.assertEqual(compare_layout_policy("", command)["status"], "manual_review")
             self.assertEqual(compare_layout_policy("", command, bounded_layout=False)["status"], "pass")
         self.assertEqual(compare_layout_policy("", r"\pagebreak[2]")["status"], "pass")
         for command in [r"\clearpage", r"\vspace{-0.3em}", r"\vspace{1cm}", r"\vspace{\unknownskip}"]:
@@ -88,7 +89,7 @@ class LayoutPolicyTest(unittest.TestCase):
             "command": "vspace", "arguments": ["-0.3em"],
             "evidence": {"source": "host_review", "reason": "checked a local section gap", "scope": "local", "visual_inspected": True, "page_images": ["page_003.png"]},
         }
-        self.assertEqual(compare_layout_policy("", source, approvals=[approval], file="sections/results.tex")["status"], "pass")
+        self.assertEqual(compare_layout_policy("", source, approvals=[approval], file="sections/results.tex")["status"], "manual_review")
         for changed in [source.replace("0.3", "0.6"), "\n" + source, source + r"\newpage"]:
             self.assertNotEqual(compare_layout_policy("", changed, approvals=[approval], file="sections/results.tex")["status"], "pass")
         spoof = {**approval, "evidence": {**approval["evidence"], "source": "vlm"}}
@@ -100,7 +101,7 @@ class LayoutPolicyTest(unittest.TestCase):
             "command": "clearpage", "arguments": [],
             "evidence": {"source": "host_review", "reason": "confirmed body float in references", "scope": "endmatter", "endmatter_intrusion": True, "visual_inspected": True, "page_images": ["page_008.png"]},
         }
-        self.assertEqual(compare_layout_policy("", r"\clearpage", file="main.tex", approvals=[approval])["status"], "pass")
+        self.assertEqual(compare_layout_policy("", r"\clearpage", file="main.tex", approvals=[approval])["status"], "manual_review")
         del approval["evidence"]["endmatter_intrusion"]
         self.assertEqual(compare_layout_policy("", r"\clearpage", file="main.tex", approvals=[approval])["status"], "manual_review")
 
@@ -115,7 +116,7 @@ class LayoutPolicyTest(unittest.TestCase):
         self.assertEqual(diff["scientific_payload"]["status"], "pass")
         self.assertEqual(diff["layout_policy"]["status"], "pass")
 
-    def test_executor_restores_policy_failure_bytes_without_calling_it_scientific_damage(self) -> None:
+    def test_executor_retains_positive_scaling_for_explicit_review_without_scientific_damage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             tex = root / "main.tex"
@@ -128,13 +129,15 @@ class LayoutPolicyTest(unittest.TestCase):
                 return {"status": "success", "changes": [{"success": True, "defect_id": "D2"}], "unresolved": []}
             with mock.patch("repair_plan_executor.execute_overflow_candidates", side_effect=pseudo_fix):
                 report = execute_repair_plan(str(plan), str(tex), str(root / "report.json"))
-            self.assertEqual(report["status"], "failed")
-            self.assertEqual(report["rollback_reason"], "layout_policy_violation")
+            self.assertEqual(report["status"], "manual_review")
+            self.assertFalse(report["success"])
+            self.assertNotIn("rollback_reason", report)
             self.assertEqual(report["content_integrity"]["diff"]["scientific_payload"]["status"], "pass")
-            self.assertTrue(report["layout_policy"]["rollback_performed"])
-            self.assertEqual(tex.read_bytes(), original)
+            self.assertFalse(report["layout_policy"]["rollback_performed"])
+            self.assertIn(r"\resizebox{0.1\linewidth}", tex.read_text(encoding="utf-8"))
+            self.assertEqual(json.loads((root / "report.json").read_text(encoding="utf-8"))["status"], "manual_review")
 
-    def test_executor_policy_checks_changed_include_and_rolls_it_back(self) -> None:
+    def test_executor_policy_keeps_changed_include_pending_for_explicit_review(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             main = root / "main.tex"
@@ -145,9 +148,11 @@ class LayoutPolicyTest(unittest.TestCase):
             originals = {main: main.read_bytes(), include: original}
             include.write_text(TABLE.replace(TABULAR, r"\scalebox{0.1}{" + TABULAR + "}"), encoding="utf-8")
             report = _enforce_structure_integrity(main_tex=str(main), original_tex=main.read_text(encoding="utf-8"), report={"status": "success", "applied_count": 1}, original_sources=originals)
-            self.assertEqual(report["status"], "failed")
+            self.assertEqual(report["status"], "manual_review")
+            self.assertFalse(report["success"])
             self.assertEqual(report["layout_policy"]["findings"][0]["file"], "table.tex")
-            self.assertEqual(include.read_bytes(), original)
+            self.assertFalse(report["layout_policy"]["rollback_performed"])
+            self.assertIn(r"\scalebox{0.1}", include.read_text(encoding="utf-8"))
 
     def test_layout_executor_rejects_small_ordinary_prose_claim_flip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -269,7 +274,8 @@ class LiveLayoutPolicyTest(unittest.TestCase):
                 self.assertEqual(make_decision(state, {"defects": []}, False, None)["decision"], "DONE")
                 include.write_text(TABLE.replace(TABULAR, r"\resizebox{0.1\linewidth}{!}{" + TABULAR + "}"), encoding="utf-8")
                 decision = make_decision(state, {"defects": []}, False, None)
-                self.assertEqual(decision["decision"], "BLOCKED")
+                self.assertEqual(decision["decision"], "CONTINUE")
+                self.assertEqual(decision["checks"]["layout_policy"]["status"], "manual_review")
                 self.assertFalse(decision["gates_passed"]["layout_policy"])
                 self.assertEqual(decision["checks"]["layout_policy"]["findings"][0]["file"], "paper/table.tex")
                 include.unlink()

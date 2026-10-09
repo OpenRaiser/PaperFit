@@ -104,6 +104,18 @@ class VisibilityReviewTest(unittest.TestCase):
             result = make_decision(state, {'defects': []}, False, None)
         self.assertEqual(result['decision'], 'DONE')
 
+    def test_explicit_external_pdf_is_measured_without_approving_crop(self):
+        self.accept()
+        child = self.root / 'child'; child.mkdir()
+        report = review_pdf_visibility(self.pdf, root=child, reviews_path=self.reviews,
+                                       allow_external_measurement=True)
+        self.assertTrue(report['checked'])
+        self.assertEqual(report['artifact_location'], 'external_explicit_pdf')
+        self.assertEqual(report['review_report_status'], 'external_measurement_only')
+        self.assertEqual(report['reviewed_finding_count'], 0)
+        self.assertFalse(report['pass'])
+        self.assertEqual(report['pdf_sha256'], sha256(self.pdf))
+
     def test_no_pdf_or_external_pdf_is_unavailable(self):
         self.assertFalse(review_pdf_visibility(self.root/'missing.pdf', root=self.root)['pass'])
         self.assertFalse(review_pdf_visibility(self.pdf, root=self.root/'child')['pass'])

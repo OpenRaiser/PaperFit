@@ -65,13 +65,13 @@ class BodyFontLayoutPolicyTests(unittest.TestCase):
         after = manuscript(r"\small " + PROSE + TABLE)
         self.assertEqual(compare_layout_policy(before, after)["status"], "blocked")
 
-    def test_body_fontsize_needs_review_without_a_template_font_baseline(self):
+    def test_body_fontsize_is_hard_blocked_without_a_template_font_baseline(self):
         before = manuscript(PROSE)
         after = manuscript(r"\fontsize{9}{11}\selectfont " + PROSE)
         report = compare_layout_policy(before, after)
-        self.assertEqual(report["status"], "manual_review")
+        self.assertEqual(report["status"], "blocked")
         self.assertEqual(report["findings"][0]["rule"], "body_font_size")
-        self.assertEqual(compute_content_diff(before, after, layout_only=True)["action_required"], "manual_review")
+        self.assertEqual(compute_content_diff(before, after, layout_only=True)["action_required"], "auto_rollback")
 
     def test_zero_or_negative_fontsize_is_not_table_typography(self):
         for size in ("0", "-2"):
@@ -140,7 +140,7 @@ class BodyFontLayoutPolicyTests(unittest.TestCase):
         approval = {**{key: finding[key] for key in ("file", "line", "command", "arguments")},
                     "approved": True, "evidence": {"source": "host_review", "reason": "all affected pages reviewed",
                                                   "scope": "local", "visual_inspected": True, "page_images": ["page_001.png"]}}
-        self.assertEqual(compare_layout_policy("", command, file="main.tex", approvals=[approval])["status"], "pass")
+        self.assertEqual(compare_layout_policy("", command, file="main.tex", approvals=[approval])["status"], "manual_review")
         self.assertEqual(compare_layout_policy("", command.replace("-2pt", "-3pt"), file="main.tex", approvals=[approval])["status"], "manual_review")
         body = manuscript(r"\small " + PROSE)
         finding = compare_layout_policy(manuscript(PROSE), body, file="main.tex")["findings"][0]

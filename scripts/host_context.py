@@ -274,7 +274,8 @@ def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path |
     selected_pdf = pdf.resolve() if pdf is not None else main.with_suffix('.pdf')
     visibility = bind_visibility_to_current_source(
         review_pdf_visibility(selected_pdf, root=root,
-                              reviews_path=data_dir / 'pdf_visibility_reviews.json'), freshness)
+                              reviews_path=data_dir / 'pdf_visibility_reviews.json',
+                              allow_external_measurement=pdf is not None), freshness)
     layout_profile = profile_pdf_layout(selected_pdf)
     layout_profile['applicable_to_current_source'] = (
         visibility.get('applicable_to_current_source')

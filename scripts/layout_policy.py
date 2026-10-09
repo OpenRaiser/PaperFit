@@ -7,12 +7,15 @@ are separate caller evidence and are never inferred from a VLM finding or commen
 from __future__ import annotations
 
 from collections import Counter
+import argparse
+import json
+import math
 import hashlib
 from pathlib import Path
 import re
 from typing import Any, Iterable
 
-from source_map import group, line_at, masked_tex
+from source_map import group, line_at, masked_tex, within
 import scientific_integrity as scientific
 
 _COMMAND = re.compile(r"\\(resizebox|scalebox|newpage|clearpage|pagebreak|vspace)(?![A-Za-z@])")
@@ -214,6 +217,18 @@ def _body_presentation_operations(source: str, active: str) -> list[dict[str, An
     envs = scientific._envs(active)
     groups = _groups(active)
     shadowed_fonts = _font_redefinitions(source)
+    # Only a finite, standard preamble hook is bibliography-local. Unknown
+    # hook code and body font declarations keep their existing hard boundary.
+    reference_hooks = scientific.reference_font_hooks(source)
+    hook_code_ranges = []
+    for marker in re.finditer(r"\\AddToHook(?![A-Za-z@])", active):
+        key = group(active, marker.end())
+        if not key:
+            continue
+        optional = group(active, key[1], "[", "]")
+        body = group(active, optional[1] if optional else key[1])
+        if body:
+            hook_code_ranges.append((key[1], body[1]))
     operations: list[dict[str, Any]] = []
     index = 0
     while index < len(active):
@@ -226,11 +241,17 @@ def _body_presentation_operations(source: str, active: str) -> list[dict[str, An
         if name not in _FONT_COMMANDS | _REVIEW_LENGTHS | {"setlength", "addtolength", "linespread"}:
             continue
         local, scope_end = _font_context(active, start, envs, groups)
+        reference_local = any(hook["start"] <= start < hook["end"] for hook in reference_hooks)
+        opaque_hook = not reference_local and any(left <= start < right for left, right in hook_code_ranges)
+        local = local or reference_local
+        if opaque_hook:
+            local = False
         arguments: list[str] = []
         end = pos
         if name in _FONT_COMMANDS:
             lexical_end = scope_end
-            scope_end = _normal_reset_end(active, start, scope_end, envs, groups, shadowed_fonts)
+            if not opaque_hook:
+                scope_end = _normal_reset_end(active, start, scope_end, envs, groups, shadowed_fonts)
             normal_reset = scope_end < lexical_end
             if name == "fontsize":
                 first = group(active, pos)
@@ -261,7 +282,7 @@ def _body_presentation_operations(source: str, active: str) -> list[dict[str, An
                     continue
             elif local and name not in shadowed_fonts:
                 continue
-            if name not in shadowed_fonts and not local and ((normal_reset and not active[end:scope_end].strip()) or _table_only_scope(active, end, scope_end, envs)):
+            if not opaque_hook and name not in shadowed_fonts and not local and ((normal_reset and not active[end:scope_end].strip()) or _table_only_scope(active, end, scope_end, envs)):
                 continue
             affected = re.sub(r"\\(?:tiny|scriptsize|footnotesize|small|normalsize|selectfont)"
                               r"(?![A-Za-z@])", "", active[end:scope_end])
@@ -269,7 +290,7 @@ def _body_presentation_operations(source: str, active: str) -> list[dict[str, An
             operations.append(_presentation_operation(
                 source, start, end, name, arguments,
                 "opaque_font_definition" if name in shadowed_fonts else "body_font_shrink" if name in _SMALL_BODY_FONTS else "body_font_size",
-                "blocked" if name in _SMALL_BODY_FONTS and name not in shadowed_fonts else "manual_review", target))
+                "blocked" if name not in shadowed_fonts else "manual_review", target))
             continue
         register = name
         value = ""
@@ -354,7 +375,9 @@ def _operations(source: str, *, bounded_layout: bool) -> list[dict[str, Any]]:
             # extent are opaque here; do not silently mark that source clean.
             kind = "table" if _TABLE.search(body) else "graphics" if _GRAPHIC.search(body) else "unknown"
             rule = "scaled_table" if kind == "table" else "scaled_graphics" if kind == "graphics" else "opaque_scaling"
-            disposition = "blocked" if kind != "unknown" else "manual_review"
+            disposition = "manual_review"
+            if _nonpositive_scale(arguments):
+                rule, disposition = "nonpositive_scaling", "blocked"
             target, anchor_family = _target(active, match.start(), body)
         elif name == "vspace":
             amount = group(active, pos)
@@ -372,7 +395,7 @@ def _operations(source: str, *, bounded_layout: bool) -> list[dict[str, Any]]:
                 if strength[0].strip() in {"0", "1", "2", "3"}:
                     continue
             rule = "forced_page_break"
-            disposition = "manual_review" if name == "clearpage" else "blocked"
+            disposition = "manual_review"
             target = ""
         operations.append({
             "command": name + ("*" if star else ""),
@@ -400,28 +423,283 @@ def _signature(operation: dict[str, Any]) -> tuple[Any, ...]:
     return operation["command"], tuple(operation["arguments"]), operation["target"], operation.get("anchor_family", ""), operation.get("body_signature", "")
 
 
-def _approved(operation: dict[str, Any], approvals: Iterable[dict[str, Any]], file: str) -> bool:
-    # Only reviewable spacing/endmatter pagination has an evidence exception.
-    # Scaled tables/graphics and forced newpage shortcuts cannot self-approve.
-    if operation["status"] != "manual_review":
-        return False
-    for approval in approvals:
-        if not isinstance(approval, dict) or approval.get("approved") is not True:
-            continue
-        if approval.get("file", "") != file or approval.get("line") != operation["line"]:
-            continue
-        if approval.get("command") != operation["command"] or approval.get("arguments") != operation["arguments"]:
-            continue
-        evidence = approval.get("evidence")
-        if not isinstance(evidence, dict) or evidence.get("source") != "host_review" or not evidence.get("reason"):
-            continue
-        if evidence.get("visual_inspected") is not True or not evidence.get("page_images"):
-            continue
-        if operation["rule"] in {"restricted_spacing", "negative_layout_spacing", "body_line_compression"} and evidence.get("scope") == "local":
-            return True
-        if operation["command"] == "clearpage" and evidence.get("scope") == "endmatter" and evidence.get("endmatter_intrusion") is True:
+_REVIEW_BINDING_SCHEMA = "paperfit.layout_review_binding.v1"
+_REVIEW_REQUEST_SCHEMA = "paperfit.layout_policy_review.v1"
+_REVIEW_ARTIFACT_CHECKS = {
+    "pdf_exists", "pdf_not_older_than_source_set", "page_images_exist",
+    "pdf_page_count_available", "page_images_complete", "page_images_readable",
+    "page_images_not_older_than_pdf",
+}
+
+
+def _nonpositive_scale(arguments: list[str]) -> bool:
+    """Reject explicit disappearing/mirrored content; opaque expressions stay reviewable."""
+    for argument in arguments:
+        match = re.fullmatch(
+            r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
+            r"(?:pt|bp|pc|cm|mm|in|em|ex|sp|\\[A-Za-z@]+)?", argument)
+        if match and (not math.isfinite(float(match[1])) or float(match[1]) <= 0):
             return True
     return False
+
+
+def _supported_scale_arguments(operation: dict[str, Any]) -> bool:
+    """Unknown TeX factors cannot obtain a positivity exception from a boolean."""
+    values = operation["arguments"]
+    command = operation["command"].rstrip("*")
+    if command == "scalebox":
+        return bool(values) and all(re.fullmatch(r"\+?(?:\d+(?:\.\d*)?|\.\d+)", value)
+                                    and math.isfinite(float(value)) and float(value) > 0
+                                    for value in values)
+    native = {"\\linewidth", "\\textwidth", "\\columnwidth", "\\textheight",
+              "\\paperwidth", "\\paperheight", "\\width", "\\height", "\\totalheight"}
+    if command != "resizebox" or len(values) != 2 or values == ["!", "!"]:
+        return False
+    for value in values:
+        if value == "!":
+            continue
+        if value in native:
+            continue
+        literal = re.fullmatch(r"(\+?(?:\d+(?:\.\d*)?|\.\d+))(pt|bp|pc|cm|mm|in|em|ex|sp|\\[A-Za-z@]+)", value)
+        if not literal or not math.isfinite(float(literal[1])) or float(literal[1]) <= 0:
+            return False
+        if literal[2].startswith("\\") and literal[2] not in native:
+            return False
+    return True
+
+
+def _relative_path(root: Path, value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("artifact path unavailable")
+    path = (root / value).resolve()
+    if not within(path, root):
+        raise ValueError("artifact path outside project")
+    return path.relative_to(root).as_posix()
+
+
+def _valid_hash(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _file_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _source_identity(root: Path, files: Any) -> dict[str, str]:
+    if not isinstance(files, list) or not files:
+        raise ValueError("complete source inventory unavailable")
+    identity: dict[str, str] = {}
+    for item in files:
+        if not isinstance(item, dict) or not _valid_hash(item.get("sha256")):
+            raise ValueError("source inventory hash unavailable")
+        path = _relative_path(root, item.get("path"))
+        if path in identity:
+            raise ValueError("duplicate source inventory path")
+        identity[path] = item["sha256"]
+    return identity
+
+
+def collect_layout_review_binding(
+    project_root: Path, *, main_tex: str, page_images_dir: str,
+    compile_journal: str = "data/compile/journal.jsonl",
+) -> dict[str, Any]:
+    """Read current evidence for a host review; never compile, render, or approve.
+
+    Only the canonical main.tex-neighbor PDF and latest native compile_result.v2
+    journal entry with unchanged same-attempt sources and imported-input hashes
+    is supported. All project resources in the recorder are checked. Isolated
+    build receipts and older unbound journal entries remain unavailable.
+    """
+    from runtime_artifacts import collect_artifact_manifest
+    from runtime_snapshots import discover_source_files
+    from compile_inputs import live_compile_inputs
+
+    root = Path(project_root).resolve()
+    try:
+        main = _relative_path(root, main_tex)
+        pages_dir = _relative_path(root, page_images_dir)
+        journal = _relative_path(root, compile_journal)
+        _relative_path(root, str((root / main).with_suffix(".pdf")))
+        # Do not follow an artifact/source symlink to a different project.
+        for source in discover_source_files(root, main):
+            _relative_path(root, str(source))
+        for page in (root / pages_dir).glob("page_*.png"):
+            _relative_path(root, str(page))
+        live = collect_artifact_manifest(root, main, {"page_images_dir": pages_dir})
+        checks = live["freshness"]["checks"]
+        blocked = sorted(name for name in _REVIEW_ARTIFACT_CHECKS
+                         if checks.get(name, {}).get("pass") is not True)
+        if blocked:
+            raise ValueError("current artifact checks failed: " + ", ".join(blocked))
+        artifacts = live["artifacts"]
+        source_set = _source_identity(root, artifacts["source_set"].get("files"))
+        journal_path = root / journal
+        if not journal_path.is_file() or journal_path.stat().st_size > 32 * 1024 * 1024:
+            raise ValueError("current compile journal unavailable")
+        journal_bytes = journal_path.read_bytes()
+        lines = journal_bytes.decode("utf-8-sig").splitlines()
+        if not lines or not lines[-1].strip():
+            # A trailing newline is removed by splitlines(); an empty final row
+            # is not skipped to fish out an earlier successful attempt.
+            raise ValueError("latest compile attempt unavailable")
+        attempt = json.loads(lines[-1])
+        if not isinstance(attempt, dict) or attempt.get("schema_version") != "compile_result.v2":
+            raise ValueError("latest compile attempt schema unsupported")
+        if (attempt.get("success") is not True
+                or type(attempt.get("returncode")) is not int or attempt["returncode"] != 0
+                or attempt.get("timed_out") is not False
+                or attempt.get("pdf_fresh") is not True
+                or attempt.get("restored_baseline_pdf") is True
+                or attempt.get("partial_pdf_available") is True):
+            raise ValueError("latest compile attempt is not a successful fresh build")
+        pdf = artifacts["pdf"]
+        if (_relative_path(root, attempt.get("main_tex")) != main
+                or _relative_path(root, attempt.get("pdf_path")) != pdf["path"]
+                or attempt.get("pdf_sha256") != pdf["sha256"]
+                or type(attempt.get("page_count")) is not int
+                or attempt["page_count"] != pdf["page_count"]):
+            raise ValueError("latest compile attempt does not match current PDF")
+        fingerprint = attempt.get("source_fingerprint")
+        if not isinstance(fingerprint, dict) or not fingerprint:
+            raise ValueError("latest compile attempt has no same-attempt source hashes")
+        compiled_source = _source_identity(root, [
+            {"path": path, "sha256": digest} for path, digest in fingerprint.items()
+        ])
+        before_fingerprint = attempt.get("source_fingerprint_before")
+        if not isinstance(before_fingerprint, dict) or not before_fingerprint:
+            raise ValueError("latest compile attempt has no pre-build source hashes")
+        before_source = _source_identity(root, [
+            {"path": path, "sha256": digest} for path, digest in before_fingerprint.items()
+        ])
+        if attempt.get("source_unchanged_during_compile") is not True or before_source != compiled_source:
+            raise ValueError("sources changed during latest compile attempt")
+        if compiled_source != source_set:
+            raise ValueError("current sources differ from compiled source inventory")
+        resources = attempt.get("compile_inputs")
+        if (not isinstance(resources, dict)
+                or resources.get("schema") != "compile_input_binding.v1"
+                or resources.get("bound") is not True
+                or resources.get("unavailable") != []
+                or resources.get("missing_prebuild_inputs") != []):
+            raise ValueError("latest compile attempt has no complete bound imported-input receipt")
+        imported_sets = []
+        for phase in ("before", "after"):
+            values = resources.get(phase)
+            if not isinstance(values, dict) or not values:
+                raise ValueError("compiled imported-input inventory unavailable: " + phase)
+            imported_sets.append(_source_identity(root, [
+                {"path": path, "sha256": digest} for path, digest in values.items()
+            ]))
+        if imported_sets[0] != imported_sets[1]:
+            raise ValueError("imported project resources changed during latest compile attempt")
+        recorder = _relative_path(root, resources.get("fls_path"))
+        canonical_recorder = _relative_path(root, str((root / main).with_suffix(".fls")))
+        if recorder != canonical_recorder or not _valid_hash(resources.get("fls_sha256")):
+            raise ValueError("latest compile recorder identity unavailable or unsupported")
+        imported_live = live_compile_inputs(root, root / main)
+        if imported_live.get("unavailable") != []:
+            raise ValueError("current imported project resources unavailable")
+        current_files = imported_live.get("files")
+        if not isinstance(current_files, dict) or not current_files:
+            raise ValueError("current imported project inventory unavailable")
+        current_inputs = _source_identity(root, [
+            {"path": path, "sha256": digest} for path, digest in current_files.items()
+        ])
+        if (_relative_path(root, imported_live.get("fls_path")) != recorder
+                or imported_live.get("fls_sha256") != resources["fls_sha256"]
+                or current_inputs != imported_sets[1]):
+            raise ValueError("current recorder or imported project resources differ from compiled inputs")
+        page_set = artifacts["page_images"]
+        binding = {
+            "schema_version": _REVIEW_BINDING_SCHEMA,
+            "main_tex": main, "page_images_dir": pages_dir, "compile_journal": journal,
+            "source_set": [{"path": path, "sha256": digest}
+                           for path, digest in sorted(source_set.items())],
+            "pdf": {name: pdf[name] for name in ("path", "sha256", "page_count")},
+            "page_images": {
+                "count": page_set["count"], "aggregate_sha256": page_set["aggregate_sha256"],
+                "pages": [{name: page[name] for name in ("path", "sha256", "page_number")}
+                          for page in page_set["pages"]],
+            },
+            "imported_inputs": {
+                "files": [{"path": path, "sha256": digest}
+                          for path, digest in sorted(current_inputs.items())],
+                "fls_path": recorder, "fls_sha256": resources["fls_sha256"],
+                "scope": "Imported project resources and reachable source databases; installed external dependencies excluded.",
+            },
+            "compile_evidence": {
+                "path": journal, "sha256": hashlib.sha256(journal_bytes).hexdigest(),
+                "attempt_id": attempt.get("attempt_id"),
+            },
+        }
+        return {"status": "available", "binding": binding, "blocking_checks": []}
+    except (OSError, ValueError, KeyError, TypeError, UnicodeError) as error:
+        return {"status": "unavailable", "binding": None, "blocking_checks": [str(error)]}
+
+
+def _exact_operation(operation: dict[str, Any], file: str) -> dict[str, Any]:
+    return {"file": file, **{key: operation.get(key) for key in (
+        "command", "arguments", "rule", "line", "start_offset", "end_offset",
+        "source", "target", "anchor_family", "body_signature") if key in operation}}
+
+
+def _approved(
+    operation: dict[str, Any], approval: dict[str, Any], *, file: str,
+    repaired: str, project_root: Path | None, review_binding: dict[str, Any] | None,
+) -> tuple[bool, str]:
+    if operation["status"] != "manual_review":
+        return False, "hard_policy_block_cannot_be_approved"
+    reviewable = {
+        "restricted_spacing", "negative_layout_spacing", "body_line_compression",
+        "forced_page_break", "scaled_table", "scaled_graphics",
+    }
+    if operation["rule"] not in reviewable:
+        return False, "operation_requires_separate_review"
+    if operation["rule"] in {"scaled_table", "scaled_graphics"} and not _supported_scale_arguments(operation):
+        return False, "opaque_scale_arguments_require_separate_review"
+    if approval.get("file") != file or approval.get("line") != operation["line"]:
+        return False, "operation_anchor_does_not_match"
+    if approval.get("command") != operation["command"] or approval.get("arguments") != operation["arguments"]:
+        return False, "operation_arguments_do_not_match"
+    evidence = approval.get("evidence")
+    if (not isinstance(evidence, dict) or evidence.get("source") != "host_review"
+            or not isinstance(evidence.get("reason"), str) or not evidence["reason"].strip()
+            or evidence.get("visual_inspected") is not True
+            or evidence.get("all_pages_inspected") is not True):
+        return False, "explicit_full_document_host_review_required"
+    if approval.get("exact_operation") != _exact_operation(operation, file):
+        return False, "exact_operation_binding_missing_or_changed"
+    if project_root is None or not review_binding or review_binding.get("status") != "available":
+        return False, "current_compile_and_artifact_binding_unavailable"
+    if evidence.get("binding") != review_binding["binding"]:
+        return False, "source_pdf_page_or_compile_binding_changed"
+    try:
+        root = Path(project_root).resolve()
+        path = root / _relative_path(root, file)
+        if path.read_text(encoding="utf-8", errors="surrogateescape") != repaired:
+            return False, "comparison_source_does_not_match_current_file"
+    except (OSError, ValueError):
+        return False, "current_source_unavailable"
+    scope = evidence.get("scope")
+    if operation["rule"] in {"restricted_spacing", "negative_layout_spacing", "body_line_compression"}:
+        return (True, "source_bound_host_review") if scope == "local" else (False, "local_scope_required")
+    if operation["rule"] == "forced_page_break":
+        if scope == "endmatter" and operation["command"] == "clearpage" and evidence.get("endmatter_intrusion") is True:
+            return True, "source_bound_host_review"
+        if scope == "pagination" and evidence.get("no_blank_padding") is True:
+            return True, "source_bound_host_review"
+        return False, "content_flow_pagination_review_required"
+    if operation["rule"] in {"scaled_table", "scaled_graphics"}:
+        expected = {"table"} if operation["rule"] == "scaled_table" else {"figure", "graphics"}
+        if scope in expected and evidence.get("readability_confirmed") is True:
+            return True, "source_bound_host_review"
+        return False, "rendered_readability_review_required"
+    return False, "operation_requires_separate_review"
+
 
 
 def compare_layout_policy(
@@ -431,16 +709,37 @@ def compare_layout_policy(
     bounded_layout: bool = True,
     approvals: Iterable[dict[str, Any]] = (),
     file: str = "",
+    project_root: Path | None = None,
+    review_context: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Inspect newly introduced operations or changed scale/spacing arguments."""
     prior = Counter(_signature(operation) for operation in _operations(original, bounded_layout=bounded_layout))
+    approvals = [approval for approval in approvals if isinstance(approval, dict) and approval.get("approved") is True]
+    review_binding = None
+    if approvals and project_root is not None and isinstance(review_context, dict):
+        try:
+            review_binding = collect_layout_review_binding(project_root, **review_context)
+        except TypeError:
+            review_binding = {"status": "unavailable", "binding": None, "blocking_checks": ["review context incomplete or unsupported"]}
     findings: list[dict[str, Any]] = []
+    approved_operations: list[dict[str, Any]] = []
+    approval_evaluations: list[dict[str, Any]] = []
     for operation in _operations(repaired, bounded_layout=bounded_layout):
         signature = _signature(operation)
         if prior[signature]:
             prior[signature] -= 1
             continue
-        if _approved(operation, approvals, file):
+        matched = False
+        for approval in approvals:
+            if approval.get("file") != file or approval.get("line") != operation["line"] or approval.get("command") != operation["command"]:
+                continue
+            accepted, reason = _approved(operation, approval, file=file, repaired=repaired, project_root=project_root, review_binding=review_binding)
+            approval_evaluations.append({"exact_operation": _exact_operation(operation, file), "approved": accepted, "reason": reason})
+            if accepted:
+                approved_operations.append({"exact_operation": _exact_operation(operation, file), "evidence": approval["evidence"]})
+                matched = True
+                break
+        if matched:
             continue
         findings.append({**operation, "file": file, "change": "introduced_or_changed"})
     status = "blocked" if any(finding["status"] == "blocked" for finding in findings) else "manual_review" if findings else "pass"
@@ -450,6 +749,10 @@ def compare_layout_policy(
         "status": status,
         "bounded_layout": bounded_layout,
         "findings": findings,
+        "approved_operations": approved_operations,
+        "approval_evaluations": approval_evaluations,
+        "review_binding_status": review_binding["status"] if review_binding else "not_provided",
+        "binding_blocking_checks": review_binding["blocking_checks"] if review_binding else [],
         "blocking_count": sum(finding["status"] == "blocked" for finding in findings),
         "review_count": sum(finding["status"] == "manual_review" for finding in findings),
         "scope_note": "Static policy diff; does not establish scientific preservation or visual quality.",
@@ -464,6 +767,8 @@ def combine_policy_reports(reports: Iterable[dict[str, Any]]) -> dict[str, Any]:
     return {
         "schema_version": "1.0",
         "checked": all(report.get("checked") is True for report in reports),
+        "approved_operations": [item for report in reports for item in report.get("approved_operations", [])],
+        "approval_evaluations": [item for report in reports for item in report.get("approval_evaluations", [])],
         "status": "blocked" if any(f["status"] == "blocked" for f in findings) else "manual_review" if findings else "pass",
         "findings": findings,
         "blocking_count": sum(f["status"] == "blocked" for f in findings),
@@ -472,13 +777,15 @@ def combine_policy_reports(reports: Iterable[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def snapshot_source_edit_checks(project_root: Path, rollback_target: str | Path, *, approvals: Iterable[dict[str, Any]] = ()) -> dict[str, Any]:
+def snapshot_source_edit_checks(project_root: Path, rollback_target: str | Path, *, approvals: Iterable[dict[str, Any]] = (), review_context: dict[str, str] | None = None, source_reviews: Iterable[dict[str, Any]] = ()) -> dict[str, Any]:
     """Read a verified baseline once for live policy and layout-only prose checks."""
     from runtime_snapshots import _resolve_backup_file, load_snapshot_manifest, resolve_manifest_path, validate_snapshot_manifest
     from layout_prose_integrity import compare_layout_prose
     from scientific_integrity import scientific_payload_diff
+    from source_review import apply_source_review
 
     root = project_root.resolve()
+    source_reviews = list(source_reviews)
     try:
         manifest_path = resolve_manifest_path(root, rollback_target)
         manifest = load_snapshot_manifest(root, rollback_target)
@@ -490,6 +797,7 @@ def snapshot_source_edit_checks(project_root: Path, rollback_target: str | Path,
         reports = []
         prose_reports = []
         scientific_reports = []
+        source_review_decisions = []
         changed_files = []
         for item in manifest.get("files", []):
             relative = str(item.get("path") or "")
@@ -505,22 +813,33 @@ def snapshot_source_edit_checks(project_root: Path, rollback_target: str | Path,
                 changed_files.append(relative)
             reports.append(compare_layout_policy(
                 original, repaired,
-                file=relative, approvals=approvals,
+                file=relative, approvals=approvals, project_root=root, review_context=review_context,
             ))
             if original == repaired:
                 prose_reports.append({"file": relative, "checked": True, "status": "pass", "comparison": "unchanged_source"})
                 scientific_reports.append({"file": relative, "checked": True, "status": "pass", "comparison": "unchanged_source"})
             else:
-                prose_reports.append({"file": relative, **compare_layout_prose(original, repaired)})
-                scientific_reports.append({"file": relative, **scientific_payload_diff(original, repaired)})
+                prose_report = compare_layout_prose(original, repaired)
+                science_report = scientific_payload_diff(original, repaired)
+                matching_reviews = [review for review in source_reviews if isinstance(review, dict) and review.get("file") == relative]
+                science_report, prose_report, decision = apply_source_review(
+                    original, repaired, project_root=root, file=relative,
+                    review=matching_reviews[0] if len(matching_reviews) == 1 else None,
+                    scientific=science_report, prose=prose_report,
+                )
+                if len(matching_reviews) > 1:
+                    decision = {**decision, "checked": True, "status": "manual_review", "reason": "multiple source reviews for the same file"}
+                source_review_decisions.append({"file": relative, **decision})
+                prose_reports.append({"file": relative, **prose_report})
+                scientific_reports.append({"file": relative, **science_report})
         report = combine_policy_reports(reports)
         report["rollback_target"] = str(rollback_target)
         prose_findings = [item for item in prose_reports if item.get("status") != "pass"]
         prose_checked = bool(prose_reports) and all(item.get("checked") is True for item in prose_reports)
-        prose = {"checked": prose_checked, "status": "manual_review" if not prose_checked else "blocked" if prose_findings else "pass", "findings": prose_findings}
+        prose = {"checked": prose_checked, "status": "blocked" if any(item.get("status") in {"failed", "blocked"} for item in prose_reports) else "manual_review" if not prose_checked or prose_findings else "pass", "findings": prose_findings, "file_reports": prose_reports}
         scientific_findings = [item for item in scientific_reports if item.get("status") != "pass"]
         scientific_checked = bool(scientific_reports) and all(item.get("checked") is True for item in scientific_reports)
-        scientific = {"checked": scientific_checked, "status": "manual_review" if not scientific_checked else "blocked" if scientific_findings else "pass", "findings": scientific_findings}
+        scientific = {"checked": scientific_checked, "status": "blocked" if any(item.get("status") in {"failed", "blocked"} for item in scientific_reports) else "manual_review" if not scientific_checked or scientific_findings else "pass", "findings": scientific_findings, "file_reports": scientific_reports}
         channels = [report, prose, scientific]
         return {
             "checked": all(channel.get("checked") is True for channel in channels),
@@ -530,6 +849,7 @@ def snapshot_source_edit_checks(project_root: Path, rollback_target: str | Path,
             "scientific_payload": scientific,
             "changed_files": changed_files,
             "files_checked": len(reports),
+            "source_review_decisions": source_review_decisions,
             "rollback_target": str(rollback_target),
         }
     except (OSError, ValueError, KeyError, TypeError) as error:
@@ -537,6 +857,110 @@ def snapshot_source_edit_checks(project_root: Path, rollback_target: str | Path,
         return {**unavailable, "layout_policy": dict(unavailable), "layout_prose": dict(unavailable), "scientific_payload": dict(unavailable)}
 
 
-def snapshot_layout_policy(project_root: Path, rollback_target: str | Path, *, approvals: Iterable[dict[str, Any]] = ()) -> dict[str, Any]:
+def snapshot_layout_policy(project_root: Path, rollback_target: str | Path, *, approvals: Iterable[dict[str, Any]] = (), review_context: dict[str, str] | None = None) -> dict[str, Any]:
     """Compatibility view of the policy channel of the shared source check."""
-    return snapshot_source_edit_checks(project_root, rollback_target, approvals=approvals)["layout_policy"]
+    return snapshot_source_edit_checks(project_root, rollback_target, approvals=approvals, review_context=review_context)["layout_policy"]
+
+
+def build_layout_review_request(
+    original: str, repaired: str, *, project_root: Path, main_tex: str,
+    page_images_dir: str, file: str,
+    compile_journal: str = "data/compile/journal.jsonl",
+) -> dict[str, Any]:
+    """Produce an unsigned request for actual full-PDF host review, not approval."""
+    context = {"main_tex": main_tex, "page_images_dir": page_images_dir,
+               "compile_journal": compile_journal}
+    current = collect_layout_review_binding(project_root, **context)
+    policy = compare_layout_policy(original, repaired, file=file)
+    approvals = []
+    scopes = {
+        "scaled_table": "table", "scaled_graphics": "graphics",
+        "forced_page_break": "pagination", "restricted_spacing": "local",
+        "negative_layout_spacing": "local", "body_line_compression": "local",
+    }
+    for finding in policy["findings"]:
+        reviewable = finding["status"] == "manual_review" and finding["rule"] in scopes
+        if finding["rule"] in {"scaled_table", "scaled_graphics"} and not _supported_scale_arguments(finding):
+            reviewable = False
+        evidence = {
+            "source": "host_review", "reason": "", "visual_inspected": False,
+            "all_pages_inspected": False, "scope": scopes.get(finding["rule"], "unsupported"),
+            "binding": current["binding"],
+        }
+        if finding["rule"] == "forced_page_break":
+            evidence["no_blank_padding"] = False
+        if finding["rule"] in {"scaled_table", "scaled_graphics"}:
+            evidence["readability_confirmed"] = False
+        approvals.append({
+            "approved": False, "can_host_approve": reviewable,
+            "file": file, "line": finding["line"], "command": finding["command"],
+            "arguments": finding["arguments"],
+            "exact_operation": _exact_operation(finding, file), "evidence": evidence,
+        })
+    return {
+        "schema_version": _REVIEW_REQUEST_SCHEMA, "context": context, "file": file,
+        "policy": policy, "binding_status": current["status"],
+        "blocking_checks": current["blocking_checks"], "approvals": approvals,
+        "next_step": "View every current page image and the fresh PDF; explicitly fill reason and review confirmations and set approved=true only for acceptable operations, then validate. Regenerate the request after any source/build/image changes.",
+        "scope_note": "Policy approval only. Scientific/prose preservation and final goal acceptance remain independent; this command neither edits nor certifies a manuscript.",
+    }
+
+
+def _review_json(path: Path) -> dict[str, Any]:
+    if not path.is_file() or path.stat().st_size > 32 * 1024 * 1024:
+        raise ValueError("review request unavailable")
+    def unique_keys(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in items:
+            if key in value:
+                raise ValueError("duplicate review JSON key")
+            value[key] = item
+        return value
+    value = json.loads(path.read_text(encoding="utf-8-sig"), object_pairs_hook=unique_keys)
+    if not isinstance(value, dict) or value.get("schema_version") != _REVIEW_REQUEST_SCHEMA:
+        raise ValueError("unsupported review request schema")
+    if not isinstance(value.get("approvals"), list):
+        raise ValueError("review approvals unavailable")
+    return value
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Read-only, source-bound layout host review. This is not manuscript acceptance.")
+    parser.add_argument("mode", choices=("request", "validate"))
+    parser.add_argument("--root", required=True, type=Path)
+    parser.add_argument("--main-tex", required=True)
+    parser.add_argument("--file", help="Changed TeX file relative to root; defaults to main-tex.")
+    parser.add_argument("--baseline-tex", required=True, help="Preserved original/checkpoint TeX inside the project.")
+    parser.add_argument("--pages-dir", default="data/pages")
+    parser.add_argument("--compile-journal", default="data/compile/journal.jsonl")
+    parser.add_argument("--review-json", help="Generated request after explicit host review; required for validate.")
+    args = parser.parse_args(argv)
+    root = args.root.resolve()
+    try:
+        file = _relative_path(root, args.file or args.main_tex)
+        original = (root / _relative_path(root, args.baseline_tex)).read_text(encoding="utf-8", errors="surrogateescape")
+        repaired = (root / file).read_text(encoding="utf-8", errors="surrogateescape")
+        context = {"main_tex": args.main_tex, "page_images_dir": args.pages_dir,
+                   "compile_journal": args.compile_journal}
+        if args.mode == "request":
+            result = build_layout_review_request(original, repaired, project_root=root, file=file, **context)
+            exit_code = 2 if result["policy"]["status"] == "blocked" else 3 if result["policy"]["findings"] else 0
+        else:
+            if not args.review_json:
+                raise ValueError("--review-json required for validate")
+            request = _review_json(root / _relative_path(root, args.review_json))
+            result = compare_layout_policy(original, repaired, file=file, approvals=request["approvals"],
+                                           project_root=root, review_context=context)
+            result["goal_acceptance_checked"] = False
+            result["scientific_and_prose_preservation_checked"] = False
+            exit_code = 2 if result["status"] == "blocked" else 3 if result["status"] != "pass" else 0
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return exit_code
+    except (OSError, ValueError, TypeError, UnicodeError) as error:
+        print(json.dumps({"checked": False, "status": "manual_review", "reason": str(error),
+                          "goal_acceptance_checked": False}, ensure_ascii=False))
+        return 3
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
