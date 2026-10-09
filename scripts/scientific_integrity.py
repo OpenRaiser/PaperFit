@@ -164,26 +164,29 @@ def _shadowed_presentation_commands(source:str)->frozenset[str]:
  # Newly normalized controls must keep their literal invocation when the
  # source directly defines them. This is not macro expansion or alias tracing.
  names=set(shadowed_literal_url_commands(source))
+ presentation_targets=DELIMITER_SIZE_COMMANDS|LAYOUT_LENGTH_REGISTERS|TEXT_SPACE_COMMANDS|{'parbox','setlength','addtolength','begingroup','endgroup'}
  for record in _macro_definitions(source):
   target=record[1] if record[0] in {'def','gdef','edef','xdef','let'} else record[2]
   name=target.lstrip('\\')
-  if name in DELIMITER_SIZE_COMMANDS|LAYOUT_LENGTH_REGISTERS|TEXT_SPACE_COMMANDS|{'parbox','setlength','addtolength','begingroup','endgroup'}:names.add(name)
- # Register allocation/alias primitives can also replace these newly supported
- # meanings. Unknown constructed control names are not expanded: conservatively
- # keep the new controls opaque in their presence, including inherited macros.
- new_controls=TEXT_SPACE_COMMANDS|{'emergencystretch'}
+  if name in presentation_targets:names.add(name)
+ # Inspect literal targets throughout active source, including inside outer
+ # macro bodies skipped by the declaration inventory. A later invocation may
+ # activate such a nested definition. This deliberately does not expand it.
+ # Constructed names remain conservatively opaque instead of being guessed.
+ literal_definitions=REGISTER_DECLARATIONS|{'def','gdef','edef','xdef','let','newcommand','renewcommand','providecommand','DeclareRobustCommand','DeclareMathOperator'}
  i=0
  while i<len(source):
   if source[i]!='\\':i+=1;continue
   name,end=_command(source,i)
-  if name in {'csname','catcode'}:names.update(new_controls)
-  if name in REGISTER_DECLARATIONS:
+  if name in {'csname','catcode'}:names.update(presentation_targets)
+  if name in literal_definitions:
    pos=end
+   if pos<len(source) and source[pos]=='*':pos+=1
    while pos<len(source) and source[pos].isspace():pos+=1
    target,last=_group(source,pos)
    if last==pos:
     if pos<len(source) and source[pos]=='\\':target,last=_command(source,pos)
-   if target.strip().lstrip('\\') in TEXT_SPACE_COMMANDS|LAYOUT_LENGTH_REGISTERS:names.add(target.strip().lstrip('\\'))
+   if target.strip().lstrip('\\') in presentation_targets:names.add(target.strip().lstrip('\\'))
   i=end
  return frozenset(names)
 

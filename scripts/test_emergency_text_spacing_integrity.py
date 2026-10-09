@@ -84,6 +84,29 @@ class EmergencyTextSpacingIntegrityTest(unittest.TestCase):
     def test_inherited_math_space_redefinition_is_not_erased(self):
         self.assert_not_preserved(document('$a+b$', r'\def\quad{+c}'), document(r'$a\quad+b$', r'\def\quad{+c}'))
 
+    def test_nested_literal_redefinitions_shadow_spaces_stretch_and_dimension_references(self):
+        cases = ((r'\def\quad{not}', r'\quad '),
+                 (r'\gdef\qquad{not}', r'\qquad '),
+                 (r'\let\quad=\claim', r'\quad '),
+                 (r'\renewcommand{\qquad}{not}', r'\qquad '),
+                 (r'\def\emergencystretch{not}', r'\emergencystretch=2em '),
+                 (r'\newdimen \emergencystretch', r'\emergencystretch=2em '),
+                 (r'\def\linewidth{91.2pt not}', r'\emergencystretch=.1\linewidth '),
+                 (r'\let\baselineskip=\claim', r'\setlength{\emergencystretch}{\baselineskip} '),
+                 (r'\newdimen \linewidth', r'\emergencystretch=.1\linewidth '))
+        for definition, invocation in cases:
+            with self.subTest(definition=definition):
+                preamble = r'\newcommand{\activate}{' + definition + '}'
+                before = document(r'\activate ' + self.body, preamble)
+                after = document(r'\activate ' + invocation + self.body, preamble)
+                self.assert_not_preserved(before, after)
+        preamble = r'\newcommand{\activate}{\def\quad{+c}}'
+        self.assert_not_preserved(document(r'\activate $a+b$', preamble),
+                                  document(r'\activate $a\quad+b$', preamble))
+        preamble = r'\newcommand{\activate}{\def\left{+c}}'
+        self.assert_not_preserved(document(r'\activate $(a+b)$', preamble),
+                                  document(r'\activate $\left(a+b\right)$', preamble))
+
     def test_whitespace_and_comment_separated_redefinitions_are_still_shadowed(self):
         for definition in (r'\renewcommand \quad{not}', '\\renewcommand % comment\n \\quad{not}',
                            r'\newdimen \emergencystretch', '\\dimendef\n\\emergencystretch=1',
