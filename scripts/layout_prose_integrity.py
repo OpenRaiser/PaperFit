@@ -29,7 +29,7 @@ _ORDINARY_ENVS = {
     "flushleft", "flushright", "quote", "quotation",
 }
 _KNOWN_COMMANDS = (
-    scientific.FONT_DECL | scientific.RULES | scientific.TEXT_WRAPPERS
+    scientific.FONT_DECL | scientific.RULES | scientific.TEXT_WRAPPERS | scientific.TEXT_SPACE_COMMANDS
     | scientific.LAYOUT_ONE | scientific.ID_COMMANDS | scientific.PROTECTED_ARGS
     | {"begin", "end", "setlength", "addtolength", "setcounter", "captionsetup",
        "usepackage", "RequirePackage", "documentclass", "bibliographystyle",
@@ -60,6 +60,8 @@ def _declaration_spans(source: str) -> list[tuple[int, int]]:
         name, pos = scientific._command(source, index)
         if name in _DECLARATIONS:
             if pos < len(source) and source[pos] == "*":
+                pos += 1
+            while pos < len(source) and source[pos].isspace():
                 pos += 1
             _, target_end = scientific._group(source, pos)
             if target_end == pos:
@@ -194,6 +196,18 @@ def _prose_tokens(source: str) -> tuple[str, ...]:
             index += 1
             continue
         name, pos = scientific._command(body, index)
+        star = pos < len(body) and body[pos] == '*'
+        if name == 'emergencystretch' and not star:
+            end = scientific.emergency_stretch_end(body, pos, opaque_commands=shadowed)
+            if end is not None:
+                index = end
+                continue
+        if name in scientific.TEXT_SPACE_COMMANDS and name not in shadowed and not star:
+            # Standard text spaces take no argument. Keep following words,
+            # groups and signs, and do not concatenate the adjacent tokens.
+            pieces.append(' ')
+            index = pos
+            continue
         if name in {'setlength', 'addtolength'} and name not in shadowed:
             end = scientific.layout_length_end(body, pos, opaque_commands=shadowed)
             if end is not None:
@@ -208,6 +222,8 @@ def _prose_tokens(source: str) -> tuple[str, ...]:
             index = pos
             continue
         unknown = name not in _KNOWN_COMMANDS or name in shadowed
+        if name in scientific.TEXT_SPACE_COMMANDS and star:
+            unknown = True
         if name in {'begingroup', 'endgroup'}:
             unknown = True
         if name in {'nolinkurl', 'urlstyle'}:

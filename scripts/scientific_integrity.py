@@ -20,7 +20,9 @@ LAYOUT_ONE={'vspace','hspace','vskip','hskip','fontsize','linespread','color','c
 RULES={'toprule','midrule','bottomrule','hline','hlineB'}
 DELIMITER_SIZE_COMMANDS={'left','right'}|{size+suffix for size in ('big','Big','bigg','Bigg') for suffix in ('','l','r','m')}
 DELIMITER_COMMANDS={'{','}','|','lbrace','rbrace','langle','rangle','lvert','rvert','lVert','rVert','vert','Vert','lfloor','rfloor','lceil','rceil','backslash'}
-LAYOUT_LENGTH_REGISTERS={'tabcolsep','arrayrulewidth','textheight','textwidth','columnsep','columnwidth','linewidth','abovecaptionskip','belowcaptionskip','floatsep','textfloatsep','intextsep','parskip','parindent','baselineskip'}
+LAYOUT_LENGTH_REGISTERS={'tabcolsep','arrayrulewidth','textheight','textwidth','columnsep','columnwidth','linewidth','abovecaptionskip','belowcaptionskip','floatsep','textfloatsep','intextsep','parskip','parindent','baselineskip','emergencystretch'}
+TEXT_SPACE_COMMANDS={'quad','qquad'}
+REGISTER_DECLARATIONS={'newlength','newdimen','newskip','newmuskip','dimendef','skipdef','muskipdef','countdef','chardef','mathchardef','toksdef'}
 
 def _command(s:str,i:int)->Tuple[str,int]:
  m=re.match(r'\\([A-Za-z@]+|.)',s[i:],re.S)
@@ -74,9 +76,28 @@ def layout_length_end(s:str,i:int,*,opaque_commands:frozenset[str]=frozenset())-
  number=r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)'
  registers='|'.join(sorted(LAYOUT_LENGTH_REGISTERS))
  dimension=r'(?:'+number+r'\s*(?:pt|em|ex|cm|mm|in|bp|pc|dd|cc|sp)|(?:'+number+r'\s*)?\\(?:'+registers+r'))'
- if not re.fullmatch(r'\s*'+dimension+r'(?:\s+plus\s+'+dimension+r')?(?:\s+minus\s+'+dimension+r')?\s*',value):return None
+ # emergencystretch is a dimension register, not glue. Trailing plus/minus
+ # words are not part of its standard assignment and must not disappear.
+ grammar=dimension if register=='\\emergencystretch' else dimension+r'(?:\s+plus\s+'+dimension+r')?(?:\s+minus\s+'+dimension+r')?'
+ if not re.fullmatch(r'\s*'+grammar+r'\s*',value):return None
  if any(name in opaque_commands for name in re.findall(r'\\([A-Za-z@]+)',value)):return None
  return end
+
+def emergency_stretch_end(s:str,i:int,*,opaque_commands:frozenset[str]=frozenset())->int|None:
+ """End of an unshadowed primitive assignment to a literal known dimension.
+
+ Only this standard paragraph register has direct-assignment recognition.
+ Consume the dimension, never following words, signs, values or macros. Dynamic
+ expressions and unknown units/registers remain visible to the guards.
+ """
+ if 'emergencystretch' in opaque_commands:return None
+ number=r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)'
+ registers='|'.join(sorted(LAYOUT_LENGTH_REGISTERS))
+ dimension=r'(?:'+number+r'\s*(?:pt|em|ex|cm|mm|in|bp|pc|dd|cc|sp)(?![A-Za-z@])|(?:'+number+r'\s*)?\\(?:'+registers+r')(?![A-Za-z@]))'
+ value=re.match(r'\s*(?:=\s*)?'+dimension,s[i:])
+ if value is None:return None
+ if any(name in opaque_commands for name in re.findall(r'\\([A-Za-z@]+)',value.group())):return None
+ return i+value.end()
 
 def standard_group_offsets(s:str,*,opaque_commands:frozenset[str]=frozenset(),allowed_commands:frozenset[str]|None=None)->frozenset[int]:
  """Balanced standard scopes with no unknown/stateful command inside them.
@@ -94,13 +115,16 @@ def standard_group_offsets(s:str,*,opaque_commands:frozenset[str]=frozenset(),al
   if name in {'setlength','addtolength'} and not star and name not in opaque_commands:
    stop=layout_length_end(s,end,opaque_commands=opaque_commands)
    if stop is not None:i=stop;continue
+  if name=='emergencystretch' and not star:
+   stop=emergency_stretch_end(s,end,opaque_commands=opaque_commands)
+   if stop is not None:i=stop;continue
   if name=='begingroup' and not star:stack.append([i,True])
   elif name=='endgroup' and not star:
    if stack:
     start,known=stack.pop()
     if known:paired.update((start,i))
    else:unmatched=True
-  elif name in opaque_commands or (allowed_commands is not None and name not in allowed_commands) or (star and name in {'begingroup','endgroup'}):
+  elif name in opaque_commands or (allowed_commands is not None and name not in allowed_commands) or (star and name in {'begingroup','endgroup'}|TEXT_SPACE_COMMANDS):
    for scope in stack:scope[1]=False
   i=end
  # An incomplete outer scope is unsupported, including its nested pairs.
@@ -143,7 +167,24 @@ def _shadowed_presentation_commands(source:str)->frozenset[str]:
  for record in _macro_definitions(source):
   target=record[1] if record[0] in {'def','gdef','edef','xdef','let'} else record[2]
   name=target.lstrip('\\')
-  if name in DELIMITER_SIZE_COMMANDS|LAYOUT_LENGTH_REGISTERS|{'parbox','setlength','addtolength','begingroup','endgroup'}:names.add(name)
+  if name in DELIMITER_SIZE_COMMANDS|LAYOUT_LENGTH_REGISTERS|TEXT_SPACE_COMMANDS|{'parbox','setlength','addtolength','begingroup','endgroup'}:names.add(name)
+ # Register allocation/alias primitives can also replace these newly supported
+ # meanings. Unknown constructed control names are not expanded: conservatively
+ # keep the new controls opaque in their presence, including inherited macros.
+ new_controls=TEXT_SPACE_COMMANDS|{'emergencystretch'}
+ i=0
+ while i<len(source):
+  if source[i]!='\\':i+=1;continue
+  name,end=_command(source,i)
+  if name in {'csname','catcode'}:names.update(new_controls)
+  if name in REGISTER_DECLARATIONS:
+   pos=end
+   while pos<len(source) and source[pos].isspace():pos+=1
+   target,last=_group(source,pos)
+   if last==pos:
+    if pos<len(source) and source[pos]=='\\':target,last=_command(source,pos)
+   if target.strip().lstrip('\\') in TEXT_SPACE_COMMANDS|LAYOUT_LENGTH_REGISTERS:names.add(target.strip().lstrip('\\'))
+  i=end
  return frozenset(names)
 
 def _shadowed_literal_url_payload(source:str)->tuple[Any,...]:
@@ -274,7 +315,7 @@ def _math_tokens(s:str,*,opaque_commands:frozenset[str]=frozenset())->Tuple[str,
      i=k;continue
     if name=='begin':protected.append(env)
     elif protected and protected[-1]==env:protected.pop()
-   if not protected and name in {'\\','quad','qquad',',','!',';',':','enspace','thinspace','displaystyle','textstyle','scriptstyle','scriptscriptstyle'}:
+   if not protected and name not in opaque_commands and name in {'\\','quad','qquad',',','!',';',':','enspace','thinspace','displaystyle','textstyle','scriptstyle','scriptscriptstyle'}:
     i=_optional(s,j) if name=='\\' else j;continue
    if name in {'text','textnormal','textrm','textbf','textit','texttt','operatorname','mathrm'}:
     arg,end=_group(s,j)
@@ -329,6 +370,12 @@ def _strip_layout(s:str,*,text_wrappers:bool=False,opaque_commands:frozenset[str
     break
    out.append(s[i:last]);i=last;continue
   opt=_optional(s,j)
+  if name=='emergencystretch' and not star:
+   end=emergency_stretch_end(s,j,opaque_commands=opaque_commands)
+   if end is not None:i=end;continue
+  if name in TEXT_SPACE_COMMANDS and not star:
+   # These controls take no arguments: a following group remains body text.
+   out.append(' ');i=j;continue
   if name=='looseness' and not star:
    # Only the bounded literal paragraph adjustments used by A1 are layout.
    # Dynamic values and larger changes remain visible to preservation checks.
@@ -535,8 +582,28 @@ def _macro_definitions(s:str)->Tuple[Any,...]:
  while i<len(s):
   if s[i]!='\\':i+=1;continue
   name,j=_command(s,i)
+  if name in REGISTER_DECLARATIONS:
+   pos=j
+   while pos<len(s) and s[pos].isspace():pos+=1
+   target,end=_group(s,pos)
+   if end==pos:
+    if pos<len(s) and s[pos]=='\\':target_name,end=_command(s,pos);target='\\'+target_name
+   if target.strip().lstrip('\\') in TEXT_SPACE_COMMANDS|{'emergencystretch'}:
+    # Even an unused replacement of a newly normalized standard control is an
+    # unsupported declaration change requiring review. Record literal aliases;
+    # this does not evaluate register numbers or expand their value macros.
+    value='';last=end
+    if name.endswith('def'):
+     while last<len(s) and (s[last].isspace() or s[last]=='='):last+=1
+     if last<len(s) and s[last]=='\\':_,stop=_command(s,last)
+     else:
+      match=re.match(r'[+-]?\d+',s[last:]);stop=last+match.end() if match else min(last+1,len(s))
+     value=s[last:stop];last=stop
+    records.append((name,False,target.strip(),(),(value,)))
+    i=last;continue
   if name in declarations:
    star=j<len(s) and s[j]=='*';j+=int(star)
+   while j<len(s) and s[j].isspace():j+=1
    target,end=_group(s,j)
    if end==j:
     k=j

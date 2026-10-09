@@ -169,9 +169,12 @@ def semantic_hash(tex_content: str) -> str:
 
 
 def _extract_float_blocks(tex_content: str, env_name: str) -> List[str]:
+    # Share the scientific parser's explicit standard-environment inventory;
+    # rotated/starred containers must retain their counts and label family.
+    # Unknown environment names are not promoted by a substring match.
     families = {
-        'figure': {'figure', 'figure*', 'wrapfigure', 'sidewaysfigure'},
-        'table': {'table', 'table*', 'wraptable', 'sidewaystable'},
+        family: {name for name in FLOAT_ENVS if name.removesuffix('*').endswith(family)}
+        for family in ('figure', 'table')
     }
     source = active_source(tex_content)
     return [source[env['start']:env['end']] for env in _envs(source)

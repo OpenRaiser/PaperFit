@@ -8,10 +8,12 @@ try:
     from source_map import build_source_map, within
     from runtime_artifacts import collect_artifact_manifest
     from visibility_review import review_pdf_visibility
+    from pdf_layout_profile import profile_pdf_layout
 except ImportError:
     from .source_map import build_source_map, within
     from .runtime_artifacts import collect_artifact_manifest
     from .visibility_review import review_pdf_visibility
+    from .pdf_layout_profile import profile_pdf_layout
 
 def load_report(path: Path) -> tuple[dict[str, Any], str]:
     if not path.is_file():
@@ -162,7 +164,8 @@ def bind_visibility_to_current_source(visibility: dict[str, Any], freshness: dic
     return result
 
 
-def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path | None = None, limit: int = 30) -> dict[str, Any]:
+def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path | None = None,
+                       pdf: Path | None = None, limit: int = 30) -> dict[str, Any]:
     if limit < 1:
         raise ValueError("limit must be positive")
     main = main.resolve()
@@ -237,23 +240,34 @@ def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path |
     if freshness["vision_status"] != "current":
         vision["clean"] = None
     # Provider completion describes its snapshot; freshness describes this project now.
+    selected_pdf = pdf.resolve() if pdf is not None else main.with_suffix('.pdf')
     visibility = bind_visibility_to_current_source(
-        review_pdf_visibility(main.with_suffix('.pdf'), root=root,
+        review_pdf_visibility(selected_pdf, root=root,
                               reviews_path=data_dir / 'pdf_visibility_reviews.json'), freshness)
+    layout_profile = profile_pdf_layout(selected_pdf)
+    layout_profile['applicable_to_current_source'] = (
+        visibility.get('applicable_to_current_source')
+        if layout_profile.get('pdf_sha256') and layout_profile['pdf_sha256'] == visibility.get('pdf_sha256')
+        else None)
     return {
         "schema_version": "1.0", "main": sources["main"],
         "project_root": str(root), "project_root_resolution": root_resolution,
+        "selected_pdf": str(selected_pdf),
+        "pdf_selection": "explicit" if pdf is not None else "source_neighbor",
         "reports": {"action_plan": plan_status, "visual": visual_status,
                     "full_action_plan": str(data_dir / "visual_action_plan.json"),
                     "full_visual_report": str(data_dir / "visual_signal_report.json")},
         "vision": vision, "vision_source": vision_source,
         "pdf_visibility": visibility,
+        "pdf_layout_profile": layout_profile,
         "artifact_freshness": freshness,
         "source_navigation_coverage": sources["object_marker_coverage"],
         "finding_counts": {"total": len(compact), "shown": min(limit, len(compact)), "omitted": max(0, len(compact)-limit)},
         "findings": compact[:limit], "source_map": sources,
         "host_tasks": [
             "Inspect rendered pages, including pages without machine findings.",
+            "Use pdf_layout_profile to locate small type, short terminal lines and sparse text tails for actual zoomed page/source review; its observations do not authorize rejection or acceptance.",
+            "Preserve useful source/PDF checkpoints and compare the user's page objective, readability and source checks before final nomination; latest is not automatically best.",
             "Review painted-text bounds in pdf_visibility even when VLM reports no defects; intentional clipping needs current-PDF and inspected-page evidence.",
             "Review freshness blocking checks; stale or unknown vision is not a clean current PDF.",
             "Treat recommendations as evidence; verify the target before editing.",
@@ -269,10 +283,13 @@ def main() -> None:
     parser.add_argument("--main", required=True)
     parser.add_argument("--root", help="Project/compilation root; defaults to cwd when it contains main, otherwise main.parent")
     parser.add_argument("--data-dir")
+    parser.add_argument("--pdf", help="Explicit PDF from an isolated build; selection alone does not establish current-source binding")
     parser.add_argument("--limit", type=int, default=30)
     parser.add_argument("--output")
     args = parser.parse_args()
-    payload = build_host_context(Path(args.main), root=Path(args.root) if args.root else None, data_dir=Path(args.data_dir) if args.data_dir else None, limit=args.limit)
+    payload = build_host_context(Path(args.main), root=Path(args.root) if args.root else None,
+                                 data_dir=Path(args.data_dir) if args.data_dir else None,
+                                 pdf=Path(args.pdf) if args.pdf else None, limit=args.limit)
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if args.output:
         dest = Path(args.output)
