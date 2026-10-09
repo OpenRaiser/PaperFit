@@ -30,6 +30,7 @@ _ORDINARY_ENVS = {
 }
 _KNOWN_COMMANDS = (
     scientific.FONT_DECL | scientific.RULES | scientific.TEXT_WRAPPERS | scientific.TEXT_SPACE_COMMANDS
+    | scientific.ZERO_ARG_LAYOUT_COMMANDS
     | scientific.LAYOUT_ONE | scientific.LAYOUT_LENGTH_REGISTERS | scientific.ID_COMMANDS | scientific.PROTECTED_ARGS
     | {"begin", "end", "setlength", "addtolength", "setcounter", "captionsetup",
        "usepackage", "RequirePackage", "documentclass", "bibliographystyle",
@@ -117,6 +118,14 @@ def _ordinary_body(source: str) -> str:
         if env["name"] in scientific.FLOAT_ENVS | scientific.TABLE_ENVS
     ]
     spans += [(item["start"], item["end"]) for item in scientific._math_spans(active, envs)]
+    # Independently bound standard objects may leave a float for a minipage or
+    # literal group. Scientific guards now retain their ordered payload and
+    # ordinary residual words, so only these explicit complete local objects
+    # can be masked here. Unsupported/ambiguous scopes remain ordinary/opaque.
+    inventory = scientific.standard_layout_object_inventory(source)
+    spans += [(item["start"], item["end"]) for item in inventory["objects"]]
+    spans += [(item["start"], item["end"]) for item in scientific.standard_caption_declarations(source)
+              if item["supported"]]
     spans += _declaration_spans(active)
     begin = re.search(r"(?<!\\)\\begin\s*\{document\}", active)
     end = re.search(r"(?<!\\)\\end\s*\{document\}", active)
@@ -229,7 +238,7 @@ def _prose_tokens(source: str) -> tuple[str, ...]:
             index = pos
             continue
         unknown = name not in _KNOWN_COMMANDS or name in shadowed
-        if name in scientific.TEXT_SPACE_COMMANDS and star:
+        if name in scientific.TEXT_SPACE_COMMANDS | scientific.ZERO_ARG_LAYOUT_COMMANDS and star:
             unknown = True
         if name in {'begingroup', 'endgroup'}:
             unknown = True

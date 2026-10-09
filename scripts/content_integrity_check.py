@@ -27,7 +27,7 @@ from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Tuple, Set
 from datetime import datetime
 
-from scientific_integrity import TEXT_WRAPPERS, FLOAT_ENVS, _command, _group, _optional, _strip_layout, _envs, _literal_dimension, _macro_definitions, _shadowed_presentation_commands, active_source, minipage_layout_end, scientific_payload_diff
+from scientific_integrity import TEXT_WRAPPERS, FLOAT_ENVS, ZERO_ARG_LAYOUT_COMMANDS, _command, _group, _optional, _strip_layout, _envs, _literal_dimension, _macro_definitions, _shadowed_presentation_commands, active_source, minipage_layout_end, scientific_payload_diff
 from layout_policy import compare_layout_policy
 from layout_prose_integrity import compare_layout_prose
 
@@ -43,6 +43,13 @@ def _unwrap_supported_text_wrappers(text: str, *, opaque_commands: frozenset = f
             continue
         name, command_end = _command(text, i)
         star = command_end < len(text) and text[command_end] == "*"
+        if name in ZERO_ARG_LAYOUT_COMMANDS and name not in opaque_commands and not star:
+            # A standard argumentless balance control cannot consume the next
+            # grouped claim. Preserve those words for the independent legacy
+            # count/hash channel as well as the scientific and prose channels.
+            output.append(" ")
+            i = command_end
+            continue
         argument = command_end + int(star)
         argument = _optional(text, argument)
         supported = name in TEXT_WRAPPERS | {"shortstack"}
@@ -267,12 +274,14 @@ def structure_regression_reasons(diff: Dict) -> List[str]:
     restored_asset = (restoration.get("asset") if restoration.get("checked") is True
                       and restoration.get("status") == "verified" else None)
     reasons: List[str] = []
+    rearrangement = structure.get('container_rearrangement') or {}
+    logical_objects_preserved = rearrangement.get('status') == 'supported_objects_preserved'
 
-    if before.get("figure_count") != after.get("figure_count"):
+    if before.get("figure_count") != after.get("figure_count") and not logical_objects_preserved:
         reasons.append(
             f"Figure environment count changed: {before.get('figure_count')} -> {after.get('figure_count')}"
         )
-    if before.get("table_count") != after.get("table_count"):
+    if before.get("table_count") != after.get("table_count") and not logical_objects_preserved:
         reasons.append(
             f"Table environment count changed: {before.get('table_count')} -> {after.get('table_count')}"
         )
@@ -291,9 +300,9 @@ def structure_regression_reasons(diff: Dict) -> List[str]:
                              if asset != restored_asset]
     before_bibliography = before.get("bibliography") or {}
     after_bibliography = after.get("bibliography") or {}
-    if removed_figure_labels:
+    if removed_figure_labels and not logical_objects_preserved:
         reasons.append(f"Removed figure labels: {', '.join(removed_figure_labels)}")
-    if removed_table_labels:
+    if removed_table_labels and not logical_objects_preserved:
         reasons.append(f"Removed table labels: {', '.join(removed_table_labels)}")
     if removed_graphics_files:
         reasons.append(f"Removed graphics files: {', '.join(removed_graphics_files)}")
@@ -318,6 +327,49 @@ def structure_regression_reasons(diff: Dict) -> List[str]:
         )
 
     return reasons
+
+
+def _container_rearrangement(original: str, repaired: str, *, science: Dict,
+                             prose: Dict, policy: Dict) -> Dict:
+    """Do not confuse fewer containers with fewer retained scientific objects.
+
+    This narrow exemption changes only raw container/label-family diagnostics.
+    Graphics counts, bibliography flow and all independent payload/prose/policy
+    checks remain effective. Complete source ownership is not visual acceptance.
+    """
+    report = {'status': 'not_established', 'automatic_acceptance': False,
+              'visual_preservation_established': False}
+    if (science.get('checked') is not True or science.get('status') != 'pass'
+            or prose.get('checked') is not True or prose.get('status') != 'pass'
+            or policy.get('status') not in {'pass', 'manual_review'}):
+        return report
+    from scientific_integrity import standard_layout_object_inventory
+    before = standard_layout_object_inventory(original)
+    after = standard_layout_object_inventory(repaired)
+    report.update(before_complete=before.get('complete'), after_complete=after.get('complete'),
+                  before_raw_counts=before.get('raw_container_counts'),
+                  after_raw_counts=after.get('raw_container_counts'))
+    if not (before.get('checked') is True and before.get('complete') is True
+            and after.get('checked') is True and after.get('complete') is True):
+        return report
+    old = sorted((item['family'], item['label']) for item in before['objects'])
+    new = sorted((item['family'], item['label']) for item in after['objects'])
+    if not old or old != new:
+        return report
+    # Moving an object after the bibliography is still a protected flow change,
+    # including additional labels hidden by a combined outer container.
+    old_bib, new_bib = _find_bibliography_start(active_source(original)), _find_bibliography_start(active_source(repaired))
+    old_tails = {item['label'] for item in before['objects'] if old_bib is not None and item['start'] > old_bib}
+    new_tails = {item['label'] for item in after['objects'] if new_bib is not None and item['start'] > new_bib}
+    if new_tails - old_tails:
+        report['new_objects_after_bibliography'] = sorted(new_tails - old_tails)
+        return report
+    report.update(status='supported_objects_preserved', object_identities=old,
+                  before_logical_counts=before['logical_counts'], after_logical_counts=after['logical_counts'],
+                  before_source_sha256=hashlib.sha256(original.encode('utf-8')).hexdigest(),
+                  after_source_sha256=hashlib.sha256(repaired.encode('utf-8')).hexdigest(),
+                  proof_scope='Complete supported unique label/type ownership with passing independent payload and ordinary-prose checks; container grouping only, no semantic or visual quality proof.')
+    return report
 
 
 def scientific_regression_reasons(diff: Dict) -> List[str]:
@@ -665,6 +717,8 @@ def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_
         'removed_table_labels': removed_table_labels,
         'removed_graphics_files': removed_graphics_files,
     }
+    structure_changes['container_rearrangement'] = _container_rearrangement(
+        original_tex, repaired_tex, science=scientific_payload, prose=layout_prose, policy=layout_policy)
     structure_reasons = structure_regression_reasons({"structure_changes": structure_changes, "source_restoration": source_restoration})
     layout_structure_changed = bool(structure_reasons)
 
@@ -724,13 +778,7 @@ def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_
             'added_count': len(added_sentences),
             'added_sentences': list(added_sentences)
         },
-        'structure_changes': {
-            'before': original_layout,
-            'after': repaired_layout,
-            'removed_figure_labels': removed_figure_labels,
-            'removed_table_labels': removed_table_labels,
-            'removed_graphics_files': removed_graphics_files,
-        },
+        'structure_changes': structure_changes,
         'violation': {
             'level': violation_level,
             'reasons': violation_reasons,
@@ -1029,6 +1077,16 @@ def main():
     critical_parser.set_defaults(func=cmd_critical)
 
     args = parser.parse_args()
+
+    if getattr(args, 'output', None):
+        output = Path(args.output).resolve()
+        protected = {Path(value).resolve() for name in (
+            'tex_file', 'original', 'repaired', 'baseline', 'config',
+            'source_restoration_evidence', 'layout_review_json', 'source_review_json')
+            if (value := getattr(args, name, None))}
+        if output in protected:
+            parser.error('report output cannot replace a manuscript, baseline, configuration or review input')
+        output.parent.mkdir(parents=True, exist_ok=True)
 
     if not args.command:
         parser.print_help()

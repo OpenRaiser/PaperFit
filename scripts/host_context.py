@@ -12,6 +12,7 @@ try:
     from page_objective import evaluate_page_objective
     from runtime_types import TaskSpec
     from state_schema import validate_state
+    from isolated_build import verify_isolated_build, is_included_input_path
 except ImportError:
     from .source_map import build_source_map, within
     from .runtime_artifacts import collect_artifact_manifest
@@ -20,6 +21,7 @@ except ImportError:
     from .page_objective import evaluate_page_objective
     from .runtime_types import TaskSpec
     from .state_schema import validate_state
+    from .isolated_build import verify_isolated_build, is_included_input_path
 
 def load_report(path: Path) -> tuple[dict[str, Any], str]:
     if not path.is_file():
@@ -148,25 +150,42 @@ def evidence_freshness(main: Path, root: Path, data_dir: Path) -> dict[str, Any]
             "recorded_status": recorded_fresh.get("status", "unknown"),
             "recorded_blocking_checks": recorded_blocking, "identity": identity}
 
-def bind_visibility_to_current_source(visibility: dict[str, Any], freshness: dict[str, Any]) -> dict[str, Any]:
+def bind_visibility_to_current_source(visibility: dict[str, Any], freshness: dict[str, Any], *,
+                                      isolated_binding: dict[str, Any] | None = None) -> dict[str, Any]:
     """Geometry of a neighboring PDF does not establish a current source build."""
     result = dict(visibility)
     identity = freshness.get("identity", {})
     checks = freshness.get("checks", {})
-    bound = (freshness.get("manifest_status") == "available" and
+    runtime_bound = (result.get('pdf_location') != 'external' and
+             freshness.get("manifest_status") == "available" and
              all(identity.get(name + "_matches_snapshot") is True
                  for name in ("main_tex", "source_set", "pdf")) and
              checks.get("pdf_not_older_than_source_set", {}).get("pass") is True and
              bool(result.get("pdf_sha256")) and
              result.get("pdf_sha256") == identity.get("pdf", {}).get("sha256"))
+    isolated_bound = (isolated_binding is not None and
+                      isolated_binding.get('status') == 'current' and
+                      isolated_binding.get('source_pdf_binding') == 'verified_isolated_build' and
+                      bool(result.get('pdf_sha256')) and
+                      result.get('pdf_sha256') == isolated_binding.get('pdf_sha256'))
+    # An explicitly selected build directory must verify itself; a neighboring
+    # runtime PDF cannot rescue a wrong, failed or stale isolated build receipt.
+    bound = isolated_bound if isolated_binding is not None else runtime_bound
     result["applicable_to_current_source"] = True if bound else None
-    result["source_pdf_binding"] = "verified_runtime_snapshot" if bound else "unverified"
+    result["source_pdf_binding"] = (
+        'verified_isolated_build' if isolated_bound else 'verified_runtime_snapshot' if bound else 'unverified')
+    if bound and 'geometry_status' in result:
+        result['status'] = result['geometry_status']
+        result['pass'] = bool(result.get('geometry_pass'))
+        result.pop('applicability_reason', None)
     if result.get("pdf_sha256") and not bound:
-        result["geometry_status"] = result.get("status")
-        result["geometry_pass"] = result.get("pass")
+        result.setdefault("geometry_status", result.get("status"))
+        result.setdefault("geometry_pass", result.get("pass"))
         result["status"] = "unverified_current_source"
         result["pass"] = False
-        result["applicability_reason"] = "Neighboring PDF geometry is retained, but its binding to the current source build is not verified."
+        result["applicability_reason"] = "Selected PDF geometry is retained, but its binding to the current source build is not verified."
+        if isolated_binding is not None:
+            result['binding_reason'] = isolated_binding.get('reason') or 'isolated_build_pdf_identity_not_verified'
     return result
 
 
@@ -194,7 +213,7 @@ def _current_task_objective(main: Path, root: Path, data_dir: Path) -> dict[str,
 
 
 def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path | None = None,
-                       pdf: Path | None = None, limit: int = 30,
+                       pdf: Path | None = None, build_dir: Path | None = None, limit: int = 30,
                        target_pages: int | None = None, page_policy: str | None = None,
                        page_budget_scope: str | None = None) -> dict[str, Any]:
     if limit < 1:
@@ -271,10 +290,17 @@ def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path |
     if freshness["vision_status"] != "current":
         vision["clean"] = None
     # Provider completion describes its snapshot; freshness describes this project now.
-    selected_pdf = pdf.resolve() if pdf is not None else main.with_suffix('.pdf')
+    build_dir = build_dir.resolve() if build_dir is not None else None
+    selected_pdf = (pdf.resolve() if pdf is not None else
+                    build_dir / 'build' / (main.stem + '.pdf') if build_dir is not None else
+                    main.with_suffix('.pdf'))
+    isolated_binding = (verify_isolated_build(main, root=root, pdf=selected_pdf, build_dir=build_dir)
+                        if build_dir is not None else None)
     visibility = bind_visibility_to_current_source(
         review_pdf_visibility(selected_pdf, root=root,
-                              reviews_path=data_dir / 'pdf_visibility_reviews.json'), freshness)
+                              reviews_path=data_dir / 'pdf_visibility_reviews.json',
+                              allow_external_pdf=pdf is not None or build_dir is not None), freshness,
+        isolated_binding=isolated_binding)
     layout_profile = profile_pdf_layout(selected_pdf)
     layout_profile['applicable_to_current_source'] = (
         visibility.get('applicable_to_current_source')
@@ -293,7 +319,8 @@ def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path |
         "page_objective": objective,
         "project_root": str(root), "project_root_resolution": root_resolution,
         "selected_pdf": str(selected_pdf),
-        "pdf_selection": "explicit" if pdf is not None else "source_neighbor",
+        "pdf_selection": "explicit" if pdf is not None else "isolated_build" if build_dir is not None else "source_neighbor",
+        "isolated_build_binding": isolated_binding,
         "reports": {"action_plan": plan_status, "visual": visual_status,
                     "full_action_plan": str(data_dir / "visual_action_plan.json"),
                     "full_visual_report": str(data_dir / "visual_signal_report.json")},
@@ -310,6 +337,8 @@ def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path |
             "Preserve useful source/PDF checkpoints and compare the user's page objective, readability and source checks before final nomination; latest is not automatically best.",
             "Review painted-text bounds in pdf_visibility even when VLM reports no defects; intentional clipping needs current-PDF and inspected-page evidence.",
             "Review freshness blocking checks; stale or unknown vision is not a clean current PDF.",
+            "Explicit external PDF geometry is observation only unless isolated_build_binding verifies the current inputs and selected PDF; this does not establish VLM freshness or actual page views.",
+            "Unknown source binding still permits read-only page inspection and preserved-PDF comparison; retain that uncertainty and the host's final decision instead of treating it as automatic rejection or acceptance.",
             "Treat recommendations as evidence; verify the target before editing.",
             "Use exact source files and lines, not flattened include-expansion line numbers.",
             "Review unsupported object/caption markers and uncertain source anchors; static navigation is not TeX-expanded coverage.",
@@ -324,22 +353,53 @@ def main() -> None:
     parser.add_argument("--root", help="Project/compilation root; defaults to cwd when it contains main, otherwise main.parent")
     parser.add_argument("--data-dir")
     parser.add_argument("--pdf", help="Explicit PDF from an isolated build; selection alone does not establish current-source binding")
+    parser.add_argument("--build-dir", help="Explicit isolated_build directory to verify current inputs and PDF hashes; without --pdf selects build/<main-stem>.pdf")
     parser.add_argument("--target-pages", type=int)
     parser.add_argument("--page-policy", choices=["at_most", "exact"])
     parser.add_argument("--page-budget-scope", choices=["main_body", "with_refs", "with_appendix"])
     parser.add_argument("--limit", type=int, default=30)
-    parser.add_argument("--output")
+    parser.add_argument("--output", help="New report path; existing files, source, PDFs and receipts are never overwritten")
     args = parser.parse_args()
+    dest = Path(args.output) if args.output else None
+    if dest is not None and (dest.exists() or dest.is_symlink()):
+        parser.error(f"Output path already exists: {dest}. Choose a new report output path.")
+    # Missing artifacts remain reserved inputs/evidence, not vacant report
+    # paths. Never create JSON at the selected PDF or a known build receipt.
+    main_path = Path(args.main).resolve()
+    protected_paths = {main_path, main_path.with_suffix('.pdf'), main_path.with_suffix('.log')}
+    if args.pdf:
+        protected_paths.add(Path(args.pdf).resolve())
+    if args.build_dir:
+        build_path = Path(args.build_dir).resolve()
+        protected_paths.update((build_path / name).resolve() for name in (
+            'build_record.json', 'stdout.txt', 'stderr.txt',
+            'build/' + main_path.stem + '.pdf', 'build/' + main_path.stem + '.log'))
+    if dest is not None and dest.resolve() in protected_paths:
+        parser.error(f"Output path is reserved for source or a build artifact: {dest}. "
+                     "Choose a new report output path.")
     payload = build_host_context(Path(args.main), root=Path(args.root) if args.root else None,
                                  data_dir=Path(args.data_dir) if args.data_dir else None,
                                  pdf=Path(args.pdf) if args.pdf else None, limit=args.limit,
+                                 build_dir=Path(args.build_dir) if args.build_dir else None,
                                  target_pages=args.target_pages, page_policy=args.page_policy,
                                  page_budget_scope=args.page_budget_scope)
+    if dest is not None and args.build_dir and any(
+            is_included_input_path(dest.resolve(), root=tree) for tree in
+            (Path(payload['project_root']), Path(args.build_dir) / 'source')):
+        parser.error(f"Report output would add an isolated-build input: {dest}. "
+                     "Choose a new report under .paperfit/reports/ or outside the project and copied source directories.")
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
-    if args.output:
-        dest = Path(args.output)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(text, encoding="utf-8")
+    if dest is not None:
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            # The initial check gives an early, useful error; exclusive creation
+            # also protects source and receipts if a path appears during work.
+            with dest.open('x', encoding='utf-8') as stream:
+                stream.write(text)
+        except FileExistsError:
+            parser.error(f"Output path already exists: {dest}. Choose a new report output path.")
+        except OSError as error:
+            parser.error(f"Cannot create new report at {dest}: {error}")
         print(json.dumps({"output": str(dest), "finding_counts": payload["finding_counts"],
                           "source_objects": len(payload["source_map"]["objects"]),
                           "source_warnings": len(payload["source_map"]["warnings"])}))

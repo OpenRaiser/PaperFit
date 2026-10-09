@@ -60,16 +60,25 @@ def _current_page_image(visual: dict[str, Any], pdf: Path, root: Path, page: int
 
 
 def review_pdf_visibility(pdf: Path, *, root: Path,
-                          reviews_path: Path | None = None) -> dict[str, Any]:
+                          reviews_path: Path | None = None,
+                          allow_external_pdf: bool = False) -> dict[str, Any]:
+    """Observe an explicitly selected external PDF without asserting its build.
+
+    Runtime callers retain the project boundary by default. Opting into an
+    external observation does not extend trusted review/image paths or bind the
+    PDF to current source; a separate build verifier must establish that.
+    """
     try:
         root, pdf = root.resolve(), pdf.resolve()
     except (OSError, RuntimeError, ValueError):
         return {'checked': False, 'status': 'unavailable', 'pass': False,
                 'reason': 'pdf_path_unavailable', 'findings': []}
-    if not pdf.is_relative_to(root):
+    external = not pdf.is_relative_to(root)
+    if external and not allow_external_pdf:
         return {'checked': False, 'status': 'unavailable', 'pass': False,
                 'reason': 'pdf_outside_project', 'findings': []}
     report = check_pdf_visibility(pdf)
+    report['pdf_location'] = 'external' if external else 'project'
     for finding in report['findings']:
         finding['finding_id'] = finding_id(finding)
         finding['review_status'] = 'pending'
@@ -110,4 +119,14 @@ def review_pdf_visibility(pdf: Path, *, root: Path,
     report['reviewed_finding_count'] = len(report['findings']) - len(unresolved)
     report['pass'] = bool(report.get('checked') and report.get('complete_document') and not unresolved)
     report['review_scope'] = 'physical_geometry_only; scientific/prose/template guards still apply'
+    if external:
+        report['geometry_status'] = report['status']
+        report['geometry_pass'] = report['pass']
+        report['source_pdf_binding'] = 'unverified'
+        report['applicable_to_current_source'] = None
+        report['pass'] = False
+        if report.get('pdf_sha256'):
+            report['status'] = 'unverified_current_source'
+        report['applicability_reason'] = (
+            'Explicit external PDF geometry is observed; current-source build binding is not established.')
     return report

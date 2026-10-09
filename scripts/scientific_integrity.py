@@ -20,11 +20,16 @@ LAYOUT_ONE={'vspace','hspace','vskip','hskip','fontsize','linespread','color','c
 RULES={'toprule','midrule','bottomrule','hline','hlineB'}
 DELIMITER_SIZE_COMMANDS={'left','right'}|{size+suffix for size in ('big','Big','bigg','Bigg') for suffix in ('','l','r','m')}
 DELIMITER_COMMANDS={'{','}','|','lbrace','rbrace','langle','rangle','lvert','rvert','lVert','rVert','vert','Vert','lfloor','rfloor','lceil','rceil','backslash'}
-LAYOUT_LENGTH_REGISTERS={'tabcolsep','arrayrulewidth','textheight','textwidth','columnsep','columnwidth','linewidth','abovecaptionskip','belowcaptionskip','floatsep','textfloatsep','intextsep','parskip','parindent','baselineskip','emergencystretch','abovedisplayskip','belowdisplayskip','abovedisplayshortskip','belowdisplayshortskip','itemsep','topsep','parsep','partopsep','leftmargin','rightmargin','listparindent','itemindent','labelsep','labelwidth'}
+LAYOUT_LENGTH_REGISTERS={'tabcolsep','arrayrulewidth','textheight','textwidth','columnsep','columnwidth','linewidth','abovecaptionskip','belowcaptionskip','floatsep','textfloatsep','intextsep','parskip','parindent','baselineskip','emergencystretch','abovedisplayskip','belowdisplayskip','abovedisplayshortskip','belowdisplayshortskip','itemsep','topsep','parsep','partopsep','leftmargin','rightmargin','listparindent','itemindent','labelsep','labelwidth','bibsep'}
 # Only standard glue registers accept stretch/shrink components. Dimension
 # registers do not consume trailing prose such as "plus 91.2".
-LAYOUT_GLUE_REGISTERS={'abovecaptionskip','belowcaptionskip','floatsep','textfloatsep','intextsep','parskip','baselineskip','abovedisplayskip','belowdisplayskip','abovedisplayshortskip','belowdisplayshortskip','itemsep','topsep','parsep','partopsep'}
+# natbib's standard bibsep length supplies bibliography itemsep. Direct source
+# definitions still shadow it, as they do every other recognized register.
+LAYOUT_GLUE_REGISTERS={'abovecaptionskip','belowcaptionskip','floatsep','textfloatsep','intextsep','parskip','baselineskip','abovedisplayskip','belowdisplayskip','abovedisplayshortskip','belowdisplayshortskip','itemsep','topsep','parsep','partopsep','bibsep'}
 TEXT_SPACE_COMMANDS={'quad','qquad'}
+# Standard balance-package controls change the output routine, take no
+# arguments, and never consume a following group, word, sign or numeric result.
+ZERO_ARG_LAYOUT_COMMANDS={'balance','nobalance'}
 REGISTER_DECLARATIONS={'newlength','newdimen','newskip','newmuskip','dimendef','skipdef','muskipdef','countdef','chardef','mathchardef','toksdef'}
 
 def _command(s:str,i:int)->Tuple[str,int]:
@@ -177,6 +182,10 @@ def opaque_layout_child_end(s:str,i:int)->int:
  if name in {'setlength','addtolength'}:
   if end<len(s) and s[end]=='*':end+=1
   return opaque_length_args_end(s,end)
+ if name in ZERO_ARG_LAYOUT_COMMANDS:
+  # An unknown reader can consume this control token as its own argument.
+  # Keep it with that invocation rather than normalizing it independently.
+  return end
  return i
 
 def arraystretch_declarations(source:str)->List[Dict[str,Any]]:
@@ -303,7 +312,7 @@ def _shadowed_presentation_commands(source:str)->frozenset[str]:
  # Newly normalized controls must keep their literal invocation when the
  # source directly defines them. This is not macro expansion or alias tracing.
  names=set(shadowed_literal_url_commands(source))
- presentation_targets=DELIMITER_SIZE_COMMANDS|LAYOUT_LENGTH_REGISTERS|TEXT_SPACE_COMMANDS|{'parbox','setlength','addtolength','begingroup','endgroup','dimexpr','relax'}
+ presentation_targets=DELIMITER_SIZE_COMMANDS|LAYOUT_LENGTH_REGISTERS|TEXT_SPACE_COMMANDS|ZERO_ARG_LAYOUT_COMMANDS|FLOAT_ENVS|{'parbox','setlength','addtolength','begingroup','endgroup','dimexpr','relax','caption','captionof','minipage','includegraphics','label','begin','end'}
  for record in _macro_definitions(source):
   target=record[1] if record[0] in {'def','gdef','edef','xdef','let'} else record[2]
   name=target.lstrip('\\')
@@ -312,7 +321,9 @@ def _shadowed_presentation_commands(source:str)->frozenset[str]:
  # macro bodies skipped by the declaration inventory. A later invocation may
  # activate such a nested definition. This deliberately does not expand it.
  # Constructed names remain conservatively opaque instead of being guessed.
- literal_definitions=REGISTER_DECLARATIONS|{'def','gdef','edef','xdef','let','newcommand','renewcommand','providecommand','DeclareRobustCommand','DeclareMathOperator'}
+ # Environment declarations also define their same-named begin control, and
+ # can be nested inside a later-invoked outer macro just like command forms.
+ literal_definitions=REGISTER_DECLARATIONS|{'def','gdef','edef','xdef','let','newcommand','renewcommand','providecommand','DeclareRobustCommand','DeclareMathOperator','newenvironment','renewenvironment','provideenvironment'}
  i=0
  while i<len(source):
   if source[i]!='\\':i+=1;continue
@@ -490,6 +501,187 @@ def _safe_caption_setup(argument:str)->bool:
 def _safe_float_counter(name:str,value:str)->bool:
  return name.strip() in {'topnumber','bottomnumber','totalnumber','dbltopnumber'} and bool(re.fullmatch(r'\s*\d+\s*',value))
 
+def _caption_at(s:str,start:int,*,family:str|None=None,opaque_commands:frozenset[str]=frozenset())->Dict[str,Any]|None:
+ """Read the standard caption signatures without expanding any command."""
+ from source_map import group as balanced_group
+ name,pos=_command(s,start)
+ if name not in {'caption','captionof'}:return None
+ star=pos<len(s) and s[pos]=='*';pos+=int(star);kind=family;short=None;reason=None
+ if name in opaque_commands:reason='shadowed_caption_command'
+ if name=='captionof':
+  value=balanced_group(s,pos)
+  if value is None:reason=reason or 'malformed_caption_type'
+  else:
+   kind,pos=value
+   if kind not in {'figure','table'}:reason=reason or 'unsupported_caption_type'
+ cursor=pos
+ while cursor<len(s) and s[cursor].isspace():cursor+=1
+ if cursor<len(s) and s[cursor]=='[':
+  value=balanced_group(s,cursor,'[',']')
+  if value is None:reason=reason or 'malformed_short_caption'
+  else:short,pos=value
+ value=balanced_group(s,pos)
+ if value is None:
+  newline=s.find('\n',pos)
+  text=None;end=len(s) if s[pos:].lstrip().startswith(('{','[')) or newline<0 else newline
+  reason=reason or 'malformed_long_caption'
+ else:text,end=value
+ return {'command':name,'start':start,'end':end,'family':kind,'type':kind,
+         'star':star,'short':short,'text':text,'supported':reason is None,
+         'reason':reason,'source':s[start:end]}
+
+def standard_caption_declarations(source:str)->List[Dict[str,Any]]:
+ """Position-preserving caption records, including unsupported raw invocations."""
+ from source_map import masked_tex
+ active=masked_tex(source);envs=_envs(active);shadowed=_shadowed_presentation_commands(active_source(source));records=[];i=0
+ while i<len(active):
+  if active[i]!='\\':i+=1;continue
+  name,end=_command(active,i)
+  if name not in {'caption','captionof'}:i=end;continue
+  parents=[e for e in envs if e['name'] in FLOAT_ENVS|{'longtable'} and e['body']<=i<e['tail']]
+  parent=min(parents,key=lambda e:e['end']-e['start']) if parents else None
+  family=('figure' if 'figure' in parent['name'] else 'table') if parent else None
+  record=_caption_at(active,i,family=family,opaque_commands=shadowed)
+  records.append(record);i=max(end,record['end'])
+ return records
+
+def standard_layout_object_inventory(source:str)->Dict[str,Any]:
+ """Explicit local source ownership, never a rendering or semantic proof.
+
+ Only unique labelled/captioned floats and balanced standard minipage/group
+ objects are supported. Incomplete/opaque containers retain raw evidence and
+ cannot justify a container-count exemption at a caller's acceptance boundary.
+ """
+ from source_map import masked_tex
+ active=masked_tex(source);envs=_envs(active);shadowed=_shadowed_presentation_commands(active_source(source))
+ floats=[e for e in envs if e['name'] in FLOAT_ENVS];captions=standard_caption_declarations(source)
+ labels=[(m.start(),m[1]) for m in re.finditer(r'\\label\s*\{([^{}]+)\}',active)];counts=Counter(label for _,label in labels)
+ objects=[];unsupported=[];scopes=[]
+ barriers=[];conditionals=[]
+ # Local scope ownership cannot be inferred through an unknown argument or
+ # conditional. Unchanged opaque content elsewhere does not poison a supported
+ # object; the independent raw payload channels still retain that content.
+ known_readers=TEXT_WRAPPERS|FONT_DECL|LAYOUT_ONE|ID_COMMANDS|PROTECTED_ARGS|LAYOUT_LENGTH_REGISTERS|{'begin','end','captionof','resizebox','scalebox','rotatebox','raisebox','parbox','setlength','addtolength','captionsetup','setcounter','usepackage','RequirePackage','documentclass','bibliography','bibliographystyle'}
+ i=0
+ while i<len(active):
+  if active[i]!='\\':i+=1;continue
+  name,end=_command(active,i)
+  if name.startswith('if') and re.fullmatch(r'if[A-Za-z@]*',name):conditionals.append(i)
+  elif name=='fi':
+   if conditionals:barriers.append({'start':conditionals.pop(),'end':end,'reason':'conditional_scope'})
+  if name not in known_readers:
+   pos=end+int(end<len(active) and active[end]=='*')
+   while True:
+    while pos<len(active) and active[pos].isspace():pos+=1
+    if pos>=len(active) or active[pos] not in '[{':break
+    opening=active[pos];_,last=_group(active,pos,opening,']' if opening=='[' else '}')
+    if last<=pos:break
+    barriers.append({'start':pos,'end':last,'reason':'opaque_reader_argument'});pos=last
+  i=end
+ barriers.extend({'start':start,'end':len(active),'reason':'unbalanced_conditional_scope'} for start in conditionals)
+ known_outer=FLOAT_ENVS|TABLE_ENVS|MATH_WRAPPERS|{'document','minipage','center','flushleft','flushright','matrix','pmatrix','bmatrix','Bmatrix','vmatrix','Vmatrix','smallmatrix','cases'}
+ barriers.extend({'start':e['start'],'end':e['end'],'reason':'unknown_environment_scope'} for e in envs if e['name'] not in known_outer)
+ def in_span(items,start,end,key):return [item for item in items if start<=key(item)<end]
+ def header_end(e):
+  pos=_optional(active,e['body'])
+  if e['name'] in {'wrapfigure','wraptable'}:
+   for _ in range(2):
+    _,end=_group(active,pos)
+    if end<=pos:return None
+    pos=end
+  return pos
+ for e in envs:
+  if e['name']=='minipage':
+   stop=minipage_layout_end(active,e['body']) if 'minipage' not in shadowed else None
+   if stop is None or stop>e['tail']:unsupported.append({'start':e['start'],'end':e['end'],'reason':'unsupported_minipage_header'})
+   else:scopes.append({'start':e['start'],'end':e['end'],'body':stop,'tail':e['tail'],'kind':'minipage'})
+ for marker in re.finditer(r'\\begin\s*\{([^{}]+)\}',active):
+  if marker[1] in FLOAT_ENVS|{'minipage'} and not any(e['start']==marker.start() for e in envs):
+   unsupported.append({'start':marker.start(),'end':len(active),'reason':'unbalanced_layout_environment'})
+ if not {'begingroup','endgroup'} & shadowed:
+  stack=[]
+  for marker in re.finditer(r'\\(begingroup|endgroup)(?![A-Za-z@])',active):
+   if active[marker.end():marker.end()+1]=='*':unsupported.append({'start':marker.start(),'end':marker.end()+1,'reason':'unsupported_starred_group'})
+   if marker[1]=='begingroup':stack.append(marker)
+   elif stack:
+    first=stack.pop();scopes.append({'start':first.start(),'end':marker.end(),'body':first.end(),'tail':marker.start(),'kind':'standard_group'})
+   else:unsupported.append({'start':marker.start(),'end':marker.end(),'reason':'unbalanced_standard_group'})
+  unsupported.extend({'start':m.start(),'end':len(active),'reason':'unbalanced_standard_group'} for m in stack)
+ elif re.search(r'\\(?:begingroup|endgroup)(?![A-Za-z@])',active):
+  unsupported.append({'start':0,'end':len(active),'reason':'shadowed_standard_group'})
+ def candidate(scope,parent=None):
+  caps=in_span(captions,scope['body'],scope['tail'],lambda c:c['start'])
+  ids=in_span(labels,scope['body'],scope['tail'],lambda item:item[0])
+  if len(caps)!=1 or len(ids)!=1 or counts[ids[0][1]]!=1:return None
+  cap=caps[0]
+  if not cap['supported'] or cap['family'] not in {'figure','table'}:return None
+  if cap['start']<=ids[0][0]<cap['end']:return None
+  if {'label','begin','end'} & shadowed or (parent and parent['name'] in shadowed):return None
+  scientific_regions=[e for e in envs if e['name'] in TABLE_ENVS]+_math_spans(active,envs)
+  if any((e['start']<=ids[0][0]<e['end'] or e['start']<=cap['start']<e['end'])
+         and not (scope['kind']=='longtable' and e['start']==scope['start']) for e in scientific_regions):return None
+  if any(scope['start']<=u['start']<scope['end'] or u['start']<=scope['start']<u['end'] for u in unsupported):return None
+  obstruction=next((u for u in barriers if (u['start']<=scope['start'] and scope['end']<=u['end']) or (u['start']<=cap['start']<u['end']) or (u['start']<=ids[0][0]<u['end'])),None)
+  if obstruction:
+   unsupported.append({**obstruction,'object_label':ids[0][1]});return None
+  graphics=[];i=scope['body']
+  while i<scope['tail']:
+   if active[i]!='\\':i+=1;continue
+   name,end=_command(active,i)
+   if name!='includegraphics':i=end;continue
+   if name in shadowed:return None
+   star=end<len(active) and active[end]=='*';pos=end+int(star);optional_end=_optional(active,pos)
+   options=active[pos:optional_end].strip();path,last=_group(active,optional_end)
+   if last<=optional_end:return None
+   graphics.append({'path':path,'options':options,'star':star,'start':i,'end':last});i=last
+  return {'label':ids[0][1],'family':cap['family'],'scope_kind':scope['kind'],'start':scope['start'],'end':scope['end'],
+          'body':scope['body'],'tail':scope['tail'],'caption':cap,'graphics':graphics,
+          'parent_container':{'name':parent['name'],'start':parent['start'],'end':parent['end']} if parent else None}
+ for parent in floats:
+  nested=[e for e in floats if parent['start']<e['start']<parent['end']]
+  if nested:unsupported.append({'start':parent['start'],'end':parent['end'],'reason':'nested_float_ownership'});continue
+  stop=header_end(parent)
+  scope={**parent,'body':stop if stop is not None else parent['body'],'kind':'float'}
+  whole=candidate(scope,parent) if stop is not None else None
+  if whole:objects.append(whole);continue
+  local=[]
+  for child in scopes:
+   if parent['body']<=child['start'] and child['end']<=parent['tail']:
+    value=candidate(child,parent)
+    if value:local.append(value)
+  # Choose the innermost complete scope; overlapping different objects are
+  # unsupported rather than silently assigned a guessed source owner.
+  local=[o for o in local if not any(o['start']<q['start'] and q['end']<o['end'] for q in local)]
+  if len({o['label'] for o in local})!=len(local) or any(a['start']<b['start']<a['end'] for a in local for b in local):
+   local=[]
+  objects.extend(local)
+  body_start=stop if stop is not None else parent['body'];chars=list(active[body_start:parent['tail']])
+  for obj in local:chars[obj['start']-body_start:obj['end']-body_start]=' '*(obj['end']-obj['start'])
+  remainder=_strip_layout(''.join(chars),text_wrappers=True,opaque_commands=shadowed)
+  # These standard argumentless state controls bound the already-owned objects.
+  remainder=re.sub(r'\\(?:selectfont|begingroup|endgroup)(?![A-Za-z@])','',remainder) if not {'begingroup','endgroup'} & shadowed else remainder
+  if not local or re.sub(r'[\s{}]','',remainder):unsupported.append({'start':parent['start'],'end':parent['end'],'reason':'uncovered_compound_float_content'})
+ for scope in sorted(scopes,key=lambda e:e['end']-e['start']):
+  if any(e['start']<=scope['start']<e['end'] for e in floats) or any(o['start']<=scope['start']<o['end'] for o in objects):continue
+  value=candidate(scope)
+  if value:objects.append(value)
+ # Retain the established table -> longtable compatibility boundary. Its
+ # ordered rows/repeated heads are still checked by the existing table parser;
+ # this only gives the same unique caption/label its stable source owner.
+ for e in envs:
+  if e['name']!='longtable':continue
+  pos=_optional(active,e['body']);_,stop=_group(active,pos)
+  value=candidate({**e,'body':stop,'kind':'longtable'}) if stop>pos else None
+  if value:objects.append(value)
+  else:unsupported.append({'start':e['start'],'end':e['end'],'reason':'unsupported_longtable_ownership'})
+ for cap in captions:
+  if not any(o['body']<=cap['start']<o['tail'] for o in objects):unsupported.append({'start':cap['start'],'end':cap['end'],'reason':cap['reason'] or 'caption_without_unique_supported_object'})
+ objects.sort(key=lambda o:o['start'])
+ return {'checked':True,'complete':not unsupported,'objects':objects,'unsupported':unsupported,
+         'raw_container_counts':dict(Counter('figure' if 'figure' in e['name'] else 'table' for e in floats)),
+         'logical_counts':dict(Counter(o['family'] for o in objects)),
+         'scope_note':'Static supported source objects and coverage only; no macro expansion, semantic proof, visual inspection or automatic acceptance.'}
+
 def _strip_layout(s:str,*,text_wrappers:bool=False,opaque_commands:frozenset[str]=frozenset())->str:
  s=re.sub(r'\\(?:widowpenalty|clubpenalty|displaywidowpenalty|brokenpenalty|interlinepenalty)\s*(?:=\s*)?[+-]?\d+\b','',s)
  s=re.sub(r'\\(?:linebreak|nolinebreak)\s*(?:\[[0-4]\])?','',s)
@@ -515,6 +707,12 @@ def _strip_layout(s:str,*,text_wrappers:bool=False,opaque_commands:frozenset[str
     break
    last=max(last,opaque_layout_child_end(s,last))
    out.append(s[i:last]);i=last;continue
+  if name in {'caption','captionof'}:
+   caption=_caption_at(s,i,opaque_commands=opaque_commands)
+   if caption['supported']:
+    if text_wrappers:out.append(_strip_layout(caption['text'],text_wrappers=True,opaque_commands=opaque_commands))
+    i=caption['end'];continue
+   out.append(s[i:caption['end']]);i=caption['end'];continue
   opt=_optional(s,j)
   if name in LAYOUT_LENGTH_REGISTERS and not star:
    end=layout_assignment_end(s,j,name,opaque_commands=opaque_commands)
@@ -522,6 +720,8 @@ def _strip_layout(s:str,*,text_wrappers:bool=False,opaque_commands:frozenset[str
   if name in TEXT_SPACE_COMMANDS and not star:
    # These controls take no arguments: a following group remains body text.
    out.append(' ');i=j;continue
+  if name in ZERO_ARG_LAYOUT_COMMANDS and not star:
+   i=j;continue
   if name=='looseness' and not star:
    # Only the bounded literal paragraph adjustments used by A1 are layout.
    # Dynamic values and larger changes remain visible to preservation checks.
@@ -666,7 +866,10 @@ def _colspec_payload(spec:str,*,opaque_commands:frozenset[str]=frozenset())->Tup
  return (('columns',column),)+tuple(out)
 
 def _table_rows(body:str,*,opaque_commands:frozenset[str]=frozenset())->Tuple[Any,...]:
- return tuple(tuple(_text_tokens(cell,opaque_commands=opaque_commands) for cell in _split_top(row,'&'))
+ def cell_payload(cell):
+  tokens=_text_tokens(cell,opaque_commands=opaque_commands);identifiers=_ids(cell)
+  return tokens+(('cell_identifiers',identifiers),) if identifiers else tokens
+ return tuple(tuple(cell_payload(cell) for cell in _split_top(row,'&'))
               for row in _split_top(body,'\\\\') if _text_tokens(row,opaque_commands=opaque_commands))
 
 def _split_top(s:str,delimiter:str)->List[str]:
@@ -794,19 +997,26 @@ def _macro_definitions(s:str)->Tuple[Any,...]:
  return tuple(records)
 
 def _payload(s:str)->Dict[str,Any]:
+ object_inventory=standard_layout_object_inventory(s);caption_records=standard_caption_declarations(s)
+ objects=object_inventory['objects'];caption_by_start={c['start']:c for c in caption_records}
  s=active_source(s);opaque_commands=_shadowed_presentation_commands(s);envs=_envs(s);floats=[e for e in envs if e['name'] in FLOAT_ENVS];tables=[e for e in envs if e['name'] in TABLE_ENVS];math=_math_spans(s,envs)
  def context(start):
+  owners=[o for o in objects if o['start']<=start<o['end']]
+  if len(owners)==1:
+   owner=owners[0]
+   return ('layout_object',owner['family'],owner['label'],tuple((g['path'],g['star']) for g in owner['graphics']))
   parents=[e for e in floats+[t for t in tables if t['name']=='longtable'] if e['start']<=start<e['end']]
   if not parents:return None
   parent=min(parents,key=lambda e:e['end']-e['start']);block=s[parent['body']:parent['tail']]
   labels=tuple(re.findall(r'\\label\s*\{([^{}]+)\}',block));graphics=tuple(re.findall(r'\\includegraphics(?:\[[^\]]*\])?\s*\{([^{}]+)\}',block))
   return (labels,graphics)
- math_body=[];math_float=[]
+ math_body=[];math_float=[];math_locations=[]
  for m in math:
   record=('opaque_math_environment',m['name'],re.sub(r'\s+',' ',m['text']).strip()) if m.get('opaque') else (m['numbered'],_math_tokens(m['text'],opaque_commands=opaque_commands));key=context(m['start'])
+  math_locations.append((m['start'],m['end'],record,_ids(m['text'])))
   if key is None:math_body.append(record)
   else:math_float.append((key,record))
- table_records=[]
+ table_records=[];table_locations=[]
  for e in tables:
   body=s[e['body']:e['tail']];offset=_optional(body,0);spec=''
   for _ in range(2 if e['name'] in {'tabular*','tabularx'} else 1):spec,offset=_group(body,offset)
@@ -835,6 +1045,48 @@ def _payload(s:str)->Dict[str,Any]:
     body=first+body[match.end():]
   rows=_table_rows(body,opaque_commands=opaque_commands)
   table_records.append((key,rows,_colspec_payload(spec,opaque_commands=opaque_commands)))
+  table_locations.append((e['start'],e['end'],rows,_colspec_payload(spec,opaque_commands=opaque_commands)))
+ # Preserve order *within* a uniquely bound object while permitting whole
+ # objects to move. Multiplicity is retained by Counter; no global set or
+ # same-container payload multiset can pay for exchanging different owners.
+ def local_payload(scope,owned=()):
+  start,end=scope['body'],scope['tail'];block=s[start:end];chars=list(block)
+  excluded_owned=[(o['start'],o['end']) for o in owned]
+  def covered(lo,hi):return any(a<=lo and hi<=b for a,b in excluded_owned)
+  local_tables=[r for r in table_locations if ((start<=r[0] and r[1]<=end) or (scope.get('kind',scope.get('scope_kind'))=='longtable' and r[0]==scope['start'])) and not covered(r[0],r[1])]
+  local_math=[r for r in math_locations if start<=r[0] and r[1]<=end and not covered(r[0],r[1])]
+  local_captions=[c for c in caption_records if start<=c['start'] and c['end']<=end and not covered(c['start'],c['end'])]
+  graphics=[];graphic_spans=[];pos=start
+  while pos<end:
+   if s[pos]!='\\':pos+=1;continue
+   name,stop=_command(s,pos)
+   if name!='includegraphics' or name in opaque_commands:pos=stop;continue
+   star=stop<len(s) and s[stop]=='*';argument=_optional(s,stop+int(star));path,last=_group(s,argument)
+   if last>argument and last<=end and not covered(pos,last):graphics.append((path,star));graphic_spans.append((pos,last))
+   pos=last if last>argument else stop
+  masks=excluded_owned+[(r[0],r[1]) for r in local_tables+local_math]+[(c['start'],c['end']) for c in local_captions]+graphic_spans
+  for lo,hi in masks:
+   lo=max(lo,start)-start;hi=min(hi,end)-start
+   if hi>lo:chars[lo:hi]=' '*(hi-lo)
+  residual=''.join(chars)
+  if not {'begingroup','endgroup'} & opaque_commands:residual=re.sub(r'\\(?:begingroup|endgroup)(?![A-Za-z@])','',residual)
+  if 'selectfont' not in opaque_commands:residual=re.sub(r'\\selectfont(?![A-Za-z@])','',residual)
+  tokens=_text_tokens(residual,opaque_commands=opaque_commands)
+  ids_block=list(block)
+  for lo,hi in excluded_owned:
+   lo=max(lo,start)-start;hi=min(hi,end)-start
+   if hi>lo:ids_block[lo:hi]=' '*(hi-lo)
+  return (tuple(r[2:] for r in local_tables),tuple(r[2:] for r in local_math),tokens,
+          _ids(''.join(ids_block)),tuple(graphics))
+ object_payload=[((o['family'],o['label']),local_payload(o)) for o in objects]
+ unowned_payload=[]
+ for e in floats:
+  stop=_optional(s,e['body'])
+  if e['name'] in {'wrapfigure','wraptable'}:
+   for _ in range(2):_,stop=_group(s,stop)
+  owned=[o for o in objects if e['start']<=o['start'] and o['end']<=e['end']]
+  payload=local_payload({**e,'body':stop},owned)
+  if any(payload):unowned_payload.append((context(e['start']),payload))
  # Numeric payload outside protected math/table blocks, preserving body order.
  excluded=sorted([(e['start'],e['end']) for e in tables]+[(m['start'],m['end']) for m in math])
  chars=list(s)
@@ -842,21 +1094,37 @@ def _payload(s:str)->Dict[str,Any]:
  remainder=''.join(chars);numeric_body=[];numeric_float=[];arguments=[]
  def numbers(text):return tuple(re.findall(r'(?<![A-Za-z])[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?',_strip_layout(text,opaque_commands=opaque_commands)))
  body_parts=[];cursor=0
- for e in floats:
+ regions=sorted(floats+[o for o in objects if not any(e['start']<=o['start']<e['end'] for e in floats)],key=lambda e:e['start'])
+ for e in regions:
   if e['start']<cursor:continue
-  body_parts.append(remainder[cursor:e['start']]);values=numbers(remainder[e['start']:e['end']])
-  if values:numeric_float.append((context(e['start']),values))
+  body_parts.append(remainder[cursor:e['start']]);local=[o for o in objects if e['start']<=o['start'] and o['end']<=e['end']];position=e['start']
+  for owner in local:
+   gap=numbers(remainder[position:owner['start']])
+   if gap:numeric_float.append((('unowned_float_gap',context(e['start']),position-e['start']),gap))
+   values=numbers(remainder[owner['start']:owner['end']])
+   if values:numeric_float.append((context(owner['start']),values))
+   position=owner['end']
+  values=numbers(remainder[position:e['end']])
+  if values:numeric_float.append((context(e['start']) if not local else ('unowned_float_gap',context(e['start']),position-e['start']),values))
   cursor=e['end']
  body_parts.append(remainder[cursor:]);numeric_body=numbers(''.join(body_parts))
  i=0
  while i<len(s):
   if s[i]!='\\':i+=1;continue
   name,j=_command(s,i)
+  if i in caption_by_start:
+   caption=caption_by_start[i]
+   if caption['supported']:
+    arguments.append((context(i),'caption',caption['family'],caption['star'],
+                      None if caption['short'] is None else _text_tokens(caption['short'],opaque_commands=opaque_commands),
+                      _text_tokens(caption['text'],opaque_commands=opaque_commands)))
+   else:arguments.append((context(i),'opaque_caption',re.sub(r'\s+',' ',caption['source']).strip()))
+   i=caption['end'];continue
   if name in PROTECTED_ARGS:
    j=_optional(s,j);arg,end=_group(s,j)
    if end>j:arguments.append((context(i),name,_text_tokens(arg,opaque_commands=opaque_commands)));i=end;continue
   i=j
- return {'configuration_arguments':_configuration_payload(s,opaque_commands=opaque_commands),'macro_definitions':_macro_definitions(s),'shadowed_literal_url_invocations':_shadowed_literal_url_payload(s),'math_body':tuple(math_body),'math_floats':tuple(sorted(Counter(math_float).items(),key=repr)),'tables':tuple(sorted(Counter(table_records).items(),key=repr)),'identifiers':_ids(s),'numbers_body':numeric_body,'numbers_floats':tuple(sorted(Counter(numeric_float).items(),key=repr)),'protected_arguments':tuple(sorted(Counter(arguments).items(),key=repr))}
+ return {'configuration_arguments':_configuration_payload(s,opaque_commands=opaque_commands),'macro_definitions':_macro_definitions(s),'shadowed_literal_url_invocations':_shadowed_literal_url_payload(s),'math_body':tuple(math_body),'math_floats':tuple(sorted(Counter(math_float).items(),key=repr)),'tables':tuple(sorted(Counter(table_records).items(),key=repr)),'identifiers':_ids(s),'numbers_body':numeric_body,'numbers_floats':tuple(sorted(Counter(numeric_float).items(),key=repr)),'protected_arguments':tuple(sorted(Counter(arguments).items(),key=repr)),'layout_objects':tuple(sorted(Counter(object_payload).items(),key=repr)),'unowned_float_payload':tuple(sorted(Counter(unowned_payload).items(),key=repr))}
 
 def scientific_payload_diff(original:str,repaired:str)->Dict[str,Any]:
  limits='Conservative token invariants, not mathematical equivalence; No macro expansion or mathematical equivalence proof; exotic TeX definitions/restructuring require host review. Cross-file checking requires callers to compare every modified source file.'

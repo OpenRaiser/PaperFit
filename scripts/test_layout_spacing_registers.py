@@ -112,5 +112,47 @@ class KnownLayoutSpacingTests(unittest.TestCase):
         self.assert_preserved(before, after)
         self.assertEqual(compute_content_diff(before, after.replace("does not reduce", "does reduce"), layout_only=True)["action_required"], "auto_rollback")
 
+    def test_native_bibliography_glue_keeps_science_and_prose(self):
+        # natbib defines bibsep as a length and uses it for bibliography itemsep.
+        for before, after in [
+            (r"\setlength{\bibsep}{4pt plus 1pt minus .5pt}", r"\setlength{\bibsep}{2pt}"),
+            (r"\setlength\bibsep{4pt}", r"\addtolength\bibsep{-2pt}"),
+            (r"\bibsep=4pt plus 1fil", r"\bibsep=2pt plus .5fil"),
+        ]:
+            with self.subTest(before=before):
+                self.assert_preserved(manuscript(before + " " + BODY), manuscript(after + " " + BODY))
+
+    def test_native_page_fit_lengths_do_not_change_academic_payload(self):
+        before = manuscript(BODY)
+        after = manuscript(r"\setlength{\parskip}{3pt}"
+                           r"\setlength{\abovedisplayskip}{6pt plus 2pt minus 2pt}"
+                           r"\setlength{\belowdisplayskip}{6pt plus 2pt minus 2pt}"
+                           r"\setlength{\bibsep}{2pt}" + BODY)
+        self.assert_preserved(before, after)
+
+    def test_complete_glue_ends_before_adjacent_body_and_math_data(self):
+        for register in ("parskip", "abovedisplayskip", "belowdisplayskip", "itemsep", "bibsep"):
+            for tail in (" 91.2. ", " -91.2. ", " +91.2. ", r" $x=91.2$ ",
+                         " The method does not reduce accuracy. "):
+                with self.subTest(register=register, tail=tail):
+                    value = "=2pt plus 1fil minus .5pt"
+                    self.assertEqual(layout_assignment_end(value + tail, 0, register), len(value))
+                    source = manuscript("\\" + register + value + tail + BODY)
+                    changed = (source.replace("91.2", "19.2") if "91.2" in tail
+                               else source.replace("does not reduce", "does reduce"))
+                    diff = compute_content_diff(source, changed, layout_only=True)
+                    self.assertEqual(diff["action_required"], "auto_rollback", diff)
+
+    def test_bibliography_register_shadowing_remains_opaque(self):
+        for declaration in (r"\def\bibsep{91.2}", r"\newlength{\bibsep}",
+                            r"\let\bibsep\score", r"\def\outer{\def\bibsep{91.2}}"):
+            with self.subTest(declaration=declaration):
+                before = manuscript(r"\setlength{\bibsep}{2pt}" + BODY, declaration)
+                after = before.replace("{2pt}", "{7pt}")
+                diff = compute_content_diff(before, after, layout_only=True)
+                self.assertEqual(diff["scientific_payload"]["status"], "failed", diff)
+                self.assertEqual(diff["layout_prose"]["status"], "failed", diff)
+                self.assertEqual(diff["action_required"], "auto_rollback", diff)
+
 if __name__ == "__main__":
     unittest.main()

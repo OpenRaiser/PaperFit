@@ -764,6 +764,26 @@ addWorkflowOptions(
   });
 
 program
+  .command('isolated-build')
+  .description('复制论文输入并在新目录编译，保留可核对的源码/PDF构建记录')
+  .option('--main <path>', '主 .tex 文件（必需）')
+  .option('--root <path>', '完整论文工程根目录（必需）')
+  .option('--build-dir <path>', '工程外未使用过的编译目录（必需）')
+  .option('--engine <name>', 'pdflatex | xelatex | lualatex（默认 pdflatex）')
+  .option('--timeout <seconds>', '编译超时秒数（默认 600）')
+  .option('--working-directory <mode>', 'main_parent（默认）| project_root；相对包含文件解析目录')
+  .allowUnknownOption(true)
+  .allowExcessArguments(true)
+  .action(() => {
+    const position = process.argv.indexOf('isolated-build');
+    const args = position >= 0 ? process.argv.slice(position + 1) : [];
+    const result = spawnSync(pythonRunner(), [path.join(packageRoot(), 'scripts', 'isolated_build.py'), ...args], {
+      stdio: 'inherit', cwd: process.cwd(), env: process.env, windowsHide: true,
+    });
+    process.exit(result.status === null ? 1 : (result.status ?? 1));
+  });
+
+program
   .command('page-fit')
   .description('只读页数目标与末页诊断工具箱；由宿主审查候选，不自动接受或改源码')
   .option('--main <path>', '主 .tex 文件')
@@ -777,6 +797,7 @@ program
   .option('--attempt-tier <tier>', '宿主尝试级别')
   .option('--defects-stable', '宿主已稳定处理可读性缺陷；不证明源码与 PDF 绑定')
   .option('--data-dir <path>', '当前运行证据目录')
+  .option('--build-dir <path>', '隔离编译目录，核对本次源码与候选 PDF')
   .option('--output <path>', 'JSON 输出文件')
   .allowUnknownOption(true)
   .allowExcessArguments(true)

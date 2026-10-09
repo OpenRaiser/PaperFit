@@ -62,8 +62,9 @@ def _scale_body(body: str) -> str:
 def _target(active: str, offset: int, body: str) -> tuple[str, str]:
     graphics = tuple(_normalize(value) for value in _GRAPHIC.findall(body))
     # Only a globally unique, single label can identify a float across layout
-    # environments. Ambiguous/unlabelled floats retain their exact environment
-    # and occurrence, so reflow cannot transfer an inherited scaling allowance.
+    # environments. A compound float may instead contain a uniquely labelled
+    # standard minipage object. Keep its exact container parameters/environment
+    # so unrelated float ordinals cannot transfer its inherited scale allowance.
     stack: list[tuple[str, int]] = []
     containing: list[tuple[str, int, int]] = []
     for marker in _FLOAT.finditer(active):
@@ -80,6 +81,25 @@ def _target(active: str, offset: int, body: str) -> tuple[str, str]:
         if len(labels) == 1 and all_labels.count(labels[0]) == 1:
             family = "figure" if "figure" in environment else "table"
             return "labels:" + labels[0], family
+        local = active[start:end]
+        minipages = [item for item in scientific._envs(local)
+                     if item["name"] == "minipage"
+                     and item["body"] <= offset - start < item["tail"]]
+        if len(minipages) == 1:
+            item = minipages[0]
+            local_labels = re.findall(r"\\label\s*\{([^{}]+)\}", local[item["body"]:item["tail"]])
+            if len(local_labels) == 1 and all_labels.count(local_labels[0]) == 1:
+                pos = item["body"]
+                for _ in range(3):
+                    optional = group(local, pos, "[", "]")
+                    if not optional:
+                        break
+                    pos = optional[1]
+                width = group(local, pos)
+                if width:
+                    header = _normalize(local[item["start"]:width[1]])
+                    context = environment + ":minipage:" + hashlib.sha256(header.encode("utf-8")).hexdigest()
+                    return "labels:" + local_labels[0], context
     if containing:
         contexts = []
         for environment, start, _ in sorted(containing, key=lambda item: item[1]):
