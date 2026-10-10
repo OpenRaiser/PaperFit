@@ -199,6 +199,10 @@ def build_visual_action_plan(
     include_hints: bool = True,
     document_scope_approvals: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
+    try:
+        from host_advice import host_guidance, recommendation_review
+    except ImportError:
+        from .host_advice import host_guidance, recommendation_review
     findings: List[Dict[str, Any]] = list(visual_report.get("findings") or [])
     entries: List[Dict[str, Any]] = []
 
@@ -255,6 +259,7 @@ def build_visual_action_plan(
             "status": decision["status"],
             "status_reason": decision["reason"],
             "origin": "hint" if is_hint else "finding",
+            "host_review": recommendation_review(target_status=anchor["anchor_status"]),
         }
         if family == "B1" and document_authorized and anchor["anchor_status"] == "unresolved":
             entry["recommended_actions"] = ["normalize_float_placements_document_level"]
@@ -283,6 +288,7 @@ def build_visual_action_plan(
 
     return {
         "schema_version": ACTION_SCHEMA_VERSION,
+        "host_guidance": host_guidance(),
         "generated_at": datetime.now().isoformat(),
         "summary": {
             "total_entries": len(entries),

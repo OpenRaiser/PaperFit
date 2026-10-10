@@ -18,6 +18,7 @@ try:
     from scientific_integrity import arraystretch_declarations
     from isolated_build import is_included_input_path, verify_isolated_build
     from compile_inputs import verify_native_build
+    from host_advice import host_guidance, joint_layout_plan, recommendation_review, print_host_json
 except ImportError:
     from .candidate_compare import compare_candidates
     from .pdf_layout_profile import profile_pdf_layout
@@ -27,6 +28,7 @@ except ImportError:
     from .scientific_integrity import arraystretch_declarations
     from .isolated_build import is_included_input_path, verify_isolated_build
     from .compile_inputs import verify_native_build
+    from .host_advice import host_guidance, joint_layout_plan, recommendation_review, print_host_json
 
 REGISTERS = {
     'textfloatsep', 'floatsep', 'intextsep', 'dbltextfloatsep', 'dblfloatsep',
@@ -37,18 +39,20 @@ REGISTERS = {
 DISPLAY_ENVS = {'equation', 'equation*', 'align', 'align*', 'gather', 'gather*',
                 'multline', 'multline*', 'displaymath'}
 LIST_ENVS = {'itemize', 'enumerate', 'description'}
+TEMPLATE_DIMENSIONS = {'textheight', 'textwidth', 'columnwidth', 'columnsep',
+                       'oddsidemargin', 'evensidemargin', 'topmargin'}
 TIERS = [
     (1, 'float_flow', 'Inspect restrictive placement, barriers, spans and float composition.',
      'Keep assets, captions, labels and reading order; compare label readability before combining figures.'),
-    (2, 'local_spacing', 'Adjust one existing float/caption gap by a small measured step.',
-     'Start with about 1-2pt at one actual gap; negative space needs visible separation, never overlap.'),
+    (2, 'local_spacing', 'Inspect explicit gaps, including large artificial space, and choose a measured correction.',
+     'Check whether the gap is intentional; use small trials for fine tuning and verify separation after larger restorations.'),
     (3, 'template_spacing', 'Adjust one display/list/paragraph spacing family within template rules.',
      'Use the current template value, preserve stretch/shrink, and test a small delta; body font stays fixed.'),
     (4, 'native_reflow', 'Review existing breaks and use local paragraph or operator-aware formula reflow.',
      r'End a local looseness group with \par inside it; preserve every formula operand, sign and label.'),
     (5, 'table_spacing', 'Review row padding, column padding and template-permitted local table type.',
      'Preserve ordered cells and units; inspect subscripts at reading zoom; no unreadable whole-table scaling.'),
-    (6, 'equivalent_rearrangement', 'Combine retained safe layout changes, then consider information-equivalent prose reflow.',
+    (6, 'equivalent_rearrangement', 'Consider coordinated layout rearrangement and task-authorized information-equivalent prose reflow.',
      'Prose rewriting needs task authorization and independent semantic review; never add filler or remove information.'),
 ]
 
@@ -118,7 +122,10 @@ def source_inventory(main: Path, root: Path) -> dict[str, Any]:
             second = group(active, first[1])
             if register in REGISTERS and second:
                 add('spacing_register', match.start(), second[1],
-                    register=register, value=second[0])
+                     register=register, value=second[0])
+            elif register in TEMPLATE_DIMENSIONS and second:
+                add('template_dimension', match.start(), second[1],
+                    register=register, value=second[0], command=match[0])
         for match in re.finditer(r'\\('+'|'.join(sorted(REGISTERS))+r')(?![A-Za-z@])\s*=\s*([^\n%{}]+)', active):
             # Lexical hint only: a register may instead be read by \the or
             # consumed by a custom macro. Do not certify an assignment here.
@@ -146,6 +153,42 @@ def source_inventory(main: Path, root: Path) -> dict[str, Any]:
                 'policy': 'Conservative project-wide review when include reachability is uncertain.'},
             'counts_scope': 'Literal markers in statically reachable sources; uncertain entries do not establish executed TeX counts.',
             'limitations': source_map['limitations']}
+
+
+def planning_review_candidates(inventory: dict[str, Any]) -> list[dict[str, Any]]:
+    """Highlight source leads, not proven defects or guaranteed page savings.
+
+    Template deviations and large explicit gaps are worth considering before
+    many tiny padding trials. Magnitude is only a navigation heuristic; a
+    legitimate gap and a template's own dimensions must not be removed blindly.
+    """
+    candidates = []
+    for entry in inventory['entries']:
+        kind = None
+        if entry['kind'] == 'template_dimension':
+            kind = 'explicit_template_dimension'
+            reason = 'Compare this assignment with the active class/package and intended template before changing it.'
+        elif entry['kind'] == 'local_spacing':
+            match = re.fullmatch(r'\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*'
+                                 r'(pt|mm|cm|in|\\(?:textheight|paperheight|baselineskip))\s*',
+                                 str(entry.get('value', '')))
+            if not match:
+                continue
+            value, unit = abs(float(match[1])), match[2]
+            threshold = {'pt': 18, 'mm': 6.4, 'cm': .64, 'in': .25,
+                         r'\textheight': .08, r'\paperheight': .08,
+                         r'\baselineskip': 1.5}[unit]
+            if value < threshold:
+                continue
+            kind = 'large_explicit_gap'
+            reason = 'Inspect the actual blank or overlap and neighboring floats; this source gap may be intentional.'
+        if kind:
+            candidates.append({
+                'kind': kind, 'source_anchor': dict(entry), 'reason': reason,
+                'defect_confirmed': False, 'predicted_pages_saved': None,
+                'host_review': recommendation_review(target_status=entry['anchor_status']),
+            })
+    return sorted(candidates, key=lambda item: item['kind'] != 'explicit_template_dimension')
 
 
 def _log_hints(path: Path) -> dict[str, Any]:
@@ -243,10 +286,15 @@ def build_toolbox(main: Path, *, root: Path | None = None, pdf: Path | None = No
         anchors = [entry for entry in inventory['entries'] if entry['kind'] in kinds]
         objects = inventory['objects'] if tier == 1 else [o for o in inventory['objects'] if o['kind'] == 'table'] if tier == 5 else []
         steps.append({'tier': tier, 'family': family, 'action': action, 'caution': caution,
-                      'anchors': anchors, 'objects': objects,
-                      'status': 'requires_host_selection', 'predicted_pages_saved': None})
+                       'anchors': anchors, 'objects': objects,
+                       'status': 'requires_host_selection', 'predicted_pages_saved': None,
+                       'host_review': recommendation_review()})
     report: dict[str, Any] = {
         'schema_version': '1.0', 'scope': 'host_page_fit_toolbox',
+        'host_guidance': host_guidance(),
+        'layout_plan': joint_layout_plan(objective),
+        'planning_review_candidates': planning_review_candidates(inventory),
+        'tier_order_required': False,
         'main': str(main), 'root': str(root), 'root_resolution': root_resolution,
         'source_inventory': inventory,
         'pdf_identity': {'path': str(pdf), 'sha256': profile.get('pdf_sha256'),
@@ -270,11 +318,12 @@ def build_toolbox(main: Path, *, root: Path | None = None, pdf: Path | None = No
             'actual_host_page_views': 'not_established',
             'checks': ['Fresh compile and full render of this source with the original engine.',
                        'Scientific payload, prose, assets, labels, citations and template preserved.',
-                       'Every page viewed; changed objects at reading zoom and neighboring pages compared.',
+                       'During trials inspect affected pages and neighbors; inspect every page for final acceptance.',
                        'No new overflow, unresolved references, hidden content or cramped/unreadable objects.',
                        'Compare with previous and useful retained candidates before keep/rollback.']},
-        'discipline': ['Fix other defects first; page-fit is the final repair phase.',
-                       'Change one tier at a time, then compile/render/review the entire paper.',
+        'discipline': ['Plan page count, readability, template and float flow together from the start.',
+                       'Choose or combine categories based on current evidence; tiers are not a mandatory sequence.',
+                       'Restore a confirmed template deviation or artificial gap before spending many trials on micro spacing.',
                        'Rollback a regressive trial only; keep useful proven fixes and try a different intervention.',
                        'An exact target is bidirectional. A one-page miss is unfinished; continue within the authorized task budget.',
                        'Expansion restores natural spacing/readability or float flow; never pad pages or add filler.',
@@ -345,7 +394,7 @@ def main() -> int:
         output.parent.mkdir(parents=True, exist_ok=True)
         with output.open('x', encoding='utf-8') as stream:
             stream.write(encoded)
-    print(encoded)
+    print_host_json(report)
     return 0 if report['observed_pdf_objective']['physical_pdf_pages'] is not None else 3
 
 

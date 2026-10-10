@@ -997,6 +997,8 @@ def snapshot_source_edit_checks(project_root: Path, rollback_target: str | Path,
         scientific_reports = []
         source_review_decisions = []
         changed_files = []
+        original_sources = {}
+        repaired_sources = {}
         for item in manifest.get("files", []):
             relative = str(item.get("path") or "")
             if Path(relative).suffix.lower() != ".tex":
@@ -1005,8 +1007,16 @@ def snapshot_source_edit_checks(project_root: Path, rollback_target: str | Path,
             current = root / relative
             if baseline is None or not current.is_file():
                 raise ValueError(f"source unavailable: {relative}")
-            original = baseline.read_text(encoding="utf-8", errors="surrogateescape")
-            repaired = current.read_text(encoding="utf-8", errors="surrogateescape")
+            if not current.resolve().is_relative_to(root) or any(path.is_symlink() for path in (current, *current.parents) if path != root and path.is_relative_to(root)):
+                raise ValueError(f"source path escaped or became a symlink: {relative}")
+            original_raw = baseline.read_bytes().decode("utf-8", errors="surrogateescape")
+            repaired_raw = current.read_bytes().decode("utf-8", errors="surrogateescape")
+            # Preserve byte-bound identities for include evidence while keeping
+            # the established universal-newline source-review API unchanged.
+            original = original_raw.replace("\r\n", "\n").replace("\r", "\n")
+            repaired = repaired_raw.replace("\r\n", "\n").replace("\r", "\n")
+            original_sources[relative] = original_raw
+            repaired_sources[relative] = repaired_raw
             if original != repaired:
                 changed_files.append(relative)
             reports.append(compare_layout_policy(
@@ -1019,7 +1029,8 @@ def snapshot_source_edit_checks(project_root: Path, rollback_target: str | Path,
             else:
                 prose_report = compare_layout_prose(original, repaired)
                 science_report = scientific_payload_diff(original, repaired)
-                matching_reviews = [review for review in source_reviews if isinstance(review, dict) and review.get("file") == relative]
+                matching_reviews = [review for review in source_reviews if isinstance(review, dict)
+                                    and review.get("review_scope") != "literal_include_context" and review.get("file") == relative]
                 science_report, prose_report, decision = apply_source_review(
                     original, repaired, project_root=root, file=relative,
                     review=matching_reviews[0] if len(matching_reviews) == 1 else None,
@@ -1030,7 +1041,103 @@ def snapshot_source_edit_checks(project_root: Path, rollback_target: str | Path,
                 source_review_decisions.append({"file": relative, **decision})
                 prose_reports.append({"file": relative, **prose_report})
                 scientific_reports.append({"file": relative, **science_report})
+        # A fragment's file-local parser has no information about a float in
+        # its parent. Reconstruct only a bounded, unchanged literal include
+        # graph. Keep the raw checks, and route exact wrapper-only ownership
+        # changes to review rather than declaring removed content/body shrink.
+        try:
+            from include_context import compare_include_contexts
+        except ModuleNotFoundError:
+            from .include_context import compare_include_contexts
+        ownership_components = {"tables", "math_floats", "numbers_floats", "protected_arguments",
+                                "layout_objects", "caption_label_bindings", "unowned_float_payload"}
+        context_files = sorted({
+            item["file"] for item in scientific_reports
+            if item["file"] in changed_files and item.get("status") not in {"pass", "unavailable"}
+            and ownership_components.intersection(item.get("changed_components", []))
+        } | {
+            finding["file"] for item in reports for finding in item.get("findings", [])
+            if finding.get("rule") == "body_font_shrink"
+        })
+        # Snapshot metadata is an OS path, not a literal TeX argument. Windows
+        # callers may use backslashes here; normalize its checked project path
+        # while leaving include argument validation deliberately strict.
+        manifest_main = str(manifest.get("main_tex") or "")
+        main_relative = (root / manifest_main).resolve().relative_to(root).as_posix() if manifest_main else ""
+        include_context = compare_include_contexts(
+            original_sources, repaired_sources, main_tex=main_relative,
+            files_to_check=context_files,
+        )
+        for context in include_context.get("contexts", []):
+            files = set(context["files"])
+            context_font_blocked = any(
+                finding.get("rule") in {"body_font_shrink", "body_font_size", "opaque_font_definition"}
+                for finding in context["layout_policy"].get("findings", [])
+            )
+            if not context_font_blocked:
+                for item in reports:
+                    if item.get("file") not in files:
+                        # compare_layout_policy records the file on findings,
+                        # rather than on the report itself.
+                        if not any(finding.get("file") in files for finding in item.get("findings", [])):
+                            continue
+                    removed = [finding for finding in item.get("findings", [])
+                               if finding.get("file") in files and finding.get("rule") == "body_font_shrink"]
+                    if not removed:
+                        continue
+                    item["file_local_report"] = {key: value for key, value in item.items() if key != "file_local_report"}
+                    item["findings"] = [finding for finding in item["findings"] if finding not in removed]
+                    item["include_context_corrections"] = {"root_file": context["root_file"], "removed_file_local_findings": removed,
+                                                           "reason": "literal_parent_scope_is_not_body_font_shrink"}
+                    item["blocking_count"] = sum(finding["status"] == "blocked" for finding in item["findings"])
+                    item["review_count"] = sum(finding["status"] == "manual_review" for finding in item["findings"])
+                    item["status"] = "blocked" if item["blocking_count"] else "manual_review" if item["findings"] else "pass"
+            if context["layout_policy"].get("findings"):
+                # Includes may also expose a real leak not visible in either
+                # file alone. Expanded offsets are explicitly labelled and
+                # never matched against a file-local approval.
+                reports.append({**context["layout_policy"], "coordinate_system": "expanded_literal_include_context",
+                                "source_identities": context["source_identities"],
+                                "findings": [{**finding, "coordinate_system": "expanded_literal_include_context",
+                                              "root_file": context["root_file"], "source_files": context["files"]}
+                                             for finding in context["layout_policy"]["findings"]]})
+            if context["float_wrapper_residual_equal"] and context.get("requires_host_review"):
+                include_reviews = [review for review in source_reviews if isinstance(review, dict)
+                                   and review.get("review_scope") == "literal_include_context"
+                                   and review.get("file") == context["root_file"]]
+                if len(include_reviews) > 1:
+                    include_decision = {"checked": True, "status": "manual_review", "reason": "multiple include context reviews for the same owning file"}
+                elif include_reviews:
+                    try:
+                        from source_review import validate_include_context_review
+                    except ModuleNotFoundError:
+                        from .source_review import validate_include_context_review
+                    include_decision = validate_include_context_review(
+                        project_root=root, rollback_target=rollback_target, file=context["root_file"], review=include_reviews[0])
+                else:
+                    include_decision = {"checked": True, "status": "not_used", "verification_method": "explicit_host_review"}
+                source_review_decisions.append({"file": context["root_file"], "review_scope": "literal_include_context", **include_decision})
+                include_verified = include_decision.get("status") == "verified"
+                for channel in (scientific_reports, prose_reports):
+                    for index, item in enumerate(channel):
+                        if item.get("file") not in files or item.get("status") == "pass" or item.get("checked") is not True:
+                            continue
+                        raw = dict(item)
+                        channel[index] = {**item, "status": "pass" if include_verified else "manual_review", "file_local_report": raw,
+                                          "verification_method": "explicit_host_review" if include_verified else "bounded_include_context_requires_host_review",
+                                          "assessment": {"classification": "include_float_scope_uncertainty",
+                                                         "scope": "exact_ordered_source_residual",
+                                                         "semantic_damage_proven": False, "requires_host_review": not include_verified,
+                                                         "confirmed_changed_components": [],
+                                                         "review_changed_components": item.get("changed_components", [])},
+                                          "regression_reasons": [] if include_verified else ["Float ownership changed across literal includes; review numbering and the fresh PDF."],
+                                          "include_context_root": context["root_file"], "host_review": include_decision}
+                scientific_reports.append({"file": context["root_file"], "checked": True,
+                                           "status": "pass" if include_verified else "manual_review",
+                                           "comparison": "include_float_scope_review", "requires_host_review": not include_verified,
+                                           "host_review": include_decision, "reason": context["host_check"]})
         report = combine_policy_reports(reports)
+        report["file_reports"] = reports
         report["rollback_target"] = str(rollback_target)
         prose_findings = [item for item in prose_reports if item.get("status") != "pass"]
         prose_checked = bool(prose_reports) and all(item.get("checked") is True for item in prose_reports)
@@ -1048,6 +1155,8 @@ def snapshot_source_edit_checks(project_root: Path, rollback_target: str | Path,
             "changed_files": changed_files,
             "files_checked": len(reports),
             "source_review_decisions": source_review_decisions,
+            "include_context": include_context,
+            "main_tex": main_relative,
             "rollback_target": str(rollback_target),
         }
     except (OSError, ValueError, KeyError, TypeError) as error:

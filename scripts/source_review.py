@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 try:
@@ -20,6 +21,7 @@ except ImportError:
  from .layout_policy import collect_layout_review_binding, verify_layout_review_binding_current, _relative_path
 
 SCHEMA="paperfit.source_uncertainty_review.v1"
+INCLUDE_SCOPE="literal_include_context"
 def text_hash(text:str)->str:
  return hashlib.sha256(text.encode("utf-8",errors="surrogateescape")).hexdigest()
 
@@ -120,6 +122,91 @@ def load_source_review(path:Path)->dict[str,Any]:
  if not isinstance(payload,dict) or payload.get("schema_version")!=SCHEMA:raise ValueError("unsupported source-review schema")
  return payload
 
+def _include_review_basis(project_root:Path,rollback_target:str|Path,file:str)->dict[str,Any]:
+ """Rebuild from the caller's verified baseline, never from submitted claims."""
+ try:
+  from layout_policy import snapshot_source_edit_checks
+  from runtime_snapshots import resolve_manifest_path
+ except ImportError:
+  from .layout_policy import snapshot_source_edit_checks
+  from .runtime_snapshots import resolve_manifest_path
+ root=Path(project_root).resolve();relative=_relative_path(root,file)
+ manifest=resolve_manifest_path(root,rollback_target).resolve(strict=True)
+ # Empty source_reviews is essential: the nested check cannot approve or
+ # recursively validate the request whose trusted basis it is reconstructing.
+ report=snapshot_source_edit_checks(root,rollback_target,source_reviews=[])
+ include=report.get("include_context",{})
+ if include.get("status")!="available":raise ValueError("verified literal include context unavailable")
+ matches=[item for item in include.get("contexts",[]) if item.get("root_file")==relative]
+ if len(matches)!=1:raise ValueError("unique owning include context required")
+ context=matches[0]
+ if context.get("float_wrapper_residual_equal") is not True or context.get("requires_host_review") is not True:
+  raise ValueError("difference is not an exact float-wrapper residual")
+ if any(f.get("status")=="blocked" for f in context.get("layout_policy",{}).get("findings",[])):
+  raise ValueError("include context contains a forbidden layout operation")
+ return {"main_tex":report.get("main_tex"),"snapshot_identity":{"manifest_path":str(manifest),"sha256":hashlib.sha256(manifest.read_bytes()).hexdigest()},
+         "classification":{"eligible":True,"kinds":["include_float_scope_uncertainty"],
+                           "context":context,"limits":include.get("limits")}}
+
+def build_include_context_review_request(*,project_root:Path,rollback_target:str|Path,file:str,
+                                         main_tex:str,page_images_dir:str,
+                                         compile_journal:str="data/compile/journal.jsonl")->dict[str,Any]:
+ """Unsigned, native-build-bound request for one owning multi-file context."""
+ root=Path(project_root).resolve();relative=_relative_path(root,file)
+ basis=_include_review_basis(root,rollback_target,relative)
+ if _relative_path(root,main_tex)!=basis["main_tex"]:raise ValueError("review main differs from verified snapshot main")
+ context={"main_tex":main_tex,"page_images_dir":page_images_dir,"compile_journal":compile_journal}
+ live=collect_layout_review_binding(root,**context)
+ return {"schema_version":SCHEMA,"review_scope":INCLUDE_SCOPE,"file":relative,
+         "rollback_target":basis["snapshot_identity"]["manifest_path"],**basis,"context":context,
+         "binding_status":live["status"],"blocking_checks":live["blocking_checks"],"binding":live["binding"],
+         "approved":False,"source_reviewed":False,"all_pages_inspected":False,
+         "content_preservation_confirmed":False,"template_checked":False,"intended_object_checked":False,
+         "caption_label_bindings_checked":False,"reason":"",
+         "host_confirmation_kind":"explicit_host_judgment","semantic_preservation_proven":False,
+         "scope_note":"Verified snapshot/literal include reconstruction plus explicit current-PDF host judgment only. No automatic semantic or final acceptance proof; layout-policy approval remains separate."}
+
+def validate_include_context_review(*,project_root:Path,rollback_target:str|Path,file:str,
+                                    review:dict[str,Any]|None)->dict[str,Any]:
+ result={"checked":True,"status":"not_used","verification_method":"explicit_host_review"}
+ if not review:return result
+ result["status"]="manual_review"
+ try:
+  if not isinstance(review,dict) or review.get("schema_version")!=SCHEMA or review.get("review_scope")!=INCLUDE_SCOPE:
+   raise ValueError("include-review schema/scope unavailable")
+  root=Path(project_root).resolve();relative=_relative_path(root,file)
+  if review.get("file")!=relative:raise ValueError("review is for another owning context")
+  basis=_include_review_basis(root,rollback_target,relative)
+  if (review.get("snapshot_identity")!=basis["snapshot_identity"]
+      or review.get("main_tex")!=basis["main_tex"]
+      or review.get("rollback_target")!=basis["snapshot_identity"]["manifest_path"]
+      or review.get("classification")!=basis["classification"]):
+   raise ValueError("snapshot, include graph or before/current source identities changed")
+  context=review.get("context")
+  if not isinstance(context,dict) or set(context)!={"main_tex","page_images_dir","compile_journal"}:
+   raise ValueError("include-review compile/page context unavailable")
+  if _relative_path(root,context.get("main_tex",""))!=basis["main_tex"]:raise ValueError("review main differs from verified snapshot main")
+  live=collect_layout_review_binding(root,**context)
+  if live.get("status")!="available" or not live.get("binding") or live["binding"]!=review.get("binding"):
+   raise ValueError("current native build, imported inputs, PDF or pages changed/unavailable")
+  imported={item["path"]:item["sha256"] for item in live["binding"]["imported_inputs"]["files"]}
+  identities=basis["classification"]["context"]["source_identities"]["after"]
+  if any(imported.get(path)!=digest for path,digest in identities.items()):
+   raise ValueError("reviewed include sources were not the current compiled inputs")
+  for flag in ("approved","source_reviewed","all_pages_inspected","content_preservation_confirmed",
+               "template_checked","intended_object_checked","caption_label_bindings_checked"):
+   if review.get(flag) is not True:raise ValueError("explicit host confirmation missing: "+flag)
+  if not isinstance(review.get("reason"),str) or not review["reason"].strip():raise ValueError("host explanation missing")
+  verify_layout_review_binding_current(root,live["binding"])
+  if _include_review_basis(root,rollback_target,relative)!=basis:
+   raise ValueError("snapshot/include source changed at final read barrier")
+  return {**result,"status":"verified","kinds":["include_float_scope_uncertainty"],
+          "reason":review["reason"],"binding":live["binding"],"snapshot_identity":basis["snapshot_identity"],
+          "context_root":relative,"files":list(identities),"host_confirmation_kind":"explicit_host_judgment",
+          "semantic_preservation_proven":False,"scope_note":review.get("scope_note","")}
+ except (OSError,ValueError,KeyError,TypeError,UnicodeError) as exc:
+  result["reason"]=str(exc);return result
+
 def validate_source_review(original:str,repaired:str,*,project_root:Path|None,file:str,
                            review:dict[str,Any]|None)->dict[str,Any]:
  result={"checked":True,"status":"not_used","verification_method":"explicit_host_review"}
@@ -127,6 +214,7 @@ def validate_source_review(original:str,repaired:str,*,project_root:Path|None,fi
  result["status"]="manual_review"
  try:
   if project_root is None or not isinstance(review,dict) or review.get("schema_version")!=SCHEMA:raise ValueError("source-review root/schema unavailable")
+  if review.get("review_scope")==INCLUDE_SCOPE:raise ValueError("include context review requires the verified snapshot adapter")
   root=Path(project_root).resolve();relative=_relative_path(root,file)
   context=review.get("context")
   if not isinstance(context,dict) or set(context)!={"main_tex","page_images_dir","compile_journal"}:raise ValueError("source-review context unavailable")
@@ -202,23 +290,40 @@ def main(argv=None)->int:
  parser=argparse.ArgumentParser(description="Read-only host review of classified source uncertainty; never bypass confirmed loss.")
  parser.add_argument("mode",choices=("request","validate"))
  parser.add_argument("--root",type=Path,required=True);parser.add_argument("--file",required=True)
- parser.add_argument("--main-tex",required=True);parser.add_argument("--baseline-tex",required=True)
+ parser.add_argument("--main-tex",required=True);parser.add_argument("--baseline-tex")
+ parser.add_argument("--rollback-target",help="Verified source snapshot; --file must name the owning include context.")
  parser.add_argument("--pages-dir",default="data/pages");parser.add_argument("--compile-journal",default="data/compile/journal.jsonl")
  parser.add_argument("--review-json")
  args=parser.parse_args(argv);root=args.root.resolve()
  try:
   file=_relative_path(root,args.file)
-  original=(root/_relative_path(root,args.baseline_tex)).read_text(encoding="utf-8",errors="surrogateescape")
-  repaired=(root/file).read_text(encoding="utf-8",errors="surrogateescape")
-  if args.mode=="request":
+  if args.rollback_target:
+   if args.baseline_tex:raise ValueError("choose --rollback-target or --baseline-tex")
+   if args.mode=="request":
+    result=build_include_context_review_request(project_root=root,rollback_target=args.rollback_target,file=file,
+             main_tex=args.main_tex,page_images_dir=args.pages_dir,compile_journal=args.compile_journal);code=3
+   else:
+    if not args.review_json:raise ValueError("--review-json required")
+    review=load_source_review(root/_relative_path(root,args.review_json))
+    if _relative_path(root,review.get("context",{}).get("main_tex",""))!=_relative_path(root,args.main_tex):raise ValueError("review main differs from requested main")
+    result=validate_include_context_review(project_root=root,rollback_target=args.rollback_target,file=file,review=review)
+    code=0 if result["status"]=="verified" else 3
+  elif args.mode=="request":
+   if not args.baseline_tex:raise ValueError("--baseline-tex or --rollback-target required")
+   original=(root/_relative_path(root,args.baseline_tex)).read_text(encoding="utf-8",errors="surrogateescape")
+   repaired=(root/file).read_text(encoding="utf-8",errors="surrogateescape")
    result=build_source_review_request(original,repaired,project_root=root,file=file,main_tex=args.main_tex,page_images_dir=args.pages_dir,compile_journal=args.compile_journal)
    code=3
   else:
+   if not args.baseline_tex:raise ValueError("--baseline-tex or --rollback-target required")
+   original=(root/_relative_path(root,args.baseline_tex)).read_text(encoding="utf-8",errors="surrogateescape")
+   repaired=(root/file).read_text(encoding="utf-8",errors="surrogateescape")
    if not args.review_json:raise ValueError("--review-json required")
    review=load_source_review(root/_relative_path(root,args.review_json))
    result=validate_source_review(original,repaired,project_root=root,file=file,review=review)
    code=0 if result["status"]=="verified" else 3
  except (OSError,ValueError,TypeError,UnicodeError) as exc:
   result={"checked":False,"status":"manual_review","reason":str(exc)};code=3
+ if hasattr(sys.stdout,"reconfigure"):sys.stdout.reconfigure(encoding="utf-8")
  print(json.dumps(result,ensure_ascii=False,indent=2));return code
 if __name__=="__main__":raise SystemExit(main())

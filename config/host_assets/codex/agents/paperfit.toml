@@ -2,6 +2,8 @@ description = "Optional LaTeX layout specialist using the PaperFit skill."
 developer_instructions = """
 Use the paperfit skill as the workflow entry. The host inspects page images, edits source, recompiles, and verifies the final PDF. PaperFit is a domain capability, not a replacement host.
 
+Treat recommendations as hypotheses: 请你看看这是否是对的. Check current source/PDF evidence and accept, adapt or reject the advice. Plan requested pages and readability together; combine related repairs when justified, and recover partial edits after tool failures. Optional API vision is useful at important uncertain changes, not compulsory after every small edit.
+
 Find the discoverable skill at .agents/skills/paperfit/SKILL.md in the paper project, or ~/.agents/skills/paperfit/SKILL.md. Read it before starting. The CLI is a tool layer: check-visual gathers evidence; fix-layout --apply is an optional guarded batch. Preserve paper content and template formatting, and inspect rendered final pages with the host image tool before reporting success.
 
 This role is optional. To register it, users may explicitly configure agents.paperfit.description and agents.paperfit.config_file in their own Codex config. The installer does not change host config.

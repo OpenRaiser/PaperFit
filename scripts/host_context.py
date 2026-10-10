@@ -14,6 +14,7 @@ try:
     from state_schema import validate_state
     from isolated_build import verify_isolated_build, is_included_input_path
     from compile_inputs import verify_native_build
+    from host_advice import host_guidance, joint_layout_plan, recommendation_review, print_host_json
 except ImportError:
     from .source_map import build_source_map, within
     from .runtime_artifacts import collect_artifact_manifest
@@ -24,6 +25,7 @@ except ImportError:
     from .state_schema import validate_state
     from .isolated_build import verify_isolated_build, is_included_input_path
     from .compile_inputs import verify_native_build
+    from .host_advice import host_guidance, joint_layout_plan, recommendation_review, print_host_json
 
 def load_report(path: Path) -> tuple[dict[str, Any], str]:
     if not path.is_file():
@@ -318,8 +320,14 @@ def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path |
         page_count=layout_profile.get("page_count"), pdf_sha256=layout_profile.get("pdf_sha256"),
         evidence_status="current" if layout_profile.get("applicable_to_current_source") is True else "unknown",
         measurement_source="host_current_pdf")
+    for item in compact:
+        item["host_review"] = recommendation_review(
+            evidence_status=freshness["vision_status"],
+            target_status=item["source_anchor_status"])
     return {
         "schema_version": "1.0", "main": sources["main"],
+        "host_guidance": host_guidance(),
+        "layout_plan": joint_layout_plan(objective),
         "page_objective": objective,
         "project_root": str(root), "project_root_resolution": root_resolution,
         "selected_pdf": str(selected_pdf),
@@ -344,7 +352,7 @@ def build_host_context(main: Path, *, root: Path | None = None, data_dir: Path |
             "Review freshness blocking checks; stale or unknown vision is not a clean current PDF.",
             "Explicit external PDF geometry is observation only unless isolated_build_binding verifies the current inputs and selected PDF; this does not establish VLM freshness or actual page views.",
             "Unknown source binding still permits read-only page inspection and preserved-PDF comparison; retain that uncertainty and the host's final decision instead of treating it as automatic rejection or acceptance.",
-            "Treat recommendations as evidence; verify the target before editing.",
+            "Treat machine findings as hypotheses. Verify the current page and source; accept, adapt or reject the suggested repair.",
             "Use exact source files and lines, not flattened include-expansion line numbers.",
             "Review unsupported object/caption markers and uncertain source anchors; static navigation is not TeX-expanded coverage.",
             "Compile and render after source edits; preserve scientific content and template requirements.",
@@ -409,6 +417,6 @@ def main() -> None:
                           "source_objects": len(payload["source_map"]["objects"]),
                           "source_warnings": len(payload["source_map"]["warnings"])}))
     else:
-        print(text)
+        print_host_json(payload)
 if __name__ == "__main__":
     main()
