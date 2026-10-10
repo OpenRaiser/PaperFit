@@ -528,16 +528,19 @@ def _write_case_csv(path: Path, reports: List[Dict[str, Any]]) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run VLM defect/constraint/pairwise evaluation on a fixed sample.")
-    parser.add_argument("--output-dir", default="baseline_result/current_vlm_10case_B0_OURS")
+    parser.add_argument("--output-dir", default="baseline_result/current_vlm_200case_B0_OURS")
     parser.add_argument("--case-root", default="benchmark_cases")
-    parser.add_argument("--sample-size", type=int, default=10)
+    parser.add_argument("--sample-size", type=int, default=200, help="Number of cases to evaluate (default: 200)")
     parser.add_argument("--seed", type=int, default=20260426)
     parser.add_argument("--method-root", action="append", default=[], help="Override METHOD=PATH")
     parser.add_argument("--methods", default=None, help="Comma-separated methods to evaluate, e.g. B0,B1,B2,B3,B4")
     parser.add_argument("--evaluate-methods", default=None, help="Comma-separated subset to score after method roots are loaded")
     parser.add_argument("--case-list-file", default=None, help="Evaluate exact case ids listed one per line")
     parser.add_argument("--force", action="store_true")
-    parser.add_argument("--allow-missing-b0-pages", action="store_true")
+    parser.add_argument("--allow-missing-b0-pages", action="store_true", default=True,
+                        help="Include non-renderable B0 cases using render-rescue evaluation (default)")
+    parser.add_argument("--require-b0-pages", action="store_false", dest="allow_missing_b0_pages",
+                        help="Restrict sampling to cases with successfully rendered B0 pages")
     parser.add_argument("--vlm-api-url", default=None)
     parser.add_argument("--vlm-api-key", default=None)
     parser.add_argument("--vlm-model-name", default=None)

@@ -45,7 +45,7 @@ def host_guidance() -> dict[str, Any]:
             "approval_required": "Optional batch authorization or supported-scope limit; already authorized native host repairs remain available.",
             "blocked": "The reported route or checked condition is blocked. Investigate false positives; do not discard confirmed content damage or use stale evidence to certify success.",
         },
-        "verification_scope": "Review coherent candidates, not a mandatory acknowledgement for every finding. Recompile changed candidates, inspect affected pages, and inspect all final physical pages before acceptance.",
+        "verification_scope": "Group related edits into a coherent candidate. After that batch, recompile, rerender and inspect every current physical page at readable scale, with detailed inspection of repaired objects and suspected regressions. Keep verified progress and continue when preservation/template checks pass and no confirmed regression is introduced; unchanged original defects or an ineffective sub-edit do not require discarding successful repairs. Correct or selectively revert harmful edits where separation is reliable, then rebuild, rerender and inspect all pages of the combined result; otherwise restore the smallest safe checkpoint, preserving previously verified rounds. Intermediate retention is distinct from final completion. Inspect all final pages after the last source change. Machine reports do not substitute for actual page views; guarded-route thresholds still apply.",
     }
 
 
