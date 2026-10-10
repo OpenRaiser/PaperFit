@@ -31,6 +31,8 @@ TEXT_SPACE_COMMANDS={'quad','qquad'}
 # arguments, and never consume a following group, word, sign or numeric result.
 ZERO_ARG_LAYOUT_COMMANDS={'balance','nobalance'}
 REGISTER_DECLARATIONS={'newlength','newdimen','newskip','newmuskip','dimendef','skipdef','muskipdef','countdef','chardef','mathchardef','toksdef'}
+DOCUMENT_COMMAND_DECLARATIONS={'NewDocumentCommand','RenewDocumentCommand','ProvideDocumentCommand','DeclareDocumentCommand'}
+DOCUMENT_ENVIRONMENT_DECLARATIONS={'NewDocumentEnvironment','RenewDocumentEnvironment','ProvideDocumentEnvironment','DeclareDocumentEnvironment'}
 
 def _command(s:str,i:int)->Tuple[str,int]:
  m=re.match(r'\\([A-Za-z@]+|.)',s[i:],re.S)
@@ -383,7 +385,7 @@ def fontsize_layout_end(source:str,pos:int)->int|None:
  return last if re.fullmatch(number,first) and re.fullmatch(number,second) else None
 
 
-def _shadowed_presentation_commands(source:str)->frozenset[str]:
+def _shadowed_presentation_commands(source:str,*,include_constructed:bool=True)->frozenset[str]:
  # Newly normalized controls must keep their literal invocation when the
  # source directly defines them. This is not macro expansion or alias tracing.
  names=set(shadowed_literal_url_commands(source))
@@ -399,12 +401,12 @@ def _shadowed_presentation_commands(source:str)->frozenset[str]:
  # Constructed names remain conservatively opaque instead of being guessed.
  # Environment declarations also define their same-named begin control, and
  # can be nested inside a later-invoked outer macro just like command forms.
- literal_definitions=REGISTER_DECLARATIONS|{'def','gdef','edef','xdef','let','newcommand','renewcommand','providecommand','DeclareRobustCommand','DeclareMathOperator','newenvironment','renewenvironment','provideenvironment'}
+ literal_definitions=REGISTER_DECLARATIONS|DOCUMENT_COMMAND_DECLARATIONS|DOCUMENT_ENVIRONMENT_DECLARATIONS|{'def','gdef','edef','xdef','let','newcommand','renewcommand','providecommand','DeclareRobustCommand','DeclareMathOperator','newenvironment','renewenvironment','provideenvironment'}
  i=0
  while i<len(source):
   if source[i]!='\\':i+=1;continue
   name,end=_command(source,i)
-  if name in {'csname','catcode'}:names.update(presentation_targets)
+  if include_constructed and name in {'csname','catcode'}:names.update(presentation_targets)
   if name in literal_definitions:
    pos=end
    if pos<len(source) and source[pos]=='*':pos+=1
@@ -416,6 +418,47 @@ def _shadowed_presentation_commands(source:str)->frozenset[str]:
    if target_name in presentation_targets and target_name not in local_lengths:names.add(target_name)
   i=end
  return frozenset(names)
+
+def presentation_shadow_context(sources)->frozenset[str]:
+ """Union literal shadows from the caller's baseline/current source inventory.
+
+ Callers keep their source identities and compare files separately. This only
+ supplies missing declaration context; it does not expand or execute TeX.
+ """
+ return frozenset().union(*(_shadowed_presentation_commands(active_source(source)) for source in sources))
+
+def presentation_dynamic_context(sources)->frozenset[str]:
+ """Controls opaque solely because this inventory contains constructed TeX.
+
+ Explicit literal shadows remain excluded: a known declaration emitting #1 or
+ text cannot use the dynamic-template uncertainty route.
+ """
+ active=[active_source(source) for source in sources]
+ if not any(re.search(r'\\(?:csname|catcode)(?![A-Za-z@])',source) for source in active):return frozenset()
+ shadows=presentation_shadow_context(active)
+ literal=frozenset().union(*(_shadowed_presentation_commands(source,include_constructed=False) for source in active))
+ return shadows-literal
+
+def project_presentation_shadow_context(project_root,main_tex:str,*,sources=())->frozenset[str]:
+ """Read reachable current definitions for standalone project-aware callers.
+
+ Snapshot/executor callers additionally supply their captured baseline texts.
+ Installed dependencies are not expanded and no source identities are waived.
+ """
+ from pathlib import Path
+ from runtime_snapshots import discover_source_files, TEX_DEFINITION_EXTENSIONS
+ root=Path(project_root).resolve()
+ current=[path.read_text(encoding='utf-8',errors='surrogateescape')
+          for path in discover_source_files(root,main_tex) if path.suffix.lower() in TEX_DEFINITION_EXTENSIONS]
+ return presentation_shadow_context([*sources,*current])
+
+def project_presentation_dynamic_context(project_root,main_tex:str,*,sources=())->frozenset[str]:
+ from pathlib import Path
+ from runtime_snapshots import discover_source_files, TEX_DEFINITION_EXTENSIONS
+ root=Path(project_root).resolve()
+ current=[path.read_text(encoding='utf-8',errors='surrogateescape')
+          for path in discover_source_files(root,main_tex) if path.suffix.lower() in TEX_DEFINITION_EXTENSIONS]
+ return presentation_dynamic_context([*sources,*current])
 
 def _shadowed_literal_url_payload(source:str)->tuple[Any,...]:
  shadowed=shadowed_literal_url_commands(source);records=[];i=0
@@ -552,7 +595,7 @@ def _math_tokens(s:str,*,opaque_commands:frozenset[str]=frozenset())->Tuple[str,
     arg,end=_group(s,j)
     if end>j:
      out.extend(('\\'+name,'{',re.sub(r'\s+', ' ', arg).strip(),'}'));i=end;continue
-   if name in {'hspace','vspace'}:
+   if name in {'hspace','vspace'} and name not in opaque_commands:
     if j<len(s) and s[j]=='*':j+=1
     _,k=_group(s,j);i=k if k>j else j;continue
    out.append('\\'+name);i=j;continue
@@ -608,10 +651,10 @@ def _caption_at(s:str,start:int,*,family:str|None=None,opaque_commands:frozenset
          'star':star,'short':short,'text':text,'supported':reason is None,
          'reason':reason,'source':s[start:end]}
 
-def standard_caption_declarations(source:str)->List[Dict[str,Any]]:
+def standard_caption_declarations(source:str,*,opaque_commands:frozenset[str]=frozenset())->List[Dict[str,Any]]:
  """Position-preserving caption records, including unsupported raw invocations."""
  from source_map import masked_tex
- active=masked_tex(source);envs=_envs(active);shadowed=_shadowed_presentation_commands(active_source(source));records=[];i=0
+ active=masked_tex(source);envs=_envs(active);shadowed=opaque_commands|_shadowed_presentation_commands(active_source(source));records=[];i=0
  while i<len(active):
   if active[i]!='\\':i+=1;continue
   name,end=_command(active,i)
@@ -656,7 +699,7 @@ def _caption_binding_payload(binding:Dict[str,Any])->Tuple[Any,...]:
  return (binding['relation'],tuple((c['command'],c['star'],tuple(c['arguments']),c['supported'],
           c['relation_to_caption'],c['relation_to_label']) for c in binding['counter_controls']))
 
-def standard_layout_object_inventory(source:str)->Dict[str,Any]:
+def standard_layout_object_inventory(source:str,*,opaque_commands:frozenset[str]=frozenset())->Dict[str,Any]:
  """Explicit local source ownership, never a rendering or semantic proof.
 
  Only unique labelled/captioned floats and balanced standard minipage/group
@@ -664,8 +707,8 @@ def standard_layout_object_inventory(source:str)->Dict[str,Any]:
  cannot justify a container-count exemption at a caller's acceptance boundary.
  """
  from source_map import masked_tex
- active=masked_tex(source);envs=_envs(active);shadowed=_shadowed_presentation_commands(active_source(source))
- floats=[e for e in envs if e['name'] in FLOAT_ENVS];captions=standard_caption_declarations(source)
+ active=masked_tex(source);envs=_envs(active);shadowed=opaque_commands|_shadowed_presentation_commands(active_source(source))
+ floats=[e for e in envs if e['name'] in FLOAT_ENVS];captions=standard_caption_declarations(source,opaque_commands=shadowed)
  scientific_regions=[e for e in envs if e['name'] in TABLE_ENVS]+_math_spans(active,envs)
  labels=[(m.start(),m[1]) for m in re.finditer(r'\\label\s*\{([^{}]+)\}',active)];counts=Counter(label for _,label in labels)
  objects=[];unsupported=[];scopes=[]
@@ -1048,7 +1091,7 @@ def _macro_definitions(s:str)->Tuple[Any,...]:
                 '\\floatpagefraction','\\dbltopfraction','\\dblfloatpagefraction'}
  declarations={'newcommand','renewcommand','providecommand','DeclareRobustCommand',
                'DeclareMathOperator','newenvironment','renewenvironment','provideenvironment',
-               'newcolumntype'}
+               'newcolumntype'}|DOCUMENT_COMMAND_DECLARATIONS|DOCUMENT_ENVIRONMENT_DECLARATIONS
  primitives={'def','gdef','edef','xdef'}
  records=[];i=0
  while i<len(s):
@@ -1082,14 +1125,19 @@ def _macro_definitions(s:str)->Tuple[Any,...]:
     while k<len(s) and s[k].isspace():k+=1
     if k<len(s) and s[k]=='\\':target_name,end=_command(s,k);target='\\'+target_name
    k=end;signature=[]
-   for _ in range(2):
-    pos=k
-    while pos<len(s) and s[pos].isspace():pos+=1
-    if pos<len(s) and s[pos]=='[':arg,k=_group(s,pos,'[',']');signature.append(arg)
+   if name in DOCUMENT_COMMAND_DECLARATIONS|DOCUMENT_ENVIRONMENT_DECLARATIONS:
+    argument_spec,last=_group(s,k)
+    if last<=k:i=j;continue
+    signature.append(argument_spec);k=last
+   else:
+    for _ in range(2):
+     pos=k
+     while pos<len(s) and s[pos].isspace():pos+=1
+     if pos<len(s) and s[pos]=='[':arg,k=_group(s,pos,'[',']');signature.append(arg)
    body,end=_group(s,k)
    if end>k:
     bodies=[body]
-    if name.endswith('environment'):
+    if name.endswith('environment') or name in DOCUMENT_ENVIRONMENT_DECLARATIONS:
      tail,last=_group(s,end)
      if last>end:bodies.append(tail);end=last
     known_layout = target in layout_macros and (not signature or [arg.strip() for arg in signature]==['0']) and len(bodies)==1 and re.fullmatch(r'\s*(?:\d+(?:\.\d*)?|\.\d+)\s*',body)
@@ -1119,10 +1167,10 @@ def _macro_definitions(s:str)->Tuple[Any,...]:
   i=j
  return tuple(records)
 
-def _payload(s:str)->Dict[str,Any]:
- object_inventory=standard_layout_object_inventory(s);caption_records=standard_caption_declarations(s)
+def _payload(s:str,*,opaque_commands:frozenset[str]=frozenset())->Dict[str,Any]:
+ object_inventory=standard_layout_object_inventory(s,opaque_commands=opaque_commands);caption_records=standard_caption_declarations(s,opaque_commands=opaque_commands)
  objects=object_inventory['objects'];caption_by_start={c['start']:c for c in caption_records}
- s=active_source(s);opaque_commands=_shadowed_presentation_commands(s);envs=_envs(s);floats=[e for e in envs if e['name'] in FLOAT_ENVS];tables=[e for e in envs if e['name'] in TABLE_ENVS];math=_math_spans(s,envs)
+ s=active_source(s);opaque_commands=opaque_commands|_shadowed_presentation_commands(s);envs=_envs(s);floats=[e for e in envs if e['name'] in FLOAT_ENVS];tables=[e for e in envs if e['name'] in TABLE_ENVS];math=_math_spans(s,envs)
  def context(start):
   owners=[o for o in objects if o['start']<=start<o['end']]
   if len(owners)==1:
@@ -1278,7 +1326,7 @@ _OBJECT_PRESENTATION_COMMANDS=FONT_DECL|RULES|LAYOUT_ONE|LAYOUT_LENGTH_REGISTERS
 }
 
 
-def _identified_layout_objects(source:str)->Tuple[List[Dict[str,Any]],List[str]]:
+def _identified_layout_objects(source:str,*,opaque_commands:frozenset[str]=frozenset())->Tuple[List[Dict[str,Any]],List[str]]:
  """Bind only unique, self-contained math/table objects, without macro expansion."""
  s=active_source(source);envs=_envs(s);math=_math_spans(s,envs)
  from source_map import masked_tex
@@ -1288,10 +1336,10 @@ def _identified_layout_objects(source:str)->Tuple[List[Dict[str,Any]],List[str]]
  all_labels=re.findall(r'\\label\s*\{([^{}]+)\}',s);objects=[];reasons=[]
  if re.search(r'\\(?:if[A-Za-z@]*|else|fi|csname|catcode|input|include)(?![A-Za-z@])',s):
   return [],['conditional_dynamic_or_external_source']
- caption_records=standard_caption_declarations(source)
+ caption_records=standard_caption_declarations(source,opaque_commands=opaque_commands)
  declarations=_macro_definitions(s)
  defined={str(r[1] if r[0] in {'def','gdef','edef','xdef','let'} else r[2]).lstrip('\\') for r in declarations}
- opaque=_shadowed_presentation_commands(s)
+ opaque=opaque_commands|_shadowed_presentation_commands(s)
  for kind,item in [('table',e) for e in tables]+[('math',m) for m in math]:
   start,end=item['start'],item['end'];parent=None
   parents=[e for e in floats if e['start']<=start and end<=e['end']]
@@ -1398,10 +1446,10 @@ def _opaque_source_invocations(source:str)->Tuple[str,...]:
  return tuple(records)
 
 
-def identified_layout_equivalence(original:str,repaired:str)->Dict[str,Any]:
+def identified_layout_equivalence(original:str,repaired:str,*,opaque_commands:frozenset[str]=frozenset())->Dict[str,Any]:
  """Exact per-label payload proof for finite same-file wrapper migrations."""
- before,old_reasons=_identified_layout_objects(original)
- after,new_reasons=_identified_layout_objects(repaired)
+ before,old_reasons=_identified_layout_objects(original,opaque_commands=opaque_commands)
+ after,new_reasons=_identified_layout_objects(repaired,opaque_commands=opaque_commands)
  a={o['label']:o for o in before};b={o['label']:o for o in after}
  result={'checked':True,'status':'not_proven','objects':[],
          'reasons':old_reasons+new_reasons,
@@ -1415,7 +1463,7 @@ def identified_layout_equivalence(original:str,repaired:str)->Dict[str,Any]:
  def residual(source,objects):
   active=active_source(source)
   for obj in reversed(objects):active=active[:obj['start']]+' '*(obj['end']-obj['start'])+active[obj['end']:]
-  return _payload(active)
+  return _payload(active,opaque_commands=opaque_commands)
  # Residual body order, unbound floats, declarations, identifiers and numbers
  # must all agree. Neither numeric multisets nor unmatched objects are waived.
  if residual(original,before)!=residual(repaired,after):return result
@@ -1429,7 +1477,7 @@ def identified_layout_equivalence(original:str,repaired:str)->Dict[str,Any]:
  return result
 
 
-def _finite_length_uncertainty(original:str,repaired:str)->Dict[str,Any]:
+def _finite_length_uncertainty(original:str,repaired:str,*,opaque_commands:frozenset[str]=frozenset())->Dict[str,Any]:
  """Explain opaque-adjacent finite length differences without certifying them.
 
  A reader can consume a following register/control as data. Masking is only
@@ -1438,7 +1486,7 @@ def _finite_length_uncertainty(original:str,repaired:str)->Dict[str,Any]:
  """
  def masked(source):
   active=active_source(source)
-  opaque=_shadowed_presentation_commands(active)
+  opaque=opaque_commands|_shadowed_presentation_commands(active)
   chars=list(active);records=[];i=0
   while i<len(active):
    if active[i]!='\\':i+=1;continue
@@ -1454,7 +1502,7 @@ def _finite_length_uncertainty(original:str,repaired:str)->Dict[str,Any]:
    else:i=end
   return ''.join(chars),records
  old,old_records=masked(original);new,new_records=masked(repaired)
- exact=bool(old_records or new_records) and _payload(old)==_payload(new)
+ exact=bool(old_records or new_records) and _payload(old,opaque_commands=opaque_commands)==_payload(new,opaque_commands=opaque_commands)
  return {'checked':True,'status':'pending' if exact else 'not_applicable',
          'before_operations':old_records if exact else [],
          'after_operations':new_records if exact else [],
@@ -1463,7 +1511,7 @@ def _finite_length_uncertainty(original:str,repaired:str)->Dict[str,Any]:
 
 
 
-def _reference_anchor_uncertainty(original:str,repaired:str)->Dict[str,Any]:
+def _reference_anchor_uncertainty(original:str,repaired:str,*,opaque_commands:frozenset[str]=frozenset())->Dict[str,Any]:
  """Bounded missing-anchor additions and existing counter-order changes.
 
  Labels do not supply scientific content, but their location/numbering needs an
@@ -1475,7 +1523,7 @@ def _reference_anchor_uncertainty(original:str,repaired:str)->Dict[str,Any]:
  defined={str(r[1] if r[0] in {'def','gdef','edef','xdef','let'} else r[2]).lstrip('\\') for r in definitions}
  if defined&{'label','ref','pageref','eqref','autoref','cref','Cref'}:
   return {'checked':True,'status':'not_applicable'}
- if (_shadowed_presentation_commands(old)|_shadowed_presentation_commands(new))&{'label','caption','captionof','stepcounter','refstepcounter','setcounter','addtocounter'}:
+ if (opaque_commands|_shadowed_presentation_commands(old)|_shadowed_presentation_commands(new))&{'label','caption','captionof','stepcounter','refstepcounter','setcounter','addtocounter'}:
   return {'checked':True,'status':'not_applicable'}
  if _macro_definitions(old)!=_macro_definitions(new):
   return {'checked':True,'status':'not_applicable'}
@@ -1486,8 +1534,8 @@ def _reference_anchor_uncertainty(original:str,repaired:str)->Dict[str,Any]:
  before=labels(old,original);after=labels(new,repaired)
  old_counts=Counter(m[1] for m in before);new_counts=Counter(m[1] for m in after)
  if old_counts==new_counts:
-  a={(o['family'],o['label']):o for o in standard_layout_object_inventory(original)['objects']}
-  b={(o['family'],o['label']):o for o in standard_layout_object_inventory(repaired)['objects']}
+  a={(o['family'],o['label']):o for o in standard_layout_object_inventory(original,opaque_commands=opaque_commands)['objects']}
+  b={(o['family'],o['label']):o for o in standard_layout_object_inventory(repaired,opaque_commands=opaque_commands)['objects']}
   changed=[key for key in a if key in b and _caption_binding_payload(a[key]['label_binding'])!=_caption_binding_payload(b[key]['label_binding'])]
   if set(a)==set(b) and changed and all(old_counts[key[1]]==1 for key in changed):
    affected={key[1] for key in changed}
@@ -1501,7 +1549,7 @@ def _reference_anchor_uncertainty(original:str,repaired:str)->Dict[str,Any]:
     from layout_prose_integrity import compare_layout_prose
    except ImportError:
     from .layout_prose_integrity import compare_layout_prose
-   if _payload(old_rest)==_payload(new_rest) and compare_layout_prose(old_rest,new_rest).get('status')=='pass':
+   if _payload(old_rest,opaque_commands=opaque_commands)==_payload(new_rest,opaque_commands=opaque_commands) and compare_layout_prose(old_rest,new_rest,opaque_commands=opaque_commands).get('status')=='pass':
     return {'checked':True,'status':'pending','added_anchors':[],
             'relocated_anchors':[{'family':key[0],'label':key[1],'before_binding':a[key]['label_binding'],'after_binding':b[key]['label_binding']} for key in changed],
             'reason':'Only existing unique anchors changed literal order relative to their caption/counter controls; all remaining protected scientific and prose payload agrees.',
@@ -1518,20 +1566,20 @@ def _reference_anchor_uncertainty(original:str,repaired:str)->Dict[str,Any]:
    chars[match.start():match.end()]=' '*(match.end()-match.start())
    records.append({'label':match[1],'source_start':match.start(),'source_end':match.end()})
  residual=''.join(chars)
- if _payload(old)!=_payload(residual):
+ if _payload(old,opaque_commands=opaque_commands)!=_payload(residual,opaque_commands=opaque_commands):
   return {'checked':True,'status':'not_applicable'}
  try:
   from layout_prose_integrity import compare_layout_prose
  except ImportError:
   from .layout_prose_integrity import compare_layout_prose
- if compare_layout_prose(old,residual).get('status')!='pass':
+ if compare_layout_prose(old,residual,opaque_commands=opaque_commands).get('status')!='pass':
   return {'checked':True,'status':'not_applicable'}
  return {'checked':True,'status':'pending','added_anchors':records,
          'reason':'Only unique missing anchors already referenced in the original active source were added; all remaining protected payload is identical.',
          'limits':'Raw scientific failure remains. The host must check the intended object, numbering, current references, and all fresh PDF pages; this does not authorize a candidate.'}
 
 
-def reference_font_hooks(source:str)->List[Dict[str,Any]]:
+def reference_font_hooks(source:str,*,opaque_commands:frozenset[str]=frozenset())->List[Dict[str,Any]]:
  """Finite preamble-only, single-command bibliography font hooks.
 
  This does not expand includes or certify template compliance. Shared spelling
@@ -1542,7 +1590,7 @@ def reference_font_hooks(source:str)->List[Dict[str,Any]]:
  executable=masked_tex(source)
  declarations=_macro_definitions(active)
  defined={str(r[1] if r[0] in {'def','gdef','edef','xdef','let'} else r[2]).lstrip('\\') for r in declarations}
- if defined&{'AddToHook','thebibliography','small','footnotesize','normalsize'}:return []
+ if (defined|opaque_commands)&{'AddToHook','thebibliography','small','footnotesize','normalsize'}:return []
  document=re.search(r'\\begin\s*\{document\}',active)
  if document is None:return []
  records=[];pattern=re.compile(r'\\AddToHook\s*\{(?:env/thebibliography/begin|cmd/thebibliography/after)\}\s*\{\s*\\(small|footnotesize|normalsize)\s*\}')
@@ -1551,8 +1599,8 @@ def reference_font_hooks(source:str)->List[Dict[str,Any]]:
   records.append({'start':match.start(),'end':match.end(),'source':active[match.start():match.end()],'font_command':match[1]})
  return records
 
-def reference_font_hook_uncertainty(original:str,repaired:str)->Dict[str,Any]:
- old_records=reference_font_hooks(original);new_records=reference_font_hooks(repaired)
+def reference_font_hook_uncertainty(original:str,repaired:str,*,opaque_commands:frozenset[str]=frozenset())->Dict[str,Any]:
+ old_records=reference_font_hooks(original,opaque_commands=opaque_commands);new_records=reference_font_hooks(repaired,opaque_commands=opaque_commands)
  if [r['source'] for r in old_records]==[r['source'] for r in new_records]:
   return {'checked':True,'status':'not_applicable'}
  def residual(source,records):
@@ -1564,14 +1612,14 @@ def reference_font_hook_uncertainty(original:str,repaired:str)->Dict[str,Any]:
   from layout_prose_integrity import compare_layout_prose
  except ImportError:
   from .layout_prose_integrity import compare_layout_prose
- if _payload(old)!=_payload(new) or compare_layout_prose(old,new).get('status')!='pass':
+ if _payload(old,opaque_commands=opaque_commands)!=_payload(new,opaque_commands=opaque_commands) or compare_layout_prose(old,new,opaque_commands=opaque_commands).get('status')!='pass':
   return {'checked':True,'status':'not_applicable'}
  return {'checked':True,'status':'pending','before_hooks':old_records,'after_hooks':new_records,
          'reason':'Only a finite bibliography-local font hook changed; residual scientific and prose payload is identical.',
          'limits':'Template compatibility and full-PDF references/body typography require explicit host review; other hooks, extra code and redefined hook/font commands are not covered.'}
 
 
-def combined_layout_uncertainty(original:str,repaired:str)->Dict[str,Any]:
+def combined_layout_uncertainty(original:str,repaired:str,*,opaque_commands:frozenset[str]=frozenset())->Dict[str,Any]:
  """Bounded composition of reviewable presentation differences, never proof.
 
  Mask only finite standard lengths, unique already-referenced missing labels,
@@ -1579,7 +1627,7 @@ def combined_layout_uncertainty(original:str,repaired:str)->Dict[str,Any]:
  payload must agree. This does not waive changes by numeric multiset equality.
  """
  def residual(source):
-  active=active_source(source);opaque=_shadowed_presentation_commands(active)
+  active=active_source(source);opaque=opaque_commands|_shadowed_presentation_commands(active)
   chars=list(active);lengths=[];i=0
   while i<len(active):
    if active[i]!='\\':i+=1;continue
@@ -1592,14 +1640,14 @@ def combined_layout_uncertainty(original:str,repaired:str)->Dict[str,Any]:
     lengths.append({'command':name,'source_start':i,'source_end':stop,'spelling':active[i:stop]})
     chars[i:stop]=' '*(stop-i);i=stop
    else:i=end
-  hooks=reference_font_hooks(source)
+  hooks=reference_font_hooks(source,opaque_commands=opaque_commands)
   for hook in hooks:chars[hook['start']:hook['end']]=' '*(hook['end']-hook['start'])
   return active,chars,lengths,hooks
  old,old_chars,old_lengths,old_hooks=residual(original)
  new,new_chars,new_lengths,new_hooks=residual(repaired)
  definitions=_macro_definitions(old)+_macro_definitions(new)
  defined={str(r[1] if r[0] in {'def','gdef','edef','xdef','let'} else r[2]).lstrip('\\') for r in definitions}
- if defined&{'label','ref','pageref','eqref','autoref','cref','Cref'}:
+ if (defined|opaque_commands)&{'label','ref','pageref','eqref','autoref','cref','Cref'}:
   return {'checked':True,'status':'not_applicable'}
  from source_map import masked_tex
  def labels(active,source):
@@ -1625,7 +1673,7 @@ def combined_layout_uncertainty(original:str,repaired:str)->Dict[str,Any]:
   from layout_prose_integrity import compare_layout_prose
  except ImportError:
   from .layout_prose_integrity import compare_layout_prose
- if _payload(old_rest)!=_payload(new_rest) or compare_layout_prose(old_rest,new_rest).get('status')!='pass':
+ if _payload(old_rest,opaque_commands=opaque_commands)!=_payload(new_rest,opaque_commands=opaque_commands) or compare_layout_prose(old_rest,new_rest,opaque_commands=opaque_commands).get('status')!='pass':
   return {'checked':True,'status':'not_applicable'}
  return {'checked':True,'status':'pending','families':families,
          'before_lengths':old_lengths,'after_lengths':new_lengths,'added_anchors':anchors,
@@ -1633,7 +1681,47 @@ def combined_layout_uncertainty(original:str,repaired:str)->Dict[str,Any]:
          'reason':'Only the enumerated presentation/anchor families account for the combined differences; every residual scientific and ordered prose payload agrees.',
          'limits':'Classification only. Original raw changes remain. Requires actual declaration evidence where needed and full current source/template/PDF review.'}
 
-def _presentation_macro_uncertainty(original:str,repaired:str,before:Dict[str,Any],after:Dict[str,Any])->Dict[str,Any]:
+def _document_presentation_uncertainty(original:str,repaired:str,*,opaque_commands:frozenset[str],dynamic_context_commands:frozenset[str])->Dict[str,Any]:
+ """Retain finite edits obscured solely by a constructed template context.
+
+ No equivalence or approval follows from this classification. Literal macro
+ shadows are excluded by the caller; every residual protected token must agree.
+ """
+ if not dynamic_context_commands:return {'checked':False,'status':'not_applicable'}
+ from source_map import masked_tex
+ fonts={'tiny','scriptsize','footnotesize','small','normalsize','selectfont'}
+ def residual(source):
+  active=active_source(source);executable=masked_tex(source);chars=list(active);records=[];i=0
+  while i<len(active):
+   if active[i]!='\\' or executable[i]!='\\':i+=1;continue
+   name,end=_command(active,i);stop=None
+   if name not in dynamic_context_commands:i=end;continue
+   star=end<len(active) and active[end]=='*'
+   if name in {'hspace','vspace'}:
+    argument,last=_group(active,end+int(star))
+    if last>end+int(star) and _literal_dimension(argument):stop=last
+   elif name in fonts and not star:stop=end
+   elif name=='fontsize' and not star:
+    last=fontsize_layout_end(active,end)
+    if last is not None:
+     size,pos=_group(active,end);baseline,_=_group(active,pos)
+     if float(size.strip().removesuffix('pt').strip())>0 and float(baseline.strip().removesuffix('pt').strip())>0:stop=last
+   if stop is not None:
+    records.append({'command':name,'source_start':i,'source_end':stop,'spelling':active[i:stop]})
+    chars[i:stop]=' '*(stop-i);i=stop
+   else:i=end
+  return ''.join(chars),records
+ old,old_records=residual(original);new,new_records=residual(repaired)
+ if [r['spelling'] for r in old_records]==[r['spelling'] for r in new_records]:return {'checked':True,'status':'not_applicable'}
+ from layout_prose_integrity import compare_layout_prose
+ if _payload(old,opaque_commands=opaque_commands)!=_payload(new,opaque_commands=opaque_commands) or compare_layout_prose(old,new,opaque_commands=opaque_commands).get('status')!='pass':
+  return {'checked':True,'status':'not_applicable'}
+ return {'checked':True,'status':'pending','before_operations':old_records,'after_operations':new_records,
+         'reason':'Only enumerated finite presentation spellings differ, but imported constructed TeX prevents their standard semantics from being proved.',
+         'limits':'Candidate retention only. Raw scientific/prose failures remain, literal shadows are excluded, and no host assertion or this classifier can establish an automated pass.'}
+
+
+def _presentation_macro_uncertainty(original:str,repaired:str,before:Dict[str,Any],after:Dict[str,Any],*,opaque_commands:frozenset[str]=frozenset())->Dict[str,Any]:
  """Finite layout-only body edits in otherwise identical macro declarations.
 
  This is a review trigger, not macro expansion or a preservation proof. Opaque
@@ -1642,7 +1730,7 @@ def _presentation_macro_uncertainty(original:str,repaired:str,before:Dict[str,An
  result={'checked':True,'status':'not_applicable'}
  old=before['macro_definitions'];new=after['macro_definitions']
  if len(old)!=len(new):return result
- opaque=_shadowed_presentation_commands(active_source(original))|_shadowed_presentation_commands(active_source(repaired))
+ opaque=opaque_commands|_shadowed_presentation_commands(active_source(original))|_shadowed_presentation_commands(active_source(repaired))
  changed=[]
  for left,right in zip(old,new):
   if left==right:continue
@@ -1680,23 +1768,23 @@ def scientific_host_review_report(report:Dict[str,Any])->Dict[str,Any]:
      and isinstance(assessment,dict)
      and assessment.get('classification')=='manual_review'
      and assessment.get('confirmed_changed_components')==[]
-     and report.get('presentation_macro_uncertainty',{}).get('status')=='pending'):
+     and any(report.get(name,{}).get('status')=='pending' for name in ('presentation_macro_uncertainty','document_presentation_uncertainty'))):
   return {**report,'automated_report':report,'automated_status':report['status'],
           'status':'manual_review','verification_method':'pending_host_review',
           'review_note':'Candidate may be retained for source and current-PDF review; automated preservation remains unproved. This does not authorize content changes or final acceptance.'}
  return report
 
 
-def scientific_payload_diff(original:str,repaired:str,*,_template_glue_review:bool=True)->Dict[str,Any]:
+def scientific_payload_diff(original:str,repaired:str,*,_template_glue_review:bool=True,opaque_commands:frozenset[str]=frozenset(),dynamic_context_commands:frozenset[str]=frozenset())->Dict[str,Any]:
  limits='Conservative token invariants, not mathematical equivalence; No macro expansion or mathematical equivalence proof; exotic TeX definitions/restructuring require host review. Cross-file checking requires callers to compare every modified source file.'
  def summary(value):
   return {'sha256':hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False).encode('utf-8')).hexdigest(),'component_counts':{k:len(v) for k,v in value.items()}}
  try:
-  before=_payload(original);after=_payload(repaired);changed=[key for key in before if before[key]!=after[key]]
-  presentation_macro=_presentation_macro_uncertainty(original,repaired,before,after) if changed==['macro_definitions'] else {'checked':False,'status':'not_applicable'}
+  before=_payload(original,opaque_commands=opaque_commands);after=_payload(repaired,opaque_commands=opaque_commands);changed=[key for key in before if before[key]!=after[key]]
+  presentation_macro=_presentation_macro_uncertainty(original,repaired,before,after,opaque_commands=opaque_commands) if changed==['macro_definitions'] else {'checked':False,'status':'not_applicable'}
   before_summary=summary(before);after_summary=summary(after)
   raw_changed=list(changed)
-  equivalence=identified_layout_equivalence(original,repaired) if original!=repaired else {'checked':True,'status':'not_needed','objects':[],'reasons':[]}
+  equivalence=identified_layout_equivalence(original,repaired,opaque_commands=opaque_commands) if original!=repaired else {'checked':True,'status':'not_needed','objects':[],'reasons':[]}
   if equivalence.get('status')=='proven':changed=[]
  except Exception as exc:
   # Checker failure is neither a successful check nor confirmed damage. Keep
@@ -1719,10 +1807,11 @@ def scientific_payload_diff(original:str,repaired:str,*,_template_glue_review:bo
  # exact bounded operations and requires *all* residual payload to agree;
  # changed claims/cells/math/assets cannot become a preservation result.
  object_channels={'math_floats','tables','numbers_floats','protected_arguments','layout_objects','caption_label_bindings','unowned_float_payload'}
- uncertainty=_finite_length_uncertainty(original,repaired) if changed and set(changed)<={'numbers_body','numbers_floats','layout_objects','unowned_float_payload'} else {'checked':False,'status':'not_applicable'}
- anchors=_reference_anchor_uncertainty(original,repaired) if changed and set(changed)<={'identifiers'}|object_channels else {'checked':False,'status':'not_applicable'}
- font_hook=reference_font_hook_uncertainty(original,repaired)
- combined=combined_layout_uncertainty(original,repaired) if changed and set(changed)<={'numbers_body','identifiers'}|object_channels else {'checked':False,'status':'not_applicable'}
+ uncertainty=_finite_length_uncertainty(original,repaired,opaque_commands=opaque_commands) if changed and set(changed)<={'numbers_body','numbers_floats','layout_objects','unowned_float_payload'} else {'checked':False,'status':'not_applicable'}
+ anchors=_reference_anchor_uncertainty(original,repaired,opaque_commands=opaque_commands) if changed and set(changed)<={'identifiers'}|object_channels else {'checked':False,'status':'not_applicable'}
+ font_hook=reference_font_hook_uncertainty(original,repaired,opaque_commands=opaque_commands)
+ combined=combined_layout_uncertainty(original,repaired,opaque_commands=opaque_commands) if changed and set(changed)<={'numbers_body','identifiers'}|object_channels else {'checked':False,'status':'not_applicable'}
+ document_presentation=_document_presentation_uncertainty(original,repaired,opaque_commands=opaque_commands,dynamic_context_commands=dynamic_context_commands) if changed else {'checked':False,'status':'not_applicable'}
  template_glue={'checked':False,'status':'not_applicable'}
  if _template_glue_review and changed and set(changed)<={'macro_definitions','numbers_body','numbers_floats','protected_arguments','layout_objects','unowned_float_payload'}:
   try:
@@ -1732,7 +1821,7 @@ def scientific_payload_diff(original:str,repaired:str,*,_template_glue_review:bo
   template_glue=classify_template_glue_override(original,repaired)
  review=[]
  for key in changed:
-  if uncertainty.get('status')=='pending' or anchors.get('status')=='pending' or font_hook.get('status')=='pending' or combined.get('status')=='pending' or template_glue.get('status')=='pending':
+  if uncertainty.get('status')=='pending' or anchors.get('status')=='pending' or font_hook.get('status')=='pending' or combined.get('status')=='pending' or template_glue.get('status')=='pending' or document_presentation.get('status')=='pending':
    review.append(key);continue
   if key in {'macro_definitions','configuration_arguments','shadowed_literal_url_invocations'}:
    review.append(key)
@@ -1754,6 +1843,7 @@ def scientific_payload_diff(original:str,repaired:str,*,_template_glue_review:bo
          'reference_font_hook_uncertainty':font_hook,
          'combined_layout_uncertainty':combined,
          **({'presentation_macro_uncertainty':presentation_macro} if presentation_macro.get('status')=='pending' else {}),
+         **({'document_presentation_uncertainty':document_presentation} if document_presentation.get('status')=='pending' else {}),
          **({'template_parameter_uncertainty':template_glue} if template_glue.get('status')=='pending' else {}),
          'assessment':{'classification':classification,'scope':'protected_token_invariants',
                        'semantic_damage_proven':False,'requires_host_review':bool(changed),

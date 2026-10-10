@@ -27,7 +27,7 @@ from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Tuple, Set
 from datetime import datetime
 
-from scientific_integrity import TEXT_WRAPPERS, FLOAT_ENVS, ZERO_ARG_LAYOUT_COMMANDS, _command, _group, _optional, _strip_layout, _envs, _literal_dimension, _macro_definitions, _shadowed_presentation_commands, active_source, minipage_layout_end, scientific_payload_diff, scientific_host_review_report
+from scientific_integrity import TEXT_WRAPPERS, FLOAT_ENVS, ZERO_ARG_LAYOUT_COMMANDS, _command, _group, _optional, _strip_layout, _envs, _literal_dimension, _macro_definitions, _shadowed_presentation_commands, active_source, minipage_layout_end, scientific_payload_diff, scientific_host_review_report, project_presentation_shadow_context, project_presentation_dynamic_context
 from layout_policy import compare_layout_policy
 from layout_prose_integrity import compare_layout_prose
 
@@ -92,7 +92,7 @@ def _unwrap_supported_text_wrappers(text: str, *, opaque_commands: frozenset = f
     return "".join(output)
 
 
-def extract_academic_content(tex_content: str) -> str:
+def extract_academic_content(tex_content: str, *, opaque_commands: frozenset[str] = frozenset()) -> str:
     """
     Extract pure academic text from LaTeX content by filtering out commands.
 
@@ -130,7 +130,7 @@ def extract_academic_content(tex_content: str) -> str:
 
     # Known text wrappers retain their grouped words. Unsupported makecell
     # forms remain opaque under the same bounded scientific normalization.
-    text = _unwrap_supported_text_wrappers(text, opaque_commands=_shadowed_presentation_commands(active_source(tex_content)))
+    text = _unwrap_supported_text_wrappers(text, opaque_commands=opaque_commands | _shadowed_presentation_commands(active_source(tex_content)))
 
     # Remove LaTeX commands with optional arguments
     # Handles: \command, \command[opt]{req}, \command{req}
@@ -159,7 +159,7 @@ def extract_sentences(text: str) -> List[str]:
     return [s.strip() for s in sentences if len(s.strip()) > 10]
 
 
-def semantic_hash(tex_content: str) -> str:
+def semantic_hash(tex_content: str, *, opaque_commands: frozenset[str] = frozenset()) -> str:
     """
     Compute SHA256 hash of academic content.
 
@@ -169,7 +169,7 @@ def semantic_hash(tex_content: str) -> str:
     Returns:
         Hex digest of SHA256 hash
     """
-    academic = extract_academic_content(tex_content)
+    academic = extract_academic_content(tex_content, opaque_commands=opaque_commands)
     # Normalize whitespace for consistent hashing
     normalized = ' '.join(academic.split())
     return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
@@ -680,7 +680,7 @@ def verify_missing_graphic_restoration(original: str, repaired: str, evidence_pa
     return result
 
 
-def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_approvals=(), file: str = "", layout_only: bool = False, source_restoration_evidence_path: Optional[str] = None, project_root=None, review_context=None, source_review=None) -> Dict:
+def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_approvals=(), file: str = "", layout_only: bool = False, source_restoration_evidence_path: Optional[str] = None, project_root=None, review_context=None, source_review=None, opaque_commands: frozenset[str] = frozenset(), dynamic_context_commands: frozenset[str] = frozenset()) -> Dict:
     """
     Compute the difference between original and repaired content.
 
@@ -691,8 +691,16 @@ def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_
     Returns:
         Diff report with deleted/added content
     """
-    original_academic = extract_academic_content(original_tex)
-    repaired_academic = extract_academic_content(repaired_tex)
+    if project_root is not None and file:
+        captured_context = bool(opaque_commands)
+        context_main = review_context.get("main_tex", file) if isinstance(review_context, dict) else file
+        opaque_commands = opaque_commands | project_presentation_shadow_context(
+            project_root, context_main, sources=(original_tex, repaired_tex))
+        if not captured_context:
+            dynamic_context_commands = project_presentation_dynamic_context(
+                project_root, context_main, sources=(original_tex, repaired_tex))
+    original_academic = extract_academic_content(original_tex, opaque_commands=opaque_commands)
+    repaired_academic = extract_academic_content(repaired_tex, opaque_commands=opaque_commands)
 
     original_sentences = set(extract_sentences(original_academic))
     repaired_sentences = set(extract_sentences(repaired_academic))
@@ -708,16 +716,16 @@ def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_
     word_count_change = repaired_word_count - original_word_count
     word_count_change_pct = (word_count_change / original_word_count * 100) if original_word_count > 0 else 0
 
-    pre_hash = semantic_hash(original_tex)
-    post_hash = semantic_hash(repaired_tex)
+    pre_hash = semantic_hash(original_tex, opaque_commands=opaque_commands)
+    post_hash = semantic_hash(repaired_tex, opaque_commands=opaque_commands)
 
-    scientific_payload = scientific_payload_diff(original_tex, repaired_tex)
+    scientific_payload = scientific_payload_diff(original_tex, repaired_tex, opaque_commands=opaque_commands, dynamic_context_commands=dynamic_context_commands)
     layout_policy = compare_layout_policy(original_tex, repaired_tex, approvals=layout_policy_approvals, file=file, project_root=project_root, review_context=review_context)
-    layout_prose = compare_layout_prose(original_tex, repaired_tex)
+    layout_prose = compare_layout_prose(original_tex, repaired_tex, opaque_commands=opaque_commands)
     from source_review import apply_source_review, reviewable_uncertainty
     scientific_payload, layout_prose, source_review_result = apply_source_review(
         original_tex, repaired_tex, project_root=project_root, file=file,
-        review=source_review, scientific=scientific_payload, prose=layout_prose)
+        review=source_review, scientific=scientific_payload, prose=layout_prose, opaque_commands=opaque_commands)
     # Unsupported declarations can be uncertainty rather than established
     # payload loss. Keep the original failed check and a pending candidate;
     # confirmed changes, missing checks and final acceptance remain guarded.
@@ -772,14 +780,15 @@ def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_
             violation_reasons.append(f"Word count changed by {word_count_change_pct:.1f}% (<5%)")
             action_required = 'log_only'
 
-    source_uncertainty = reviewable_uncertainty(original_tex, repaired_tex) if (
+    source_uncertainty = reviewable_uncertainty(original_tex, repaired_tex, opaque_commands=opaque_commands) if (
         (layout_prose.get("status") != "pass" or scientific_payload.get("reference_font_hook_uncertainty", {}).get("status") == "pending")
         and source_review_result.get("status") != "verified"
     ) else {"eligible": False, "kinds": []}
 
     # A layout shortcut can preserve all scientific content and still violate
     # repair policy. Keep its evidence separate from content violation levels.
-    if layout_policy["status"] == "blocked" or (layout_only and layout_prose.get("checked") is True and layout_prose["status"] != "pass" and not source_uncertainty["eligible"]):
+    pending_document_context = scientific_payload.get("document_presentation_uncertainty", {}).get("status") == "pending"
+    if layout_policy["status"] == "blocked" or (layout_only and layout_prose.get("checked") is True and layout_prose["status"] != "pass" and not source_uncertainty["eligible"] and not pending_document_context):
         action_required = "auto_rollback"
     elif source_uncertainty["eligible"] and action_required != "auto_rollback":
         action_required = "manual_review"

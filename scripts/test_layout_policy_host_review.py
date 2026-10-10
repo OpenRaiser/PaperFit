@@ -22,6 +22,7 @@ from compile_inputs import bind_compile_inputs, snapshot_project_inputs
 from layout_policy import (build_layout_review_request, collect_layout_review_binding,
                            compare_layout_policy)
 from runtime_artifacts import collect_artifact_manifest
+from runtime_snapshots import discover_source_files
 
 TABULAR = r"\begin{tabular}{lr}Method&Score\\A&91.2\\B&88.4\\\end{tabular}"
 TABLE = r"\begin{table}\caption{Results}\label{tab:r}" + TABULAR + r"\end{table}"
@@ -97,7 +98,9 @@ class CurrentProject:
         doc.close()
 
     def retime(self):
-        for path in (self.root / "main.tex", self.root / "references.bib"):
+        # All reachable local declaration sources now participate in the real
+        # source fingerprint; make the synthetic fixture's PDF newer than them.
+        for path in discover_source_files(self.root, "main.tex"):
             os.utime(path, (1700000000, 1700000000))
         os.utime(self.pdf, (1700000010, 1700000010))
         for path in self.pages.glob("*.png"):

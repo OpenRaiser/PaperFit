@@ -145,6 +145,13 @@ def build_approval_object(
         requires_approval = True
         approval_granted = False
         reason = str(action_reason or "dry_run_source_mutation")
+    elif action_skipped and (action_requires_approval or action_reason in {
+        "approval_required", "approval_scope_blocked",
+    }):
+        status = "approval_required"
+        requires_approval = True
+        approval_granted = False
+        reason = str(action_reason or "source_mutation_requires_approval")
     elif not dry_run and applied_count > 0:
         status = "approved_and_executed"
         requires_approval = False
@@ -155,11 +162,6 @@ def build_approval_object(
         requires_approval = False
         approval_granted = True
         reason = str(action.get("status"))
-    elif action_skipped and action_reason == "approval_scope_blocked":
-        status = "approval_required"
-        requires_approval = True
-        approval_granted = False
-        reason = "approval_scope_blocked"
     elif action_skipped:
         status = "not_required"
         requires_approval = False

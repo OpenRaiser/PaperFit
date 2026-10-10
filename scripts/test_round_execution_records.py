@@ -15,7 +15,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import orchestrator_runtime  # noqa: E402
-from pdf_test_support import write_test_pdf, write_test_png  # noqa: E402
+from pdf_test_support import synthetic_native_compile, write_test_pdf, write_test_png  # noqa: E402
 from orchestrator_runtime import OrchestratorRuntime  # noqa: E402
 from runtime_types import TaskSpec  # noqa: E402
 
@@ -160,7 +160,7 @@ class RoundExecutionRecordsTest(unittest.TestCase):
             with (
                 mock.patch.object(
                     orchestrator_runtime, "compile_latex",
-                    return_value={"success": True, "pdf_path": str(pdf)},
+                    side_effect=synthetic_native_compile,
                 ),
                 mock.patch.object(
                     orchestrator_runtime, "render_pdf_pages", return_value={"success": True},

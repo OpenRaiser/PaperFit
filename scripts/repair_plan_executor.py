@@ -27,7 +27,7 @@ from source_map import masked_tex, within
 from layout_policy import combine_policy_reports, compare_layout_policy, _review_json, _relative_path
 from source_review import load_source_review
 from runtime_snapshots import discover_source_files
-from scientific_integrity import scientific_payload_diff
+from scientific_integrity import scientific_payload_diff, presentation_shadow_context, presentation_dynamic_context
 from host_advice import host_guidance
 
 
@@ -878,19 +878,28 @@ def _enforce_structure_integrity(
     review_context = _main_matched_context(root, tex_path, review_context)
     relative_main = tex_path.resolve().relative_to(root).as_posix()
     source_reviews = [item for item in source_reviews or () if isinstance(item, dict) and _main_matched_context(root, tex_path, item.get("context")) is not None]
+    sources = original_sources or {tex_path.resolve(): original_bytes if original_bytes is not None else original_tex.encode("utf-8")}
+    if any(not within(source.resolve(), root) for source in sources):
+        raise ValueError("tracked source outside project root")
+    from runtime_snapshots import TEX_DEFINITION_EXTENSIONS
+    context_sources = [baseline.decode("utf-8", errors="surrogateescape")
+                       for source, baseline in sources.items() if source.suffix.lower() in TEX_DEFINITION_EXTENSIONS]
+    context_sources.extend(source.read_text(encoding="utf-8", errors="surrogateescape")
+                           for source in sources if source.suffix.lower() in TEX_DEFINITION_EXTENSIONS and source.is_file())
+    opaque_commands = presentation_shadow_context(context_sources)
+    dynamic_context_commands = presentation_dynamic_context(context_sources)
     diff = compute_content_diff(
         original_tex, final_tex, layout_policy_approvals=[item for item in layout_policy_approvals or () if isinstance(item, dict) and item.get("file") == relative_main],
         file=relative_main, layout_only=True, project_root=root, review_context=review_context,
-        source_review=_matched_source_review(source_reviews, relative_main),
+        source_review=_matched_source_review(source_reviews, relative_main), opaque_commands=opaque_commands, dynamic_context_commands=dynamic_context_commands,
     )
-    sources = original_sources or {tex_path.resolve(): original_bytes if original_bytes is not None else original_tex.encode("utf-8")}
     policy_reports = []
     prose_reports = []
     scientific_reports = []
     file_diffs = []
     tracked_source_deleted = False
     for source, baseline_bytes in sources.items():
-        if source.suffix.lower() != ".tex":
+        if source.suffix.lower() not in TEX_DEFINITION_EXTENSIONS:
             continue
         if not within(source.resolve(), root):
             raise ValueError(f"tracked source outside project root: {source}")
@@ -915,7 +924,7 @@ def _enforce_structure_integrity(
                 before_source, after_source, file=relative, layout_only=True,
                 layout_policy_approvals=[item for item in layout_policy_approvals or () if isinstance(item, dict) and item.get("file") == relative],
                 project_root=root, review_context=review_context,
-                source_review=_matched_source_review(source_reviews, relative),
+                source_review=_matched_source_review(source_reviews, relative), opaque_commands=opaque_commands, dynamic_context_commands=dynamic_context_commands,
             )
         file_diffs.append({"file": relative, "diff": file_diff})
         policy_reports.append(file_diff["layout_policy"])

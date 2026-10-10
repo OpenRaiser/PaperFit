@@ -287,6 +287,10 @@ def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: in
     evidence = NativeCompileEvidence(project_root, main_tex, compiler=engine)
     pdf_path = main_tex.with_suffix(".pdf")
     good_pdf_path = main_tex.with_suffix(".paperfit-good.pdf")
+    baseline_pdf = evidence.attempt.attempt_dir / "baseline.pdf"
+    had_baseline = pdf_path.is_file()
+    if had_baseline:
+        shutil.copy2(pdf_path, baseline_pdf)
     clean_main_build_artifacts(project_root, main_tex=main_tex)
     for path in (pdf_path, good_pdf_path):
         try:
@@ -364,6 +368,13 @@ def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: in
         shutil.copy2(good_pdf_path, pdf_path)
         restored_good_pdf = True
 
+    # Preserve a readable failed preview; restore the pre-attempt PDF only
+    # when this attempt left no readable artifact. Its archive survives.
+    restored_baseline_pdf = False
+    if pdf_page_count(pdf_path) is None and had_baseline:
+        shutil.copy2(baseline_pdf, pdf_path)
+        restored_baseline_pdf = True
+
     try:
         good_pdf_path.unlink()
     except FileNotFoundError:
@@ -381,7 +392,7 @@ def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: in
     )
     page_count = pdf_page_count(pdf_path)
     success = bool(page_count is not None and page_count > 0 and not fatal_error
-                   and not timed_out and not restored_good_pdf
+                   and not timed_out and not restored_good_pdf and not restored_baseline_pdf
                    and passes and all(item.get("returncode") == 0 for item in passes))
     combined_log = "\n".join(
         (item.get("stdout_tail") or "")
@@ -400,8 +411,10 @@ def compile_latex_bounded(project_root: Path, *, main_tex: Path, timeout_sec: in
         "timeout_sec": timeout_sec,
         "bounded_compile": True,
         "restored_good_pdf": restored_good_pdf,
-        "partial_pdf_available": bool(timed_out and page_count and not fatal_error),
-        "pdf_fresh": bool(page_count and not restored_good_pdf),
+        "restored_baseline_pdf": restored_baseline_pdf,
+        "baseline_pdf": str(baseline_pdf) if had_baseline else None,
+        "partial_pdf_available": bool(timed_out and page_count and not fatal_error and not restored_good_pdf and not restored_baseline_pdf),
+        "pdf_fresh": bool(page_count and not restored_good_pdf and not restored_baseline_pdf),
         "preview_pdf_path": str(pdf_path) if page_count and not success else None,
         "fatal_error": fatal_error,
         "case_status": case["case_status"],

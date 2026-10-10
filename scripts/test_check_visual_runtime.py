@@ -546,7 +546,9 @@ class CheckVisualRuntimeTest(unittest.TestCase):
                 mock.patch.object(paperfit_command, "_migrate_template") as legacy_migrator,
                 mock.patch("builtins.print") as print_mock,
             ):
-                paperfit_command.main()
+                with self.assertRaises(SystemExit) as stopped:
+                    paperfit_command.main()
+                self.assertEqual(stopped.exception.code, 2)
 
             self.assertFalse(legacy_migrator.called)
             self.assertFalse(typed_runner.called)

@@ -7,6 +7,36 @@ from source_map import build_source_map, masked_tex
 from host_context import build_host_context, bind_visibility_to_current_source
 from pdf_test_support import write_test_pdf, write_test_png
 
+
+def mocked_native_verifier_for_fixture(project_root):
+    """Explicit native-inspector double for downstream freshness/VLM unit tests.
+
+    This does not run or record a compiler. It binds the synthetic fixture's
+    exact source/PDF bytes and becomes unknown if either identity changes.
+    Real native compilation and input receipts are covered by integration tests.
+    """
+    import hashlib
+    from compile_result import source_fingerprint
+    root = project_root.resolve()
+    main = root / 'main.tex'
+    pdf = root / 'main.pdf'
+    sources = source_fingerprint(root, 'main.tex')
+    pdf_hash = hashlib.sha256(pdf.read_bytes()).hexdigest()
+
+    def verify(main_tex, *, root, pdf=None):
+        selected = (pdf or Path(main_tex).with_suffix('.pdf')).resolve()
+        matches = (Path(root).resolve() == project_root.resolve() and Path(main_tex).resolve() == main
+                   and selected == main.with_suffix('.pdf') and selected.is_file()
+                   and hashlib.sha256(selected.read_bytes()).hexdigest() == pdf_hash
+                   and source_fingerprint(Path(root), 'main.tex') == sources)
+        return {'schema': 'native_build_binding.v1', 'status': 'current' if matches else 'unknown',
+                'source_pdf_binding': 'verified_native_inputs' if matches else 'unverified',
+                'pdf_path': str(selected), 'pdf_sha256': pdf_hash if matches else None,
+                'reason': None if matches else 'mock_fixture_source_or_pdf_changed',
+                'scope': 'Explicit synthetic native-inspector test double; no compiler invocation or journal.'}
+    return verify
+
+
 class HostContextTests(unittest.TestCase):
     def fixture(self, files):
         t = tempfile.TemporaryDirectory()
@@ -370,6 +400,18 @@ class ObjectFamilyNavigationTests(unittest.TestCase):
 class CurrentEvidenceFreshnessTests(unittest.TestCase):
     fixture = HostContextTests.fixture
 
+    def test_explicit_native_mock_rejects_source_and_pdf_byte_changes(self):
+        root = self.fixture({'main.tex': r'\input{body}', 'body.tex': 'Fixture source'})
+        write_test_pdf(root / 'main.pdf')
+        verify = mocked_native_verifier_for_fixture(root)
+        self.assertEqual(verify(root / 'main.tex', root=root)['status'], 'current')
+        (root / 'body.tex').write_text('Changed source bytes', encoding='utf-8')
+        self.assertEqual(verify(root / 'main.tex', root=root)['status'], 'unknown')
+        (root / 'body.tex').write_text('Fixture source', encoding='utf-8')
+        self.assertEqual(verify(root / 'main.tex', root=root)['status'], 'current')
+        write_test_pdf(root / 'main.pdf', page_count=2)
+        self.assertEqual(verify(root / 'main.tex', root=root)['status'], 'unknown')
+
     def record_manifest(self, root, data):
         from runtime_artifacts import collect_artifact_manifest
         manifest = collect_artifact_manifest(root, 'main.tex', {
@@ -380,6 +422,7 @@ class CurrentEvidenceFreshnessTests(unittest.TestCase):
 
     def fresh_fixture(self):
         import os
+        from unittest.mock import patch
         root = self.fixture({'main.tex': r'\begin{document}Text\input{body}\end{document}',
                              'body.tex': 'Included scientific text'})
         data = root / 'data'; data.mkdir(); (data / 'pages').mkdir()
@@ -397,6 +440,10 @@ class CurrentEvidenceFreshnessTests(unittest.TestCase):
                                 (data/'visual_signal_report.json',400),
                                 (data/'defect_report.json',500), (data/'gatekeeper_decision.json',600)]:
             os.utime(path, (timestamp, timestamp))
+        inspector = patch('runtime_artifacts.verify_native_build',
+                          side_effect=mocked_native_verifier_for_fixture(root))
+        inspector.start()
+        self.addCleanup(inspector.stop)
         manifest = self.record_manifest(root, data)
         self.assertEqual(manifest['freshness']['status'], 'pass')
         return root, data, manifest

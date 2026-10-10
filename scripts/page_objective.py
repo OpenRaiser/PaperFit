@@ -56,7 +56,10 @@ def evaluate_page_objective(*, target_pages: Optional[int] = None,
 
 def page_objective_from_manifest(task: Dict[str, Any], manifest: Dict[str, Any]) -> Dict[str, Any]:
     pdf = (manifest.get("artifacts") or {}).get("pdf") or {}
-    current = (manifest.get("freshness") or {}).get("status") == "pass"
+    binding = manifest.get("native_build_binding") or {}
+    current = ((manifest.get("freshness") or {}).get("status") == "pass"
+               and binding.get("status") == "current"
+               and binding.get("pdf_sha256") == pdf.get("sha256"))
     sha = pdf.get("sha256")
     identifiable = (isinstance(sha, str) and len(sha) == 64 and
                     all(c in "0123456789abcdefABCDEF" for c in sha))

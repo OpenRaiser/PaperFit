@@ -140,7 +140,7 @@ class RuntimePendingSourceReviewTest(unittest.TestCase):
         self.assertFalse(result['runtime_actions']['repair_plan_executor']['success'])
         self.assertEqual(result['repair_loop_policy']['stop_condition'], 'source_review_pending')
         self.assertFalse(result['repair_loop_policy']['next_round_allowed'])
-        self.assertEqual(result['round_metrics'][0]['page_objective_after']['target_met'], False)
+        self.assertIsNone(result['round_metrics'][0]['page_objective_after']['target_met'])
         self.assertEqual(result['round_metrics'][0]['acceptance']['rollback_required'], False)
         checkpoint = result['source_review_pending']
         self.assertFalse(checkpoint['approval_generated'])

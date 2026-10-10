@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set
 
 
-SOURCE_EXTENSIONS = {".tex", ".bib", ".bst", ".cls", ".sty"}
+SOURCE_EXTENSIONS = {".tex", ".bib", ".bst", ".cls", ".sty", ".def"}
+TEX_DEFINITION_EXTENSIONS = {".tex", ".cls", ".sty", ".def"}
 
 # 快照根默认值（project_root 内相对路径）：不传 snapshot_root 且环境变量未设置时
 # 保持历史行为，快照仍写入 <project_root>/data/snapshots。
@@ -120,11 +121,39 @@ def _iter_included_tex(project_root: Path, tex_path: Path, seen: Set[Path]) -> I
     seen.add(tex_path)
     yield tex_path
 
-    text = _read_text(tex_path)
-    for match in re.finditer(r"\\(?:input|include)\{([^}]+)\}", text):
-        child = _candidate_tex_path(project_root, tex_path.parent, match.group(1))
-        if child.is_file() and child.resolve().is_relative_to(project_root.resolve()):
-            yield from _iter_included_tex(project_root, child.resolve(), seen)
+    # Capture literal project-local declaration dependencies as actual
+    # baselines too. Installed TeX libraries and unrelated project files are
+    # excluded; constructed names and macro expansion are never guessed.
+    from source_map import group, masked_tex
+    text = masked_tex(_read_text(tex_path))
+    text = re.sub(r"\\begin\s*\{filecontents\*?\}.*?\\end\s*\{filecontents\*?\}", "", text, flags=re.S)
+    dependency = re.compile(r"\\(input|include|documentclass|usepackage|RequirePackage|LoadClass|LoadClassWithOptions|RequirePackageWithOptions)(?![A-Za-z@])")
+    for match in dependency.finditer(text):
+        pos = match.end()
+        optional = group(text, pos, "[", "]")
+        if optional:
+            pos = optional[1]
+        argument = group(text, pos)
+        if argument is None:
+            continue
+        command, names = match[1], argument[0]
+        extension = ".cls" if command in {"documentclass", "LoadClass", "LoadClassWithOptions"} else ".sty"
+        for name in (names.split(",") if command in {"usepackage", "RequirePackage", "RequirePackageWithOptions"} else [names]):
+            name = name.strip()
+            if not name or re.search(r"[\\{}%#^~\x00]", name):
+                continue
+            if command in {"input", "include"}:
+                child = _candidate_tex_path(project_root, tex_path.parent, name)
+            else:
+                reference = Path(name)
+                if not reference.suffix:
+                    reference = reference.with_suffix(extension)
+                child = (tex_path.parent / reference).resolve()
+                if not child.is_file():
+                    child = (project_root / reference).resolve()
+            if (child.is_file() and child.suffix.lower() in TEX_DEFINITION_EXTENSIONS
+                    and child.resolve().is_relative_to(project_root.resolve())):
+                yield from _iter_included_tex(project_root, child.resolve(), seen)
 
 
 def _iter_bibliography_files(project_root: Path, tex_files: Iterable[Path]) -> Iterable[Path]:

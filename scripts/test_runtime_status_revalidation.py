@@ -39,7 +39,8 @@ class RuntimeStatusRevalidationTest(unittest.TestCase):
             "gatekeeper_decision": "data/gatekeeper_decision.json",
         }
         manifest = collect_artifact_manifest(root, "main.tex", artifacts)
-        self.assertEqual(manifest["freshness"]["status"], "pass")
+        # These readable observation fixtures have no recorded native compiler.
+        self.assertEqual(manifest["freshness"]["blocking_checks"], ["native_build_inputs_current"])
         state = {
             "main_tex": "main.tex", "status": "DONE", "last_gatekeeper_decision": "DONE",
             "task": {"type": "visual_only"}, "artifacts": artifacts,
@@ -55,7 +56,7 @@ class RuntimeStatusRevalidationTest(unittest.TestCase):
             root = Path(tmp)
             self._checked_project(root)
             before = (root / "data/state.json").read_bytes()
-            self.assertEqual(build_runtime_status(project_root=root)["status"], "DONE")
+            self.assertEqual(build_runtime_status(project_root=root)["status"], "EVALUATING")
             (root / "section.tex").write_text("Host changed the included section", encoding="utf-8")
             for explicit in (None, "data/run_result_check_visual.json"):
                 status = build_runtime_status(project_root=root, run_result_path=explicit)

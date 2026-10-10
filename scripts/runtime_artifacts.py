@@ -11,8 +11,10 @@ from typing import Any, Dict, Iterable, Optional
 
 try:
     from runtime_snapshots import discover_source_files
+    from compile_inputs import verify_native_build
 except ModuleNotFoundError:  # package import during unit tests
     from .runtime_snapshots import discover_source_files
+    from .compile_inputs import verify_native_build
 
 
 def _resolve(project_root: Path, value: Optional[str]) -> Optional[Path]:
@@ -170,7 +172,7 @@ def _source_set_entry(paths: Iterable[Path], project_root: Path) -> Dict[str, An
     }
 
 
-def _freshness_checks(entries: Dict[str, Any]) -> Dict[str, Any]:
+def _freshness_checks(entries: Dict[str, Any], native_binding: Dict[str, Any]) -> Dict[str, Any]:
     checks: Dict[str, Dict[str, Any]] = {}
 
     source_set = entries.get("source_set") or {}
@@ -189,6 +191,13 @@ def _freshness_checks(entries: Dict[str, Any]) -> Dict[str, Any]:
     gatekeeper_mtime = gatekeeper.get("mtime")
 
     checks["pdf_exists"] = {"pass": bool(pdf.get("exists"))}
+    checks["native_build_inputs_current"] = {
+        "pass": bool(native_binding.get("status") == "current"
+                     and native_binding.get("pdf_sha256") == pdf.get("sha256")),
+        "status": native_binding.get("status") or "unknown",
+        "source_pdf_binding": native_binding.get("source_pdf_binding") or "unverified",
+        "reason": native_binding.get("reason"),
+    }
     checks["pdf_not_older_than_source_set"] = {
         "pass": bool(pdf_mtime is not None and source_newest is not None and pdf_mtime >= source_newest),
         "source_newest_mtime": source_newest,
@@ -281,6 +290,9 @@ def collect_artifact_manifest(
         "repair_plan": _file_entry(_resolve(root, artifacts.get("repair_plan")), root),
         "gatekeeper_decision": _file_entry(_resolve(root, artifacts.get("gatekeeper_decision")), root),
     }
+    native_binding = (verify_native_build(main_path, root=root) if main_path is not None else
+                      {"status": "unknown", "source_pdf_binding": "unverified",
+                       "reason": "main_tex_unavailable"})
     visual_path = _resolve(root, artifacts.get("visual_signal_report"))
     vision_diagnosis: Dict[str, Any] = {}
     if visual_path is not None and visual_path.is_file():
@@ -297,6 +309,7 @@ def collect_artifact_manifest(
     return {
         "schema_version": "1.0",
         "artifacts": entries,
-        "freshness": _freshness_checks(entries),
+        "freshness": _freshness_checks(entries, native_binding),
+        "native_build_binding": native_binding,
         "vision_diagnosis": vision_diagnosis,
     }

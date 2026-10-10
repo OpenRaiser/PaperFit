@@ -57,19 +57,20 @@ class RuntimePageObjectiveTest(unittest.TestCase):
         finally: os.chdir(previous)
 
     def test_actual_pdf_supersedes_missing_or_wrong_visual_page_counts(self):
-        for count,reported,expected in ((2,2,"CONTINUE"),(3,None,"DONE"),(4,3,"CONTINUE"),(4,None,"CONTINUE")):
+        for count,reported,expected in ((2,2,"CONTINUE"),(3,None,"CONTINUE"),(4,3,"CONTINUE"),(4,None,"CONTINUE")):
             with self.subTest(count=count, reported=reported):
                 root,state=self.fixture(count,reported=reported)
                 result=self.decision(root,state)
                 self.assertEqual(result["decision"],expected)
                 objective=result["checks"]["page_objective"]
                 self.assertEqual(objective["measured_pages"],count)
-                self.assertEqual(objective["target_met"],count==3)
+                self.assertIsNone(objective["target_met"])
+                self.assertEqual(objective["evidence_status"], "unknown")
                 self.assertEqual(objective["pdf_sha256"],hashlib.sha256((root/"main.pdf").read_bytes()).hexdigest())
 
-    def test_at_most_allows_under_target_but_not_unknown_scope_or_stale_pdf(self):
+    def test_observed_counts_need_native_binding_for_every_policy_and_scope(self):
         root,state=self.fixture(2,policy="at_most")
-        self.assertEqual(self.decision(root,state)["decision"],"DONE")
+        self.assertEqual(self.decision(root,state)["decision"],"CONTINUE")
         for policy in ("exact","at_most"):
             for scope in ("main_body","with_refs"):
                 root,state=self.fixture(3,policy=policy,scope=scope)
@@ -79,6 +80,17 @@ class RuntimePageObjectiveTest(unittest.TestCase):
         root,state=self.fixture(3,policy="at_most")
         os.utime(root/"main.tex",(1900000000,1900000000))
         self.assertEqual(self.decision(root,state)["decision"],"CONTINUE")
+
+    def test_partial_legacy_manifest_cannot_crash_or_establish_native_binding(self):
+        root, state = self.fixture(3)
+        manifest = collect_artifact_manifest(root, "main.tex", state["artifacts"])
+        manifest.pop("native_build_binding")
+        manifest["freshness"]["checks"].pop("native_build_inputs_current")
+        with mock.patch("gatekeeper_enforcer.collect_artifact_manifest", return_value=manifest):
+            decision = self.decision(root, state)
+        self.assertEqual(decision["decision"], "CONTINUE")
+        self.assertEqual(decision["checks"]["native_build_inputs"]["status"], "unknown")
+        self.assertIsNone(decision["checks"]["page_objective"]["target_met"])
 
     def prepared_runtime(self,root,state):
         runtime=OrchestratorRuntime(state_path=str(root/"data/state.json"))
@@ -107,14 +119,14 @@ class RuntimePageObjectiveTest(unittest.TestCase):
         root,state=self.fixture(2)
         runtime=self.prepared_runtime(root,state)
         manifest=collect_artifact_manifest(root,"main.tex",state["artifacts"])
-        self.assertEqual(manifest["freshness"]["status"],"pass")
+        self.assertEqual(manifest["freshness"]["blocking_checks"],["native_build_inputs_current"])
         (root/"data/run_result.json").write_text(json.dumps({"status":"done","artifact_manifest":manifest}))
         result=build_runtime_status(project_root=root)
         self.assertEqual(result["status"],"EVALUATING")
-        self.assertFalse(result["page_objective"]["target_met"])
+        self.assertIsNone(result["page_objective"]["target_met"])
         host=build_host_context(root/"main.tex",root=root)
         self.assertEqual(host["page_objective"]["page_policy"],"exact")
-        self.assertFalse(host["page_objective"]["target_met"])
+        self.assertIsNone(host["page_objective"]["target_met"])
         (root/"main.tex").write_text((root/"main.tex").read_text()+" changed")
         os.utime(root/"main.tex",(1900000000,1900000000))
         host=build_host_context(root/"main.tex",root=root)
@@ -169,10 +181,10 @@ class RuntimePageObjectiveTest(unittest.TestCase):
         with mock.patch.object(runtime,"_run_visual_only_observe_actions",return_value={}), \
              mock.patch.object(runtime,"_run_round_core",side_effect=injected_done):
             result=runtime.run_task(task_spec=spec,output_path="data/run_result.json")
-        self.assertEqual(result["status"],"continue")
-        self.assertEqual(result["gatekeeper_decision"],"CONTINUE")
+        self.assertEqual(result["status"],"blocked")
+        self.assertEqual(result["gatekeeper_decision"],"DONE")
         self.assertEqual((root/"main.tex").read_bytes(),before)
-        self.assertEqual(runtime.manager.load()["terminal_success_guard"]["status"],"goal_pending")
+        self.assertEqual(runtime.manager.load()["terminal_success_guard"]["status"],"blocked")
         self.assertFalse((root/"data/rollback_report.json").exists())
 
 class PhasedRuntimePagePolicyTest(unittest.TestCase):

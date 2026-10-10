@@ -29,6 +29,8 @@ try:
     from runtime_artifacts import collect_artifact_manifest
     from runtime_status import build_runtime_status
     from runtime_types import TaskSpec
+    from host_advice import host_guidance
+    from runtime_snapshots import create_pre_repair_snapshot, env_snapshot_root
 except ModuleNotFoundError:  # package import during focused tests
     from .tex_engine import ENGINES, resolve_tex_engine
     from .diagnosis_ingest import classify_compile_case
@@ -37,6 +39,8 @@ except ModuleNotFoundError:  # package import during focused tests
     from .runtime_artifacts import collect_artifact_manifest
     from .runtime_status import build_runtime_status
     from .runtime_types import TaskSpec
+    from .host_advice import host_guidance
+    from .runtime_snapshots import create_pre_repair_snapshot, env_snapshot_root
 
 
 def package_root() -> Path:
@@ -435,6 +439,10 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int, en
     evidence = NativeCompileEvidence(project_root, main_tex, compiler=engine)
     pdf_path = main_tex.with_suffix(".pdf")
     good_pdf_path = main_tex.with_suffix(".paperfit-good.pdf")
+    baseline_pdf = evidence.attempt.attempt_dir / "baseline.pdf"
+    had_baseline = pdf_path.is_file()
+    if had_baseline:
+        shutil.copy2(pdf_path, baseline_pdf)
     _clean_main_build_artifacts(project_root, main_tex=main_tex)
     for path in (pdf_path, good_pdf_path):
         try:
@@ -512,6 +520,13 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int, en
         shutil.copy2(good_pdf_path, pdf_path)
         restored_good_pdf = True
 
+    # Preserve a readable failed preview; restore the pre-attempt PDF only
+    # when this attempt left no readable artifact. Its archive survives.
+    restored_baseline_pdf = False
+    if _pdf_page_count(pdf_path) is None and had_baseline:
+        shutil.copy2(baseline_pdf, pdf_path)
+        restored_baseline_pdf = True
+
     try:
         good_pdf_path.unlink()
     except FileNotFoundError:
@@ -528,7 +543,7 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int, en
     )
     page_count = _pdf_page_count(pdf_path)
     success = bool(page_count is not None and page_count > 0 and not fatal_error
-                   and not timed_out and not restored_good_pdf
+                   and not timed_out and not restored_good_pdf and not restored_baseline_pdf
                    and passes and all(item.get("returncode") == 0 for item in passes))
     report = {
         "available": True,
@@ -541,8 +556,10 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int, en
         "timeout_sec": timeout_sec,
         "bounded_compile": True,
         "restored_good_pdf": restored_good_pdf,
-        "partial_pdf_available": bool(timed_out and page_count and not fatal_error),
-        "pdf_fresh": bool(page_count and not restored_good_pdf),
+        "restored_baseline_pdf": restored_baseline_pdf,
+        "baseline_pdf": str(baseline_pdf) if had_baseline else None,
+        "partial_pdf_available": bool(timed_out and page_count and not fatal_error and not restored_good_pdf and not restored_baseline_pdf),
+        "pdf_fresh": bool(page_count and not restored_good_pdf and not restored_baseline_pdf),
         "fatal_error": fatal_error,
         "passes": passes,
         "stdout_tail": "\n".join(str(item.get("stdout_tail") or "") for item in passes)[-4000:],
@@ -819,6 +836,18 @@ def _run_round(
 
 def _execute_repair_plan(project_root: Path, *, main_tex: Path, max_candidates: int = 5) -> Dict[str, Any]:
     runtime = OrchestratorRuntime(state_path=str(project_root / "data" / "state.json"))
+    snapshot = create_pre_repair_snapshot(
+        project_root=project_root,
+        main_tex=str(main_tex.relative_to(project_root)),
+        snapshot_root=env_snapshot_root(),
+    )
+    runtime.manager.update({
+        "pre_repair_snapshot": snapshot,
+        "content_integrity": {
+            "validation_status": "snapshot_created",
+            "rollback_target": snapshot.get("rollback_target"),
+        },
+    })
     cwd_before = Path.cwd()
     try:
         os.chdir(project_root)
@@ -1197,9 +1226,11 @@ def _run_fix_layout(
     template: Optional[str],
     target_pages: Optional[int],
     max_rounds: Optional[int],
+    apply_source_mutation: bool = False,
     page_policy: str = "at_most",
     page_budget_scope: Optional[str] = None,
 ) -> Dict[str, Any]:
+    dry_run = not apply_source_mutation
     iterations: List[Dict[str, Any]] = []
     pending_verification = False
     stop_reason: Optional[str] = None
@@ -1223,7 +1254,11 @@ def _run_fix_layout(
             break
 
         state: Dict[str, Any] = {}
-        pre_compile_sanitization = _sanitize_precompile_sources(project_root, main_tex=main_tex)
+        pre_compile_sanitization = {
+            "changed": False,
+            "main_tex": str(main_tex),
+            "skipped_reason": "unverified_precompile_source_mutation_disabled",
+        }
         compile_result = _compile(project_root, main_tex=main_tex)
         page_dir = "data/pages"
         render_result = {"success": False, "page_dir": page_dir}
@@ -1314,6 +1349,10 @@ def _run_fix_layout(
 
         # Guard findings enter the regular candidate workflow. Do not modify
         # source here before the plan's snapshot/fingerprint/acceptance checks.
+        if dry_run:
+            pending_verification = False
+            stop_reason = "approval_required"
+            break
         repair_state = _execute_repair_plan(project_root, main_tex=main_tex)
         repair_summary = repair_state.get("repair_execution_summary") or {}
         if not isinstance(repair_summary, dict):
@@ -1372,7 +1411,11 @@ def _run_fix_layout(
         stop_reason = "round_limit"
 
     if pending_verification:
-        pre_compile_sanitization = _sanitize_precompile_sources(project_root, main_tex=main_tex)
+        pre_compile_sanitization = {
+            "changed": False,
+            "main_tex": str(main_tex),
+            "skipped_reason": "unverified_precompile_source_mutation_disabled",
+        }
         compile_result = _compile(project_root, main_tex=main_tex)
         page_dir = "data/pages"
         render_result = {"success": False, "page_dir": page_dir}
@@ -1425,6 +1468,9 @@ def _run_fix_layout(
         final_state_summary = iterations[-1].get("state_summary") or final_state_summary
     report = {
         "mode": "fix_layout",
+        "runtime_contract": "full_vto",
+        "host_guidance": host_guidance(),
+        "dry_run_source_mutation": dry_run,
         "project_root": str(project_root),
         "iterations": iterations,
         "final_state_summary": final_state_summary,
@@ -1436,6 +1482,10 @@ def _run_fix_layout(
         "round_count": len(iterations),
         "stop_reason": stop_reason or "unknown",
         "blocked_reasons": blocked_reasons,
+        "next_actions": [
+            "Review the plan and continue native editing within the user's existing repair scope.",
+            "Use --apply only when requesting this optional legacy batch to write source changes.",
+        ] if stop_reason == "approval_required" else [],
     }
     report_path = project_root / "data" / "fix_layout_report.json"
     _write_json(report_path, report)
@@ -1654,7 +1704,8 @@ def _layout_completion_status(fix_report: Dict[str, Any]) -> Dict[str, Any]:
         reasons.append("visual_defects_remaining")
     if stop_reason == "blocked":
         reasons.extend(str(reason) for reason in blocked_reasons)
-    status = "done" if done else ("blocked" if stop_reason == "blocked" or terminal_success_guard else "incomplete")
+    status = ("done" if done else "blocked" if stop_reason == "blocked" or terminal_success_guard
+              else "approval_required" if stop_reason == "approval_required" else "incomplete")
     return {
         "status": status,
         "gatekeeper_decision": decision or None,
@@ -1798,6 +1849,7 @@ def _handle_paperfit_request(
             template=template,
             target_pages=target_pages or inferred.get("target_pages"),
             max_rounds=max_rounds,
+            apply_source_mutation=apply_source_mutation,
             page_policy=page_policy,
             page_budget_scope=page_budget_scope,
         )
@@ -1831,6 +1883,19 @@ def _normalized_final_status(report: Dict[str, Any]) -> str:
     if isinstance(nested, dict):
         return str(nested.get("status") or "").strip().lower()
     return ""
+
+
+def _report_changes_source(report: Dict[str, Any]) -> bool:
+    """Natural-language entries must retain their inferred task's exit contract."""
+    source_tasks = {"full_vto", "repair_table", "adjust_length", "template_migration"}
+    if report.get("runtime_contract") in source_tasks or report.get("mode") == "fix_layout":
+        return True
+    nested = report.get("run_result")
+    nested = nested if isinstance(nested, dict) else {}
+    for task in (report.get("task"), nested.get("task")):
+        if isinstance(task, dict) and (task.get("task_type") or task.get("type")) in source_tasks:
+            return True
+    return False
 
 
 def _source_changing_exit_code(report: Dict[str, Any], project_root: Path, main_tex: Path) -> int:
@@ -1975,6 +2040,7 @@ def main() -> None:
                 template=template,
                 target_pages=target_pages,
                 max_rounds=effective_max_rounds,
+                apply_source_mutation=args.apply,
                 page_policy=args.page_policy,
                 page_budget_scope=args.page_budget_scope,
             )
@@ -2037,7 +2103,7 @@ def main() -> None:
                 run_result_output_path="data/run_result_template_migration.json",
             )
             print(json.dumps(report, ensure_ascii=False, indent=2))
-            return
+            raise SystemExit(_source_changing_exit_code(report, working_root, main_tex))
         report = _run_typed_source_changing(
             working_root,
             task_type="template_migration",
@@ -2058,7 +2124,7 @@ def main() -> None:
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
-    if args.command in {"fix-layout", "fix", "migrate-template"}:
+    if args.command in {"fix-layout", "fix", "migrate-template"} or _report_changes_source(report):
         raise SystemExit(_source_changing_exit_code(report, project_root, main_tex))
 
 

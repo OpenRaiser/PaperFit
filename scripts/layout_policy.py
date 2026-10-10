@@ -449,6 +449,37 @@ def _graphic_option_operations(source: str, active: str) -> list[dict[str, Any]]
     return operations
 
 
+def _foreground_color_operations(source: str, active: str) -> list[dict[str, Any]]:
+    """Color can conceal retained text; source syntax cannot prove contrast.
+
+    Keep newly introduced/changed foreground choices reviewable, including
+    legitimate light text on a dark background. The current PDF and affected
+    content, rather than a particular color name, determine visibility.
+    """
+    operations = []
+    envs, groups = scientific._envs(active), _groups(active)
+    for marker in re.finditer(r"\\(color|cellcolor|rowcolor|pagecolor)(?![A-Za-z@])", active):
+        pos = marker.end()
+        optional = group(active, pos, "[", "]")
+        if optional:
+            pos = optional[1]
+        value = group(active, pos)
+        if not value:
+            continue
+        _, scope_end = _font_context(active, marker.start(), envs, groups)
+        affected = active[value[1]:scope_end]
+        arguments = (["model=" + _normalize(optional[0])] if optional else []) + [_normalize(value[0])]
+        rule = "foreground_color_visibility" if marker[1] == "color" else "background_color_visibility"
+        operation = _presentation_operation(source, marker.start(), value[1], marker[1], arguments,
+                                            rule, "manual_review")
+        # Preserve ownership by actual content, while an unrelated standard
+        # spacing change does not turn inherited color into a new operation.
+        tokens = scientific._text_tokens(affected)
+        operation["body_signature"] = hashlib.sha256(json.dumps(tokens, ensure_ascii=True).encode("utf-8")).hexdigest()
+        operations.append(operation)
+    return operations
+
+
 def _operations(source: str, *, bounded_layout: bool) -> list[dict[str, Any]]:
     active = _active(source)
     operations: list[dict[str, Any]] = []
@@ -511,6 +542,7 @@ def _operations(source: str, *, bounded_layout: bool) -> list[dict[str, Any]]:
         })
     operations.extend(_body_presentation_operations(source, active))
     operations.extend(_graphic_option_operations(source, active))
+    operations.extend(_foreground_color_operations(source, active))
     for declaration in scientific.arraystretch_declarations(source):
         if declaration["value"] <= 0:
             operations.append(_presentation_operation(
@@ -802,6 +834,8 @@ def _approved(
         "forced_page_break", "scaled_table", "scaled_graphics",
         "local_explicit_font_size",
         "graphic_content_options",
+        "foreground_color_visibility",
+        "background_color_visibility",
     }
     if operation["rule"] not in reviewable:
         return False, "operation_requires_separate_review"
@@ -850,6 +884,13 @@ def _approved(
                 and evidence["measurement_context"].strip()):
             return True, "source_bound_host_measurement_review"
         return False, "local_font_measurement_and_readability_review_required"
+    if operation["rule"] in {"foreground_color_visibility", "background_color_visibility"}:
+        if (scope == "color" and evidence.get("readability_confirmed") is True
+                and evidence.get("visible_content_preservation_confirmed") is True
+                and isinstance(evidence.get("measurement_context"), str)
+                and evidence["measurement_context"].strip()):
+            return True, "source_bound_host_color_contrast_review"
+        return False, "current_foreground_background_contrast_and_visible_content_review_required"
     if operation["rule"] == "graphic_content_options":
         asset = evidence.get('source_asset_input')
         files = review_binding['binding']['imported_inputs']['files']
@@ -977,9 +1018,9 @@ def combine_policy_reports(reports: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
 def snapshot_source_edit_checks(project_root: Path, rollback_target: str | Path, *, approvals: Iterable[dict[str, Any]] = (), review_context: dict[str, str] | None = None, source_reviews: Iterable[dict[str, Any]] = ()) -> dict[str, Any]:
     """Read a verified baseline once for live policy and layout-only prose checks."""
-    from runtime_snapshots import _resolve_backup_file, load_snapshot_manifest, resolve_manifest_path, validate_snapshot_manifest
+    from runtime_snapshots import _resolve_backup_file, load_snapshot_manifest, resolve_manifest_path, validate_snapshot_manifest, TEX_DEFINITION_EXTENSIONS
     from layout_prose_integrity import compare_layout_prose
-    from scientific_integrity import scientific_payload_diff, scientific_host_review_report
+    from scientific_integrity import scientific_payload_diff, scientific_host_review_report, presentation_shadow_context, presentation_dynamic_context
     from source_review import apply_source_review
 
     root = project_root.resolve()
@@ -1001,7 +1042,7 @@ def snapshot_source_edit_checks(project_root: Path, rollback_target: str | Path,
         repaired_sources = {}
         for item in manifest.get("files", []):
             relative = str(item.get("path") or "")
-            if Path(relative).suffix.lower() != ".tex":
+            if Path(relative).suffix.lower() not in TEX_DEFINITION_EXTENSIONS:
                 continue
             baseline = _resolve_backup_file(root, manifest_path.parent, item)
             current = root / relative
@@ -1019,6 +1060,14 @@ def snapshot_source_edit_checks(project_root: Path, rollback_target: str | Path,
             repaired_sources[relative] = repaired_raw
             if original != repaired:
                 changed_files.append(relative)
+        # Definitions in an unchanged included file can alter a presentation
+        # control used by a modified file. Keep the verified per-file baseline
+        # identities, while sharing both source inventories' literal shadows.
+        opaque_commands = presentation_shadow_context([*original_sources.values(), *repaired_sources.values()])
+        dynamic_context_commands = presentation_dynamic_context([*original_sources.values(), *repaired_sources.values()])
+        for relative in original_sources:
+            original = original_sources[relative].replace("\r\n", "\n").replace("\r", "\n")
+            repaired = repaired_sources[relative].replace("\r\n", "\n").replace("\r", "\n")
             reports.append(compare_layout_policy(
                 original, repaired,
                 file=relative, approvals=approvals, project_root=root, review_context=review_context,
@@ -1027,14 +1076,14 @@ def snapshot_source_edit_checks(project_root: Path, rollback_target: str | Path,
                 prose_reports.append({"file": relative, "checked": True, "status": "pass", "comparison": "unchanged_source"})
                 scientific_reports.append({"file": relative, "checked": True, "status": "pass", "comparison": "unchanged_source"})
             else:
-                prose_report = compare_layout_prose(original, repaired)
-                science_report = scientific_payload_diff(original, repaired)
+                prose_report = compare_layout_prose(original, repaired, opaque_commands=opaque_commands)
+                science_report = scientific_payload_diff(original, repaired, opaque_commands=opaque_commands, dynamic_context_commands=dynamic_context_commands)
                 matching_reviews = [review for review in source_reviews if isinstance(review, dict)
                                     and review.get("review_scope") != "literal_include_context" and review.get("file") == relative]
                 science_report, prose_report, decision = apply_source_review(
                     original, repaired, project_root=root, file=relative,
                     review=matching_reviews[0] if len(matching_reviews) == 1 else None,
-                    scientific=science_report, prose=prose_report,
+                    scientific=science_report, prose=prose_report, opaque_commands=opaque_commands,
                 )
                 science_report = scientific_host_review_report(science_report)
                 if len(matching_reviews) > 1:
@@ -1065,9 +1114,15 @@ def snapshot_source_edit_checks(project_root: Path, rollback_target: str | Path,
         # while leaving include argument validation deliberately strict.
         manifest_main = str(manifest.get("main_tex") or "")
         main_relative = (root / manifest_main).resolve().relative_to(root).as_posix() if manifest_main else ""
+        # Literal input/include ownership is a manuscript .tex graph. Local
+        # style/class/definition resources still participate in the verified
+        # baseline, shared shadow checks and native build binding above; their
+        # package-loading identities are not manuscript include arguments.
         include_context = compare_include_contexts(
-            original_sources, repaired_sources, main_tex=main_relative,
-            files_to_check=context_files,
+            {file: source for file, source in original_sources.items() if Path(file).suffix.lower() == ".tex"},
+            {file: source for file, source in repaired_sources.items() if Path(file).suffix.lower() == ".tex"},
+            main_tex=main_relative,
+            files_to_check=[file for file in context_files if Path(file).suffix.lower() == ".tex"],
         )
         for context in include_context.get("contexts", []):
             files = set(context["files"])
@@ -1187,6 +1242,8 @@ def build_layout_review_request(
         "negative_layout_spacing": "local", "body_line_compression": "local",
         "local_explicit_font_size": "local",
         "graphic_content_options": "graphics",
+        "foreground_color_visibility": "color",
+        "background_color_visibility": "color",
     }
     for finding in policy["findings"]:
         reviewable = finding["status"] == "manual_review" and finding["rule"] in scopes
@@ -1203,6 +1260,9 @@ def build_layout_review_request(
             evidence["readability_confirmed"] = False
         if finding["rule"] == "local_explicit_font_size":
             evidence.update(readability_confirmed=False, measurement_context="")
+        if finding["rule"] in {"foreground_color_visibility", "background_color_visibility"}:
+            evidence.update(readability_confirmed=False, visible_content_preservation_confirmed=False,
+                            measurement_context="")
         if finding["rule"] == "graphic_content_options":
             evidence.update(readability_confirmed=False, source_asset_inspected=False,
                             visible_content_preservation_confirmed=False, source_asset_input=None)

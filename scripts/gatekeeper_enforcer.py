@@ -368,8 +368,15 @@ def make_decision(
     page_checks = (page_manifest.get("freshness") or {}).get("checks") or {}
     if page_checks:
         current_pdf = all(page_checks.get(key, {}).get("pass") is True for key in
-                          ("pdf_exists", "pdf_not_older_than_source_set", "pdf_page_count_available"))
+                          ("pdf_exists", "native_build_inputs_current", "pdf_not_older_than_source_set", "pdf_page_count_available"))
         page_manifest = {**page_manifest, "freshness": {"status": "pass" if current_pdf else "stale_or_missing"}}
+        checks["native_build_inputs"] = page_checks.get("native_build_inputs_current") or {
+            "pass": False, "status": "unknown", "source_pdf_binding": "unverified",
+            "reason": "native_build_input_check_unavailable",
+        }
+        if not current_pdf:
+            decision = "CONTINUE"
+            reasons.append("current PDF has no verified native input binding")
     objective = page_objective_from_manifest(task, page_manifest)
     checks["page_objective"] = {**objective, "pass": objective["target_met"]}
     if task.get("target_pages") is not None and objective["target_met"] is not True:

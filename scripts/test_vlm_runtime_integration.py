@@ -2,6 +2,8 @@
 
 The runtime, StateManager, diagnosis merge, action plan and artifact manifest
 remain real. Only external inspectors and the VLM service are replaced.
+Native input verification uses an explicit source/PDF-byte-bound synthetic
+inspector double; these fixtures do not create or claim compiler receipts.
 """
 from __future__ import annotations
 
@@ -27,6 +29,7 @@ from runtime_artifacts import collect_artifact_manifest
 from state_manager import StateManager
 from visual_action_plan import build_visual_action_plan, write_visual_action_plan
 from repair_plan_generator import generate_repair_plan
+from test_host_context import mocked_native_verifier_for_fixture
 
 
 def _write_result(payload):
@@ -128,6 +131,8 @@ class InspectProjectVLMIntegrationTest(unittest.TestCase):
                 page.insert_text((40, 40), "Offline vision integration fixture")
                 pdf.save(root / "main.pdf")
                 page.get_pixmap().save(root / "data" / "pages" / "page_001.png")
+            stack.enter_context(mock.patch('runtime_artifacts.verify_native_build',
+                side_effect=mocked_native_verifier_for_fixture(root)))
             previous_cwd = Path.cwd()
             os.chdir(root)
             stack.callback(os.chdir, previous_cwd)

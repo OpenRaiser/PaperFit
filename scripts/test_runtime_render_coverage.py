@@ -89,7 +89,8 @@ class RuntimeRenderCoverageTest(unittest.TestCase):
                 self.assertFalse(manifest["freshness"]["checks"]["page_images_complete"]["pass"])
         with tempfile.TemporaryDirectory() as tmp:
             manifest = self._manifest(Path(tmp), ["page_003.png", "page_001.png", "page_002.png"])
-            self.assertEqual(manifest["freshness"]["status"], "pass")
+            self.assertTrue(manifest["freshness"]["checks"]["page_images_complete"]["pass"])
+            self.assertEqual(manifest["freshness"]["blocking_checks"], ["native_build_inputs_current"])
             self.assertEqual(manifest["artifacts"]["page_images"]["page_numbers"], [1, 2, 3])
 
     def test_unreadable_pdf_cannot_establish_complete_rendering(self):
@@ -129,7 +130,7 @@ class RuntimeRenderCoverageTest(unittest.TestCase):
                 "defect_report": "data/defect_report.json", "gatekeeper_decision": "data/gatekeeper_decision.json",
             })
         self.assertTrue(manifest["freshness"]["checks"]["page_images_readable"]["pass"])
-        self.assertEqual(manifest["freshness"]["status"], "pass")
+        self.assertEqual(manifest["freshness"]["blocking_checks"], ["native_build_inputs_current"])
 
     def test_valid_png_container_with_incomplete_pixels_is_rejected(self):
         def chunk(kind, data):

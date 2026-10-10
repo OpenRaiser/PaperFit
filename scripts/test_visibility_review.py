@@ -102,7 +102,11 @@ class VisibilityReviewTest(unittest.TestCase):
         self.accept()
         with patch('gatekeeper_enforcer.Path.cwd', return_value=self.root):
             result = make_decision(state, {'defects': []}, False, None)
-        self.assertEqual(result['decision'], 'DONE')
+        # The exact geometry review passes, but this synthetic PDF has no native
+        # source/compile receipt and cannot certify the whole gate as DONE.
+        self.assertTrue(result['checks']['pdf_visibility']['pass'])
+        self.assertFalse(result['checks']['native_build_inputs']['pass'])
+        self.assertEqual(result['decision'], 'CONTINUE')
 
     def test_explicit_external_pdf_is_measured_without_approving_crop(self):
         self.accept()

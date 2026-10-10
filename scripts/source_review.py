@@ -12,11 +12,11 @@ import sys
 from pathlib import Path
 from typing import Any
 try:
- from scientific_integrity import scientific_payload_diff, active_source
+ from scientific_integrity import scientific_payload_diff, active_source, project_presentation_shadow_context
  from layout_prose_integrity import compare_layout_prose
  from layout_policy import collect_layout_review_binding, verify_layout_review_binding_current, _relative_path
 except ImportError:
- from .scientific_integrity import scientific_payload_diff, active_source
+ from .scientific_integrity import scientific_payload_diff, active_source, project_presentation_shadow_context
  from .layout_prose_integrity import compare_layout_prose
  from .layout_policy import collect_layout_review_binding, verify_layout_review_binding_current, _relative_path
 
@@ -25,7 +25,7 @@ INCLUDE_SCOPE="literal_include_context"
 def text_hash(text:str)->str:
  return hashlib.sha256(text.encode("utf-8",errors="surrogateescape")).hexdigest()
 
-def empty_table_skeleton_uncertainty(original:str,repaired:str)->dict[str,Any]:
+def empty_table_skeleton_uncertainty(original:str,repaired:str,*,opaque_commands:frozenset[str]=frozenset())->dict[str,Any]:
  """Only an unmatched empty tabular immediately followed by stray braces.
 
  Removing any cell, caption, asset, text or other command cannot use this path.
@@ -40,7 +40,7 @@ def empty_table_skeleton_uncertainty(original:str,repaired:str)->dict[str,Any]:
   from .scientific_integrity import _macro_definitions
  definitions=_macro_definitions(old)+_macro_definitions(new)
  defined={str(r[1] if r[0] in {'def','gdef','edef','xdef','let'} else r[2]).lstrip('\\') for r in definitions}
- if defined&{'begin','end','tabular'}:
+ if (defined|opaque_commands)&{'begin','end','tabular'}:
   return result
  try:
   from template_parameter_review import _shadowed, _constructed_usage
@@ -55,20 +55,20 @@ def empty_table_skeleton_uncertainty(original:str,repaired:str)->dict[str,Any]:
   end=old.find(r"\end{tabular}",match.end())
   if end>=0 and (next_begin<0 or end<next_begin):continue
   residual=old[:match.start()]+" "+old[match.end():]
-  if scientific_payload_diff(original,repaired).get("status")!="pass":continue
-  if scientific_payload_diff(residual,new).get("status")!="pass":continue
+  if scientific_payload_diff(original,repaired,opaque_commands=opaque_commands).get("status")!="pass":continue
+  if scientific_payload_diff(residual,new,opaque_commands=opaque_commands).get("status")!="pass":continue
   try:
    from scientific_integrity import _opaque_source_invocations
   except ImportError:
    from .scientific_integrity import _opaque_source_invocations
   if _opaque_source_invocations(old)!=_opaque_source_invocations(residual):continue
-  if compare_layout_prose(residual,new).get("status")!="pass":continue
+  if compare_layout_prose(residual,new,opaque_commands=opaque_commands).get("status")!="pass":continue
   return {"checked":True,"status":"pending","source_start":match.start(),"source_end":match.end(),
           "spelling":match[0],"reason":"Only an unmatched empty table opener and immediately adjacent stray closing braces became inactive; no active table cells, caption, text or asset were removed."}
  return result
 
-def reviewable_uncertainty(original:str,repaired:str)->dict[str,Any]:
- science=scientific_payload_diff(original,repaired);prose=compare_layout_prose(original,repaired)
+def reviewable_uncertainty(original:str,repaired:str,*,opaque_commands:frozenset[str]=frozenset())->dict[str,Any]:
+ science=scientific_payload_diff(original,repaired,opaque_commands=opaque_commands);prose=compare_layout_prose(original,repaired,opaque_commands=opaque_commands)
  kinds=[]
  if science.get("assessment",{}).get("classification")=="manual_review" and prose.get("status")=="pass":
   for name in ("layout_argument_uncertainty","reference_anchor_uncertainty","reference_font_hook_uncertainty","combined_layout_uncertainty","template_parameter_uncertainty"):
@@ -76,7 +76,7 @@ def reviewable_uncertainty(original:str,repaired:str)->dict[str,Any]:
  hook=science.get("reference_font_hook_uncertainty",{})
  if hook.get("status")=="pending" and "reference_font_hook_uncertainty" not in kinds and (science.get("status")=="pass" or science.get("assessment",{}).get("classification")=="manual_review"):
   kinds.append("reference_font_hook_uncertainty")
- skeleton=empty_table_skeleton_uncertainty(original,repaired)
+ skeleton=empty_table_skeleton_uncertainty(original,repaired,opaque_commands=opaque_commands)
  if skeleton["status"]=="pending":kinds.append("empty_table_skeleton_uncertainty")
  return {"eligible":bool(kinds),"kinds":kinds,"scientific_payload":science,
          "layout_prose":prose,"empty_table_skeleton_uncertainty":skeleton}
@@ -88,7 +88,8 @@ def build_source_review_request(original:str,repaired:str,*,project_root:Path,fi
  context={"main_tex":main_tex,"page_images_dir":page_images_dir,"compile_journal":compile_journal}
  live=collect_layout_review_binding(root,**context)
  current=(root/file).read_text(encoding="utf-8",errors="surrogateescape")
- classification=reviewable_uncertainty(original,repaired)
+ opaque=project_presentation_shadow_context(root,main_tex,sources=(original,repaired))
+ classification=reviewable_uncertainty(original,repaired,opaque_commands=opaque)
  if current!=repaired:raise ValueError("candidate text does not match current source")
  template_evidence=[]
  if "template_parameter_uncertainty" in classification["kinds"] and live.get("status")=="available":
@@ -208,7 +209,7 @@ def validate_include_context_review(*,project_root:Path,rollback_target:str|Path
   result["reason"]=str(exc);return result
 
 def validate_source_review(original:str,repaired:str,*,project_root:Path|None,file:str,
-                           review:dict[str,Any]|None)->dict[str,Any]:
+                           review:dict[str,Any]|None,opaque_commands:frozenset[str]=frozenset())->dict[str,Any]:
  result={"checked":True,"status":"not_used","verification_method":"explicit_host_review"}
  if not review:return result
  result["status"]="manual_review"
@@ -220,7 +221,8 @@ def validate_source_review(original:str,repaired:str,*,project_root:Path|None,fi
   if not isinstance(context,dict) or set(context)!={"main_tex","page_images_dir","compile_journal"}:raise ValueError("source-review context unavailable")
   if review.get("file")!=relative or review.get("original_text_sha256")!=text_hash(original) or review.get("candidate_text_sha256")!=text_hash(repaired):raise ValueError("review is for different baseline/candidate")
   if (root/relative).read_text(encoding="utf-8",errors="surrogateescape")!=repaired:raise ValueError("candidate differs from current file")
-  classification=reviewable_uncertainty(original,repaired)
+  opaque=opaque_commands|project_presentation_shadow_context(root,context['main_tex'],sources=(original,repaired))
+  classification=reviewable_uncertainty(original,repaired,opaque_commands=opaque)
   if not classification["eligible"] or classification!=review.get("classification"):raise ValueError("difference is not classified reviewable uncertainty")
   live=collect_layout_review_binding(root,**context)
   if live["status"]!="available" or not live["binding"] or live["binding"]!=review.get("binding"):raise ValueError("current source, inputs, PDF, pages or latest compile changed/unavailable")
@@ -258,13 +260,24 @@ def validate_source_review(original:str,repaired:str,*,project_root:Path|None,fi
   result["reason"]=str(exc);return result
 
 def apply_source_review(original:str,repaired:str,*,project_root:Path|None,file:str,
-                        review:dict[str,Any]|None,scientific:dict[str,Any],prose:dict[str,Any]):
- decision=validate_source_review(original,repaired,project_root=project_root,file=file,review=review)
+                        review:dict[str,Any]|None,scientific:dict[str,Any],prose:dict[str,Any],opaque_commands:frozenset[str]=frozenset()):
+ decision=validate_source_review(original,repaired,project_root=project_root,file=file,review=review,opaque_commands=opaque_commands)
  if decision["status"]!="verified":
+  if scientific.get("document_presentation_uncertainty",{}).get("status")=="pending":
+   # Constructed imported template context is uncertainty, not a new semantic
+   # approval family. Keep the finite candidate and both raw failed reports;
+   # validate_source_review cannot turn this classification into a pass.
+   scientific={**scientific,"automated_report":scientific,"automated_status":scientific["status"],
+               "status":"manual_review","verification_method":"pending_host_review"}
+   if prose.get("status")!="pass":
+    prose={**prose,"automated_report":prose,"automated_status":prose["status"],
+           "status":"manual_review","verification_method":"pending_host_review"}
+   decision={**decision,"status":"manual_review","kinds":["document_presentation_uncertainty"],"requires_host_review":True}
+   return scientific,prose,decision
   pending_names=("layout_argument_uncertainty","reference_anchor_uncertainty","reference_font_hook_uncertainty","combined_layout_uncertainty","template_parameter_uncertainty")
   if prose.get("status")=="pass" and not any(scientific.get(name,{}).get("status")=="pending" for name in pending_names):
    return scientific,prose,decision
-  classified=reviewable_uncertainty(original,repaired)
+  classified=reviewable_uncertainty(original,repaired,opaque_commands=opaque_commands)
   if not classified["eligible"]:return scientific,prose,decision
   decision={**decision,"status":"manual_review","kinds":classified["kinds"],"requires_host_review":True}
   # This is unresolved, not a successful automated check or proven damage.

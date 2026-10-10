@@ -171,6 +171,43 @@ class RuntimeContractTest(unittest.TestCase):
         self.assertIn("table_reconstruction", approval["policy"]["high_risk_operations"])
         self.assertTrue(approval["policy"]["fresh_approval_required_for_high_risk_operations"])
 
+    def test_skipped_executor_approval_contract_matches_current_scope_gate(self) -> None:
+        for reason, flag, action_status in (
+            ("approval_required", True, None),
+            ("approval_scope_blocked", False, None),
+            ("unsupported_batch_scope", True, "manual_review"),
+        ):
+            with self.subTest(reason=reason):
+                approval = build_approval_object(
+                    task={"task_type": "full_vto", "dry_run_source_mutation": False},
+                    state={"repair_plan_summary": {"total_candidates": 1}},
+                    runtime_actions={"repair_plan_executor": {
+                        "success": False, "skipped": True, "reason": reason,
+                        "requires_approval": flag, "status": action_status,
+                    }},
+                )
+                self.assertEqual(approval["status"], "approval_required")
+                self.assertTrue(approval["requires_approval"])
+                self.assertFalse(approval["approval_granted"])
+                self.assertEqual(approval["reason"], reason)
+                self.assertEqual(approval["authority_scope"], "optional_batch_executor")
+                authority = approval["host_guidance"]["editing_authority"]
+                self.assertTrue(authority["native_editing_supported"])
+                self.assertFalse(authority["ordinary_layout_reapproval_required"])
+                self.assertFalse(authority["tool_routes_limit_host_edits"])
+
+    def test_skipped_executor_without_candidates_does_not_request_approval(self) -> None:
+        approval = build_approval_object(
+            task={"task_type": "full_vto", "dry_run_source_mutation": False},
+            state={},
+            runtime_actions={"repair_plan_executor": {
+                "skipped": True, "reason": "no_repair_candidates",
+            }},
+        )
+        self.assertEqual(approval["status"], "not_required")
+        self.assertFalse(approval["requires_approval"])
+        self.assertFalse(approval["approval_granted"])
+
     def test_approval_scope_carry_forward_reports_contract_match(self) -> None:
         approval = build_approval_object(
             task={

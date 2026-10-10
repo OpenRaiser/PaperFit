@@ -26,13 +26,15 @@ from test_layout_policy_host_review import CurrentProject
 
 
 class IncludeContextHostReviewTest(unittest.TestCase):
-    def fixture(self, directory):
+    def fixture(self, directory, *, style=r"\newcommand{\fixturestyle}{Retained}", cell=None):
         root = Path(directory)
         p = CurrentProject(root, "")
         before, after = source_pair()
         for sources in (before, after):
             sources["main.tex"] = sources["main.tex"].replace(r"\begin{document}", r"\usepackage{localstyle}\begin{document}")
-        (root / "localstyle.sty").write_text(r"\newcommand{\fixturestyle}{Retained}", encoding="utf-8")
+            if cell is not None:
+                sources["tables/results.tex"] = sources["tables/results.tex"].replace("91.2", cell)
+        (root / "localstyle.sty").write_text(style, encoding="utf-8")
         for file, source in after.items():
             target = root / file
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -90,6 +92,37 @@ class IncludeContextHostReviewTest(unittest.TestCase):
             advice = self.request(p, baseline)
             advice["host_advice"] = {"recommended": "accept", "verified": True}
             self.assertEqual(self.validate(p, baseline, advice)["status"], "manual_review")
+
+    def test_local_style_remains_in_verified_baseline_but_not_literal_include_graph(self):
+        with tempfile.TemporaryDirectory() as directory:
+            p, _, _, baseline = self.fixture(directory)
+            manifest = json.loads((p.root / baseline).read_text(encoding="utf-8"))
+            self.assertIn("localstyle.sty", [item["path"] for item in manifest["files"]])
+            report = snapshot_source_edit_checks(p.root, baseline)
+            self.assertEqual(report["include_context"]["status"], "available")
+            self.assertTrue(any(item["file"] == "localstyle.sty" for item in report["scientific_payload"]["file_reports"]))
+            context = report["include_context"]["contexts"][0]
+            self.assertNotIn("localstyle.sty", context["files"])
+            self.assertEqual(self.validate(p, baseline, self.signed(p, baseline))["status"], "verified")
+
+    def test_signed_include_review_cannot_accept_data_emitted_by_local_spacing_definition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            p, _, after, baseline = self.fixture(directory,
+                style=r"\renewcommand{\hspace}[1]{#1}", cell=r"\hspace{42pt}")
+            signed = self.signed(p, baseline)
+            path = p.root / "tables/results.tex"
+            path.write_text(path.read_text(encoding="utf-8").replace("42pt", "17pt"), encoding="utf-8")
+            # Bind a current synthetic native receipt too: rejection must arise
+            # from the preserved payload, not only from stale build evidence.
+            rebind(p, files=[*after, "references.bib", "localstyle.sty"])
+            with self.assertRaises(ValueError):
+                self.request(p, baseline)
+            self.assertEqual(self.validate(p, baseline, signed)["status"], "manual_review")
+            report = snapshot_source_edit_checks(p.root, baseline, source_reviews=[signed])
+            self.assertEqual(report["scientific_payload"]["status"], "blocked")
+            self.assertFalse(report["include_context"]["contexts"][0]["float_wrapper_residual_equal"])
+            gate = make_decision(state_for(p, baseline), {}, False, None, project_root=p.root, source_reviews=[signed])
+            self.assertFalse(gate["checks"]["scientific_payload"]["pass"])
 
     def test_each_host_confirmation_and_reason_are_required(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -22,7 +22,7 @@ _DECLARATIONS = {
     "newcommand", "renewcommand", "providecommand", "DeclareRobustCommand",
     "DeclareMathOperator", "newenvironment", "renewenvironment",
     "provideenvironment", "newcolumntype",
-}
+} | scientific.DOCUMENT_COMMAND_DECLARATIONS | scientific.DOCUMENT_ENVIRONMENT_DECLARATIONS
 _PRIMITIVES = {"def", "gdef", "edef", "xdef"}
 _ORDINARY_ENVS = {
     "document", "abstract", "itemize", "enumerate", "description", "center",
@@ -60,6 +60,15 @@ def _declaration_spans(source: str) -> list[tuple[int, int]]:
         start = index
         name, pos = scientific._command(source, index)
         if name in _DECLARATIONS:
+            if name in scientific.DOCUMENT_COMMAND_DECLARATIONS | scientific.DOCUMENT_ENVIRONMENT_DECLARATIONS:
+                from source_map import _definition_end
+                end = _definition_end(source, pos, name)
+                if end is not None:
+                    spans.append((start, end))
+                    index = end
+                    continue
+                index = pos
+                continue
             if pos < len(source) and source[pos] == "*":
                 pos += 1
             while pos < len(source) and source[pos].isspace():
@@ -110,7 +119,7 @@ def _declaration_spans(source: str) -> list[tuple[int, int]]:
     return spans
 
 
-def _ordinary_body(source: str) -> str:
+def _ordinary_body(source: str, *, opaque_commands: frozenset[str] = frozenset()) -> str:
     active = scientific.active_source(source)
     envs = scientific._envs(active)
     spans = [
@@ -122,9 +131,9 @@ def _ordinary_body(source: str) -> str:
     # literal group. Scientific guards now retain their ordered payload and
     # ordinary residual words, so only these explicit complete local objects
     # can be masked here. Unsupported/ambiguous scopes remain ordinary/opaque.
-    inventory = scientific.standard_layout_object_inventory(source)
+    inventory = scientific.standard_layout_object_inventory(source, opaque_commands=opaque_commands)
     spans += [(item["start"], item["end"]) for item in inventory["objects"]]
-    spans += [(item["start"], item["end"]) for item in scientific.standard_caption_declarations(source)
+    spans += [(item["start"], item["end"]) for item in scientific.standard_caption_declarations(source, opaque_commands=opaque_commands)
               if item["supported"]]
     spans += _declaration_spans(active)
     begin = re.search(r"(?<!\\)\\begin\s*\{document\}", active)
@@ -172,9 +181,9 @@ def _opaque_end(source: str, pos: int) -> int:
         return max(pos, scientific.opaque_layout_child_end(source, pos))
 
 
-def _prose_tokens(source: str) -> tuple[str, ...]:
-    shadowed = scientific._shadowed_presentation_commands(scientific.active_source(source))
-    body = _ordinary_body(source)
+def _prose_tokens(source: str, *, opaque_commands: frozenset[str] = frozenset()) -> tuple[str, ...]:
+    shadowed = opaque_commands | scientific._shadowed_presentation_commands(scientific.active_source(source))
+    body = _ordinary_body(source, opaque_commands=shadowed)
     # Inspect scope effects before definitions/scientific regions are masked.
     # A local definition may alter later macro rendering even with identical
     # declaration inventories and ordinary words.
@@ -294,10 +303,10 @@ def _summary(tokens: tuple[str, ...]) -> dict[str, Any]:
     return {"token_count": len(tokens), "sha256": hashlib.sha256(payload).hexdigest()}
 
 
-def compare_layout_prose(original: str, repaired: str) -> dict[str, Any]:
+def compare_layout_prose(original: str, repaired: str, *, opaque_commands: frozenset[str] = frozenset()) -> dict[str, Any]:
     """Compare ordinary-body tokens; a non-pass needs caller rejection/review."""
     try:
-        before, after = _prose_tokens(original), _prose_tokens(repaired)
+        before, after = _prose_tokens(original, opaque_commands=opaque_commands), _prose_tokens(repaired, opaque_commands=opaque_commands)
     except (TypeError, ValueError, IndexError, RecursionError) as exc:
         return {"checked": False, "status": "unavailable", "changed_tokens": [],
                 "reasons": [f"Ordinary-prose extraction unavailable: {type(exc).__name__}"],

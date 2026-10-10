@@ -99,7 +99,7 @@ class RuntimeArtifactsTest(unittest.TestCase):
             manifest["freshness"]["blocking_checks"],
         )
 
-    def test_fresh_chain_with_source_set_passes(self) -> None:
+    def test_fresh_timestamps_do_not_establish_native_input_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             main = root / "main.tex"
@@ -137,8 +137,9 @@ class RuntimeArtifactsTest(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(manifest["freshness"]["status"], "pass")
-        self.assertEqual(manifest["freshness"]["blocking_checks"], [])
+        self.assertEqual(manifest["freshness"]["status"], "stale_or_missing")
+        self.assertEqual(manifest["freshness"]["blocking_checks"], ["native_build_inputs_current"])
+        self.assertEqual(manifest["native_build_binding"]["status"], "unknown")
         self.assertGreaterEqual(manifest["artifacts"]["source_set"]["count"], 1)
 
     def test_edited_input_closure_file_invalidates_pdf(self) -> None:
