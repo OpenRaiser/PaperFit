@@ -7,8 +7,10 @@ from typing import Any, Dict
 
 try:
     from runtime_repair_risk import classify_repair_candidate_risk
+    from host_advice import host_guidance
 except ModuleNotFoundError:  # package import during unit tests
     from .runtime_repair_risk import classify_repair_candidate_risk
+    from .host_advice import host_guidance
 
 
 SOURCE_CHANGING_TASK_TYPES = {
@@ -108,6 +110,8 @@ def build_approval_object(
     if task_type not in SOURCE_CHANGING_TASK_TYPES:
         return {
             "schema_version": "1.0",
+            "authority_scope": "optional_batch_executor",
+            "host_guidance": host_guidance(),
             "status": "not_applicable",
             "requires_approval": False,
             "approval_granted": False,
@@ -169,6 +173,8 @@ def build_approval_object(
 
     return {
         "schema_version": "1.0",
+        "authority_scope": "optional_batch_executor",
+        "host_guidance": host_guidance(),
         "status": status,
         "requires_approval": requires_approval,
         "approval_granted": approval_granted,
@@ -181,6 +187,8 @@ def build_approval_object(
             "PAPERFIT_TYPED_FIX_LAYOUT_APPLY=1",
         ],
         "policy": {
+            "applies_to": "optional_batch_executor",
+            "native_host_scope_source": "user_request_and_current_session",
             "source_mutation_default": "dry_run",
             "source_mutation_requires_explicit_approval": True,
             "rollback_policy": task.get("rollback_policy"),
@@ -220,14 +228,16 @@ def build_approval_scope_carry_forward_check(
 ) -> Dict[str, Any]:
     """Check whether a later repair round can reuse the same approval scope.
 
-    This is a reporting contract only. It does not grant permission to mutate
-    source; hosts still need an explicit apply approval for source-changing work.
+    This reports reuse of the optional executor's apply scope. It neither grants
+    nor limits the editing host's existing authority from the user's request.
     """
 
     task_type = _task_type(task)
     if task_type not in SOURCE_CHANGING_TASK_TYPES:
         return {
             "schema_version": "1.0",
+            "authority_scope": "optional_batch_executor",
+            "host_guidance": host_guidance(),
             "status": "not_applicable",
             "task_type": task_type,
             "reason": "task_does_not_change_source",
@@ -257,6 +267,8 @@ def build_approval_scope_carry_forward_check(
 
     return {
         "schema_version": "1.0",
+        "authority_scope": "optional_batch_executor",
+        "host_guidance": host_guidance(),
         "status": status,
         "task_type": task_type,
         "reason": reason,
@@ -281,6 +293,8 @@ def build_candidate_approval_scope_gate(
     if task_type not in SOURCE_CHANGING_TASK_TYPES:
         return {
             "schema_version": "1.0",
+            "authority_scope": "optional_batch_executor",
+            "host_guidance": host_guidance(),
             "status": "not_applicable",
             "reason": "task_does_not_change_source",
             "selected_candidate_count": 0,
@@ -352,6 +366,8 @@ def build_candidate_approval_scope_gate(
         reason = "no_selected_candidates"
     return {
         "schema_version": "1.1",
+        "authority_scope": "optional_batch_executor",
+        "host_guidance": host_guidance(),
         "status": status,
         "reason": reason,
         "approval_scope": policy.get("approval_scope"),

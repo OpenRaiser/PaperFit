@@ -28,6 +28,7 @@ from layout_policy import combine_policy_reports, compare_layout_policy, _review
 from source_review import load_source_review
 from runtime_snapshots import discover_source_files
 from scientific_integrity import scientific_payload_diff
+from host_advice import host_guidance
 
 
 _DISPLAY_MATH_BEGIN_RE = re.compile(r"\\begin\{(equation\*?|align\*?|multline\*?|gather\*?)\}")
@@ -1141,6 +1142,8 @@ def execute_repair_plan(
     report: Dict[str, Any] = {
         "schema_version": "1.0",
         "generated_at": datetime.now().isoformat(),
+        "host_guidance": host_guidance(),
+        "execution_scope": "optional_batch_executor",
         "canonical_execution_entry": CANONICAL_EXECUTION_ENTRY,
         "execution_manifest": canonical_execution_manifest(),
         "repair_plan": repair_plan_path,

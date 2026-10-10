@@ -1011,6 +1011,8 @@ def _derive_priority_items(status: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "risk_level": approval.get("risk_level") or repair.get("risk_level"),
                     "plan_candidates": repair.get("plan_candidates"),
                     "approval_mechanisms": approval.get("approval_mechanisms") or [],
+                    "authority_scope": "optional_batch_executor",
+                    "native_host_alternative": "Use native editing within the user's existing repair scope; reviewable batch limits do not require a new human approval by themselves.",
                 },
                 "mutation": "read_only",
             }
@@ -1836,7 +1838,7 @@ def _source_changing_exit_code(report: Dict[str, Any], project_root: Path, main_
 
     退出码表（可测试、不静默归 0）：
       0  done（明确满足成功条件的终态）
-      3  approval_required / needs_approval（合法但需人工审批的注意状态）
+      3  approval_required / needs_approval（可选批处理需授权或超出工具范围；不限制已授权宿主原生编辑）
       2  blocked / failed / compile_failed / runner_crash / 状态缺失（fail-closed）
       1  continue / partial / incomplete 等已运行但未达 done 的状态
     """

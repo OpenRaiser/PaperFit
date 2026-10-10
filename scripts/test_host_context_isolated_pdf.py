@@ -113,8 +113,14 @@ class ExplicitIsolatedPDFTests(unittest.TestCase):
         self.assertEqual(before,{p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
 
     def test_host_explicit_pdf_without_build_is_viewable_not_current(self):
-        self.assert_observed_unbound(self.context(pdf=self.pdf))
-        self.assertTrue(any('read-only page inspection' in t for t in self.context(pdf=self.pdf)['host_tasks']))
+        before = {p: p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+        result = self.context(pdf=self.pdf)
+        self.assert_observed_unbound(result)
+        authority = result['host_guidance']['editing_authority']
+        self.assertTrue(authority['native_editing_supported'])
+        self.assertFalse(authority['tool_routes_limit_host_edits'])
+        self.assertFalse(result['host_guidance']['recommendation_is_authorization'])
+        self.assertEqual(before, {p: p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
 
     def test_external_same_hash_cannot_borrow_neighbor_runtime_snapshot(self):
         vis=review_pdf_visibility(self.pdf,root=self.root,allow_external_pdf=True)

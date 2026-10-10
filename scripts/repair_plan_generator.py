@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from diagnosis_ingest import findings_to_candidates, parse_host_diagnosis
 from runtime_repair_risk import annotate_repair_candidates
+from host_advice import host_guidance
 from visual_action_plan import document_scope_b1_authorized, normalized_visual_object_kind, vlm_table_size_semantics
 
 
@@ -1704,6 +1705,8 @@ def generate_repair_plan(
     plan = {
         "schema_version": "1.0",
         "generated_at": datetime.now().isoformat(),
+        "host_guidance": host_guidance(),
+        "selection_scope": "optional_batch_priority; not an exhaustive native-host repair menu",
         "summary": {
             "total_candidates": len(candidates),
             "object_candidates": len([c for c in candidates if c["candidate_type"] == "object"]),

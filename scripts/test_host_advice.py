@@ -14,6 +14,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from host_context import build_host_context
 from page_fit_toolbox import build_toolbox, source_inventory, planning_review_candidates
 from visual_action_plan import build_visual_action_plan
+from repair_plan_generator import generate_repair_plan
+from repair_plan_executor import execute_repair_plan
+from runtime_approval import build_approval_object, build_candidate_approval_scope_gate
+from paperfit_command import _derive_priority_items
 
 
 class HostAdviceTest(unittest.TestCase):
@@ -77,9 +81,63 @@ class HostAdviceTest(unittest.TestCase):
         self.assertEqual(entry["host_review"]["target_status"], "ambiguous")
         self.assertEqual(entry["host_review"]["verification"], "pending_host")
         self.assertEqual(entry["host_review"]["evidence_status"], "unknown")
+        self.assertEqual(entry["host_review"]["reviewer"], "editing_host")
+        authority = result["host_guidance"]["editing_authority"]
+        self.assertTrue(authority["native_editing_supported"])
+        self.assertFalse(authority["tool_routes_limit_host_edits"])
+        self.assertFalse(authority["per_finding_acknowledgement_required"])
         self.assertTrue(result["layout_plan"]["available_before_defects_stable"])
         self.assertIsNone(result["page_objective"]["target_met"])
         self.assertEqual(before, (root / "main.tex").read_bytes())
+
+    def test_generated_plan_and_noop_executor_preserve_native_host_alternative(self):
+        root = self.fixture({"main.tex": r"\documentclass{article}\begin{document}Fixed scientific words.\end{document}",
+                             "visual.json": json.dumps({"findings": []})})
+        before = (root / "main.tex").read_bytes()
+        plan = generate_repair_plan(str(root / "visual.json"), str(root / "plan.json"))
+        report = execute_repair_plan(str(root / "plan.json"), "main.tex", "execution.json",
+                                     project_root=root)
+        self.assertEqual(plan["candidates"], [])
+        self.assertEqual(report["status"], "noop")
+        for payload in (plan, report):
+            authority = payload["host_guidance"]["editing_authority"]
+            self.assertTrue(authority["native_editing_supported"])
+            self.assertFalse(authority["strategy_menu_is_exhaustive"])
+            self.assertFalse(authority["ordinary_layout_reapproval_required"])
+            self.assertFalse(payload["host_guidance"]["recommendation_is_authorization"])
+        self.assertEqual(report["execution_scope"], "optional_batch_executor")
+        self.assertEqual(before, (root / "main.tex").read_bytes())
+
+    def test_high_risk_batch_deferral_does_not_revoke_existing_native_host_scope(self):
+        task = {"task_type": "full_vto", "dry_run_source_mutation": True}
+        approval = build_approval_object(task=task,
+            state={"repair_plan_summary": {"total_candidates": 1}},
+            runtime_actions={"repair_plan_executor": {
+                "skipped": True, "reason": "dry_run_source_mutation", "planned_candidates": 1}})
+        candidate = {"proposed_action": "convert_to_longtable", "risk": {
+            "operation": "table_reconstruction", "risk_level": "high",
+            "mutation_surface": ["table_environment"]}}
+        gate = build_candidate_approval_scope_gate(task=task, approval=approval,
+            repair_plan={"candidates": [candidate]})
+        self.assertEqual(gate["status"], "approval_required")
+        self.assertEqual(gate["selected_candidate_count"], 0)
+        for payload in (approval, gate):
+            self.assertEqual(payload["authority_scope"], "optional_batch_executor")
+            self.assertTrue(payload["host_guidance"]["editing_authority"]["native_editing_supported"])
+            self.assertFalse(payload["host_guidance"]["editing_authority"]["tool_routes_limit_host_edits"])
+        self.assertEqual(approval["policy"]["applies_to"], "optional_batch_executor")
+        item = next(item for item in _derive_priority_items({"approval": approval})
+                    if item["priority"] == "review_repair_plan_approval")
+        self.assertEqual(item["evidence"]["authority_scope"], "optional_batch_executor")
+        self.assertIn("native editing", item["evidence"]["native_host_alternative"])
+
+    def test_analysis_report_does_not_grant_source_mutation_authority(self):
+        approval = build_approval_object(task={"task_type": "analysis"}, state={}, runtime_actions={})
+        self.assertEqual(approval["status"], "not_applicable")
+        self.assertFalse(approval["approval_granted"])
+        self.assertFalse(approval["host_guidance"]["recommendation_is_authorization"])
+        self.assertIn("Analysis-only requests do not authorize mutation",
+                      approval["host_guidance"]["editing_authority"]["scope_note"])
 
     def test_page_plan_exposes_template_and_large_gap_leads_before_compile(self):
         root = self.fixture({"main.tex": "\n".join([

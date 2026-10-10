@@ -4,12 +4,20 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+try:
+    from page_objective import evaluate_page_objective, page_distance
+    from compile_inputs import verify_native_build
+except ModuleNotFoundError:  # package import
+    from .page_objective import evaluate_page_objective, page_distance
+    from .compile_inputs import verify_native_build
 
 try:
     from runtime_snapshots import (
@@ -32,7 +40,7 @@ except ModuleNotFoundError:  # package import
         restore_snapshot,
     )
 
-PHASED_REPAIR_SCHEMA_VERSION = "1.1"
+PHASED_REPAIR_SCHEMA_VERSION = "1.2"
 
 LOCAL_SAFE_ACTIONS = {
     "repair_overfull_boxes",  # D1 段落级：长 token/局部 stretch（灾难级仍会被抢占逻辑排序）
@@ -168,6 +176,10 @@ class RoundEvidenceSnapshot:
     undefined_count: int
     protected: Dict[str, int]
     page_gap: Optional[int] = None
+    measured_scope: str = "with_appendix"
+    compile_success: Optional[bool] = None
+    pdf_sha256: Optional[str] = None
+    source_pdf_binding: str = "unverified"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -178,6 +190,10 @@ class RoundEvidenceSnapshot:
             "overfull_count": self.overfull_count,
             "undefined_count": self.undefined_count,
             "protected": self.protected,
+            "measured_scope": self.measured_scope,
+            "compile_success": self.compile_success,
+            "pdf_sha256": self.pdf_sha256,
+            "source_pdf_binding": self.source_pdf_binding,
         }
 
 
@@ -204,7 +220,12 @@ def collect_evidence(
                 protected[name] += len(pattern.findall(text))
     except Exception:
         pass
-    page_count = page_count_fn(root / Path(main_tex).with_suffix(".pdf"))
+    pdf_path = root / Path(main_tex).with_suffix(".pdf")
+    page_count = page_count_fn(pdf_path)
+    try:
+        pdf_sha256 = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
+    except OSError:
+        pdf_sha256 = None
     return RoundEvidenceSnapshot(
         page_count=page_count,
         severe_overfull=sum(1 for w in widths if w >= 100.0),
@@ -212,6 +233,7 @@ def collect_evidence(
         overfull_count=len(widths),
         undefined_count=len(_UNDEF_RE.findall(log_text)),
         protected=protected,
+        pdf_sha256=pdf_sha256,
     )
 
 
@@ -220,22 +242,42 @@ def gate_decision(
     after: RoundEvidenceSnapshot,
     *,
     target_pages: Optional[int],
+    page_policy: str = "exact",
+    page_budget_scope: Optional[str] = None,
     vertical_cost: bool = False,
     strict_page_gap: bool = False,
 ) -> Tuple[bool, str]:
-    "硬门：全部通过才接受。返回 (accepted, reason)。"
-    if after.page_count is None:
+    """Accept a candidate using the requested page policy and measured safety checks.
+
+    Legacy direct callers default to exact. A physical PDF does not establish a
+    main-body/reference boundary; unresolved scoped objectives remain pending
+    without rolling back a candidate solely on a guessed page gap.
+    """
+    # Validate even when counts or the scope boundary are unavailable.
+    evaluate_page_objective(target_pages=target_pages, page_policy=page_policy,
+                            page_budget_scope=page_budget_scope)
+    if after.compile_success is False:
+        return False, "compile_or_render_failed: trial compilation did not succeed (existing PDF is not current evidence)"
+    if type(after.page_count) is not int or after.page_count < 1:
         return False, "compile_or_render_failed: no readable PDF (fail-closed)"
+    scope = page_budget_scope or "with_appendix"
+    scope_matches = before.measured_scope == after.measured_scope == scope
     if before.page_count is not None:
         page_delta = after.page_count - before.page_count
-        if target_pages is not None:
-            gap_before = abs(before.page_count - target_pages)
-            gap_after = abs(after.page_count - target_pages)
+        if target_pages is not None and scope_matches:
+            gap_before = page_distance(before.page_count, target_pages, page_policy)
+            gap_after = page_distance(after.page_count, target_pages, page_policy)
+            if gap_before is None or gap_after is None:
+                return False, "page objective unavailable: invalid measured page count"
             if gap_after > gap_before:
                 return False, f"page_gap worsened: {gap_before} -> {gap_after} (pages {before.page_count} -> {after.page_count}, target {target_pages})"
             # 超页预算时，带垂直代价的动作必须证明页数没有增加
             if vertical_cost and before.page_count > target_pages and after.page_count > before.page_count:
                 return False, f"vertical-cost action grew pages while over budget: {before.page_count} -> {after.page_count}"
+        elif target_pages is not None:
+            # Other hard checks below still apply. Do not compare the requested
+            # body-only budget to total physical pages or claim a goal hit.
+            pass
         elif strict_page_gap and page_delta > 0:
             return False, f"page count grew without a target budget: {before.page_count} -> {after.page_count}"
         elif page_delta > 0:
@@ -254,6 +296,8 @@ def gate_decision(
             return False, f"protected objects decreased: {name} {before_count} -> {after.protected.get(name, 0)}"
     if after.undefined_count > before.undefined_count:
         return False, f"undefined references increased: {before.undefined_count} -> {after.undefined_count}"
+    if target_pages is not None and not scope_matches:
+        return True, "measured safety gates passed; page objective pending: scope_boundary_unverified"
     return True, "all gates passed"
 
 
@@ -557,6 +601,8 @@ def execute_phased_repair(
     main_tex: str,
     column_type: Optional[str] = None,
     target_pages: Optional[int] = None,
+    page_policy: str = "exact",
+    page_budget_scope: Optional[str] = None,
     max_local_batch: int = 6,
     max_layout_candidates: int = 3,
     max_global_candidates: int = 1,
@@ -568,6 +614,8 @@ def execute_phased_repair(
     """分组执行修复计划，返回与 repair_execution_summary 兼容的汇总。"""
 
     root = Path(project_root)
+    evaluate_page_objective(target_pages=target_pages, page_policy=page_policy,
+                            page_budget_scope=page_budget_scope)
     plan = json.loads(Path(repair_plan_path).read_text(encoding="utf-8"))
     all_candidates = [c for c in plan.get("candidates") or [] if isinstance(c, dict) and not c.get("requires_human_review")]
 
@@ -597,6 +645,8 @@ def execute_phased_repair(
 
     # 基线证据：轮开始时的编译产物由调用方保证存在（repair 前 observe 已编译）
     baseline = collect_evidence(root, main_tex, page_count_fn)
+    if (page_budget_scope or "with_appendix") == baseline.measured_scope:
+        baseline.page_gap = page_distance(baseline.page_count, target_pages, page_policy)
     current = baseline
 
     def _candidate_outcome(candidate: Dict[str, Any]) -> CandidateOutcome:
@@ -615,8 +665,60 @@ def execute_phased_repair(
         )
 
     def _trial_compile() -> RoundEvidenceSnapshot:
-        compile_fn(root, main_tex)
-        return collect_evidence(root, main_tex, page_count_fn)
+        compile_report = compile_fn(root, main_tex)
+        after = collect_evidence(root, main_tex, page_count_fn)
+        # A compiler may preserve a baseline/diagnostic PDF after failure. Page
+        # readability alone must never turn that failed trial into acceptance.
+        after.compile_success = bool(
+            isinstance(compile_report, dict)
+            and compile_report.get("success") is True
+            and compile_report.get("returncode", 0) == 0
+            and not compile_report.get("timeout")
+            and not compile_report.get("timed_out")
+            and not compile_report.get("fatal_error")
+            and not compile_report.get("restored_baseline_pdf")
+            and not compile_report.get("restored_good_pdf")
+            and not compile_report.get("partial_pdf_available")
+            and compile_report.get("pdf_fresh") is not False
+        )
+        if (after.compile_success and compile_report.get("schema_version") == "compile_result.v2"
+                and compile_report.get("current_source_compile_success") is True
+                and compile_report.get("source_pdf_binding") == "verified_native_inputs"):
+            after.source_pdf_binding = "verified_native_inputs"
+        if (page_budget_scope or "with_appendix") == after.measured_scope:
+            after.page_gap = page_distance(after.page_count, target_pages, page_policy)
+        return after
+
+    def _objective(evidence: RoundEvidenceSnapshot) -> Dict[str, Any]:
+        try:
+            live_pdf_sha = hashlib.sha256((root / Path(main_tex).with_suffix(".pdf")).read_bytes()).hexdigest()
+        except OSError:
+            live_pdf_sha = None
+        # A later failed trial can leave a different preview after its source is
+        # rolled back. The previous accepted unit's page count must not certify
+        # that preview as the final current PDF.
+        native_binding: Dict[str, Any] = {"status": "unknown", "source_pdf_binding": "unverified",
+                                         "reason": "canonical_current_source_compile_evidence_unavailable"}
+        if evidence.source_pdf_binding == "verified_native_inputs":
+            # Re-read the latest journal and imported bytes. A later failed
+            # trial with an identical restored PDF still invalidates an older
+            # successful attempt as evidence of the latest current build.
+            native_binding = verify_native_build(root / main_tex, root=root)
+        current_pdf = (evidence.compile_success is True and live_pdf_sha is not None
+                       and live_pdf_sha == evidence.pdf_sha256
+                       and native_binding.get("status") == "current"
+                       and native_binding.get("pdf_sha256") == live_pdf_sha)
+        objective = evaluate_page_objective(
+            target_pages=target_pages, page_policy=page_policy,
+            page_budget_scope=page_budget_scope, page_count=evidence.page_count,
+            measured_scope=evidence.measured_scope,
+            evidence_status="current" if current_pdf else "unknown",
+            pdf_sha256=evidence.pdf_sha256,
+            measurement_source="phased_trial_compile_pdf" if evidence.compile_success is not None else "phased_baseline_pdf",
+        )
+        objective["source_pdf_binding"] = native_binding.get("source_pdf_binding") or "unverified"
+        objective["native_build_binding"] = native_binding
+        return objective
 
     def _record_unit_edits(unit_outcomes: List[CandidateOutcome], unit_index: int, rollback_target: str) -> None:
         "接受后记录该单元的源码编辑范围（供轮级失败归因时单独撤销）。"
@@ -660,7 +762,8 @@ def execute_phased_repair(
                 rejected_count += 1
         else:
             after = _trial_compile()
-            accepted, reason = gate_decision(current, after, target_pages=target_pages)
+            accepted, reason = gate_decision(current, after, target_pages=target_pages,
+                                            page_policy=page_policy, page_budget_scope=page_budget_scope)
             if accepted:
                 for oc in batch_outcomes:
                     oc.accepted = True
@@ -709,6 +812,8 @@ def execute_phased_repair(
             current,
             after,
             target_pages=target_pages,
+            page_policy=page_policy,
+            page_budget_scope=page_budget_scope,
             vertical_cost=bool(candidate.get("vertical_cost")),
         )
         if accepted:
@@ -753,7 +858,9 @@ def execute_phased_repair(
             outcomes.append(outcome)
             continue
         after = _trial_compile()
-        accepted, reason = gate_decision(current, after, target_pages=target_pages, strict_page_gap=True)
+        accepted, reason = gate_decision(current, after, target_pages=target_pages,
+                                        page_policy=page_policy, page_budget_scope=page_budget_scope,
+                                        strict_page_gap=True)
         if accepted:
             outcome.accepted = True
             outcome.reason = reason
@@ -773,6 +880,9 @@ def execute_phased_repair(
         "generated_at": datetime.now().isoformat(),
         "status": "success" if accepted_count else ("partial" if applied_any(outcomes) else "noop"),
         "execution_mode": "phased_atomic",
+        "page_policy": page_policy,
+        "page_budget_scope": page_budget_scope or "with_appendix",
+        "page_objective": _objective(current),
         "applied_count": accepted_count,
         "accepted_count": accepted_count,
         "rejected_count": rejected_count,

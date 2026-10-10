@@ -175,4 +175,28 @@ class RuntimePageObjectiveTest(unittest.TestCase):
         self.assertEqual(runtime.manager.load()["terminal_success_guard"]["status"],"goal_pending")
         self.assertFalse((root/"data/rollback_report.json").exists())
 
+class PhasedRuntimePagePolicyTest(unittest.TestCase):
+    def test_task_policy_and_scope_reach_the_phased_executor(self):
+        for policy in ("at_most", "exact"):
+            for scope in ("with_appendix", "main_body", "with_refs"):
+                with self.subTest(policy=policy, scope=scope), tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    (root / "main.tex").write_text(r"\documentclass{article}\begin{document}Body.\end{document}", encoding="utf-8")
+                    runtime = OrchestratorRuntime(state_path=str(root / "data/state.json"))
+                    runtime.init_task("main.tex", task_type="page_adjust", target_pages=8,
+                        page_policy=policy, page_budget_scope=scope)
+                    previous = Path.cwd()
+                    try:
+                        os.chdir(root)
+                        with mock.patch.object(runtime, "_validate_repair_plan_before_execution", return_value={"fresh": True}), \
+                             mock.patch("phased_repair.execute_phased_repair", return_value={"status": "noop", "applied_count": 0}) as execute:
+                            runtime.execute_repair_plan_phased("main.tex")
+                        self.assertEqual(execute.call_count, 1)
+                        self.assertEqual(execute.call_args.kwargs["target_pages"], 8)
+                        self.assertEqual(execute.call_args.kwargs["page_policy"], policy)
+                        self.assertEqual(execute.call_args.kwargs["page_budget_scope"], scope)
+                        self.assertEqual((root / "main.tex").read_text(encoding="utf-8"), r"\documentclass{article}\begin{document}Body.\end{document}")
+                    finally:
+                        os.chdir(previous)
+
 if __name__ == "__main__": unittest.main()

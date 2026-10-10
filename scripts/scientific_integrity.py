@@ -1633,12 +1633,67 @@ def combined_layout_uncertainty(original:str,repaired:str)->Dict[str,Any]:
          'reason':'Only the enumerated presentation/anchor families account for the combined differences; every residual scientific and ordered prose payload agrees.',
          'limits':'Classification only. Original raw changes remain. Requires actual declaration evidence where needed and full current source/template/PDF review.'}
 
+def _presentation_macro_uncertainty(original:str,repaired:str,before:Dict[str,Any],after:Dict[str,Any])->Dict[str,Any]:
+ """Finite layout-only body edits in otherwise identical macro declarations.
+
+ This is a review trigger, not macro expansion or a preservation proof. Opaque
+ math, aliases, changed signatures and changed literal content do not qualify.
+ """
+ result={'checked':True,'status':'not_applicable'}
+ old=before['macro_definitions'];new=after['macro_definitions']
+ if len(old)!=len(new):return result
+ opaque=_shadowed_presentation_commands(active_source(original))|_shadowed_presentation_commands(active_source(repaired))
+ changed=[]
+ for left,right in zip(old,new):
+  if left==right:continue
+  if (len(left)!=len(right) or left[:-1]!=right[:-1]
+      or left[0] in REGISTER_DECLARATIONS|{'let','DeclareMathOperator'}):return result
+  bodies_left=left[-1] if isinstance(left[-1],tuple) else (left[-1],)
+  bodies_right=right[-1] if isinstance(right[-1],tuple) else (right[-1],)
+  if len(bodies_left)!=len(bodies_right):return result
+  for a,b in zip(bodies_left,bodies_right):
+   # Macro bodies are not checked by file-local presentation policy. Keep
+   # graphics/scaling/font/hiding operations literal, so zero scale, draft,
+   # phantom and font changes cannot be mistaken for harmless uncertainty.
+   # Initially this route only relaxes finite literal hspace/vspace bodies;
+   # unsupported spacing forms and shadowed commands remain literal too.
+   commands=frozenset(re.findall(r'\\([A-Za-z@]+|[^A-Za-z])',a+'\n'+b))
+   body_opaque=opaque|(commands-{'hspace','vspace'})
+   if _strip_layout(a,opaque_commands=body_opaque)!=_strip_layout(b,opaque_commands=body_opaque):return result
+  changed.append(str(left[1] if left[0] in {'def','gdef','edef','xdef'} else left[2]))
+ if changed:
+  result.update(status='pending',declarations=changed,
+                reason='Declaration identities/signatures and all residual literal payload agree; only finite presentation syntax differs. Current source and PDF still need host review.')
+ return result
+
+
+def scientific_host_review_report(report:Dict[str,Any])->Dict[str,Any]:
+ """Retain a diagnosed uncertainty without certifying preservation.
+
+ The token checker keeps its raw failed result. Only a completed assessment
+ that explicitly has no confirmed changed component can become pending host
+ review at a mutation boundary. Missing assessments and confirmed changes do
+ not qualify, and no host assertion can turn this report into a pass.
+ """
+ assessment=report.get('assessment')
+ if (report.get('checked') is True and report.get('status')=='failed'
+     and isinstance(assessment,dict)
+     and assessment.get('classification')=='manual_review'
+     and assessment.get('confirmed_changed_components')==[]
+     and report.get('presentation_macro_uncertainty',{}).get('status')=='pending'):
+  return {**report,'automated_report':report,'automated_status':report['status'],
+          'status':'manual_review','verification_method':'pending_host_review',
+          'review_note':'Candidate may be retained for source and current-PDF review; automated preservation remains unproved. This does not authorize content changes or final acceptance.'}
+ return report
+
+
 def scientific_payload_diff(original:str,repaired:str,*,_template_glue_review:bool=True)->Dict[str,Any]:
  limits='Conservative token invariants, not mathematical equivalence; No macro expansion or mathematical equivalence proof; exotic TeX definitions/restructuring require host review. Cross-file checking requires callers to compare every modified source file.'
  def summary(value):
   return {'sha256':hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False).encode('utf-8')).hexdigest(),'component_counts':{k:len(v) for k,v in value.items()}}
  try:
   before=_payload(original);after=_payload(repaired);changed=[key for key in before if before[key]!=after[key]]
+  presentation_macro=_presentation_macro_uncertainty(original,repaired,before,after) if changed==['macro_definitions'] else {'checked':False,'status':'not_applicable'}
   before_summary=summary(before);after_summary=summary(after)
   raw_changed=list(changed)
   equivalence=identified_layout_equivalence(original,repaired) if original!=repaired else {'checked':True,'status':'not_needed','objects':[],'reasons':[]}
@@ -1698,6 +1753,7 @@ def scientific_payload_diff(original:str,repaired:str,*,_template_glue_review:bo
          'reference_anchor_uncertainty':anchors,
          'reference_font_hook_uncertainty':font_hook,
          'combined_layout_uncertainty':combined,
+         **({'presentation_macro_uncertainty':presentation_macro} if presentation_macro.get('status')=='pending' else {}),
          **({'template_parameter_uncertainty':template_glue} if template_glue.get('status')=='pending' else {}),
          'assessment':{'classification':classification,'scope':'protected_token_invariants',
                        'semantic_damage_proven':False,'requires_host_review':bool(changed),

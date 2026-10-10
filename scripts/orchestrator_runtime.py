@@ -610,6 +610,8 @@ class OrchestratorRuntime:
                 main_tex=main_tex,
                 column_type=task_config.get("column_type"),
                 target_pages=task_config.get("target_pages"),
+                page_policy=task_config.get("page_policy") or "at_most",
+                page_budget_scope=task_config.get("page_budget_scope"),
                 max_local_batch=16,
                 max_layout_candidates=max(8, max_candidates),
                 max_global_candidates=2,

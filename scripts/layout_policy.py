@@ -979,7 +979,7 @@ def snapshot_source_edit_checks(project_root: Path, rollback_target: str | Path,
     """Read a verified baseline once for live policy and layout-only prose checks."""
     from runtime_snapshots import _resolve_backup_file, load_snapshot_manifest, resolve_manifest_path, validate_snapshot_manifest
     from layout_prose_integrity import compare_layout_prose
-    from scientific_integrity import scientific_payload_diff
+    from scientific_integrity import scientific_payload_diff, scientific_host_review_report
     from source_review import apply_source_review
 
     root = project_root.resolve()
@@ -1036,6 +1036,7 @@ def snapshot_source_edit_checks(project_root: Path, rollback_target: str | Path,
                     review=matching_reviews[0] if len(matching_reviews) == 1 else None,
                     scientific=science_report, prose=prose_report,
                 )
+                science_report = scientific_host_review_report(science_report)
                 if len(matching_reviews) > 1:
                     decision = {**decision, "checked": True, "status": "manual_review", "reason": "multiple source reviews for the same file"}
                 source_review_decisions.append({"file": relative, **decision})

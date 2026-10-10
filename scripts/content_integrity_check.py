@@ -27,7 +27,7 @@ from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Tuple, Set
 from datetime import datetime
 
-from scientific_integrity import TEXT_WRAPPERS, FLOAT_ENVS, ZERO_ARG_LAYOUT_COMMANDS, _command, _group, _optional, _strip_layout, _envs, _literal_dimension, _macro_definitions, _shadowed_presentation_commands, active_source, minipage_layout_end, scientific_payload_diff
+from scientific_integrity import TEXT_WRAPPERS, FLOAT_ENVS, ZERO_ARG_LAYOUT_COMMANDS, _command, _group, _optional, _strip_layout, _envs, _literal_dimension, _macro_definitions, _shadowed_presentation_commands, active_source, minipage_layout_end, scientific_payload_diff, scientific_host_review_report
 from layout_policy import compare_layout_policy
 from layout_prose_integrity import compare_layout_prose
 
@@ -718,6 +718,10 @@ def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_
     scientific_payload, layout_prose, source_review_result = apply_source_review(
         original_tex, repaired_tex, project_root=project_root, file=file,
         review=source_review, scientific=scientific_payload, prose=layout_prose)
+    # Unsupported declarations can be uncertainty rather than established
+    # payload loss. Keep the original failed check and a pending candidate;
+    # confirmed changes, missing checks and final acceptance remain guarded.
+    scientific_payload = scientific_host_review_report(scientific_payload)
     source_restoration = (verify_missing_graphic_restoration(original_tex, repaired_tex, source_restoration_evidence_path,
                           scientific_payload=scientific_payload, layout_prose=layout_prose, layout_policy=layout_policy)
                           if source_restoration_evidence_path else {'checked': False, 'status': 'not_used'})
@@ -742,7 +746,7 @@ def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_
     layout_structure_changed = bool(structure_reasons)
 
     if scientific_payload["regression_reasons"]:
-        uncertain_length = any((scientific_payload.get(name) or {}).get("status") == "pending" for name in ("layout_argument_uncertainty", "reference_anchor_uncertainty", "combined_layout_uncertainty", "reference_font_hook_uncertainty", "template_parameter_uncertainty"))
+        uncertain_length = scientific_payload.get("status") == "manual_review" or any((scientific_payload.get(name) or {}).get("status") == "pending" for name in ("layout_argument_uncertainty", "reference_anchor_uncertainty", "combined_layout_uncertainty", "reference_font_hook_uncertainty", "template_parameter_uncertainty"))
         # Opaque-adjacent length syntax is unresolved, not an automatic rollback
         # instruction. It remains a failed scientific check until host review.
         violation_level = 2 if uncertain_length else 3
