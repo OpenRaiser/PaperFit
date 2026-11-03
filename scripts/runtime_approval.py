@@ -7,8 +7,10 @@ from typing import Any, Dict
 
 try:
     from runtime_repair_risk import classify_repair_candidate_risk
+    from host_advice import host_guidance
 except ModuleNotFoundError:  # package import during unit tests
     from .runtime_repair_risk import classify_repair_candidate_risk
+    from .host_advice import host_guidance
 
 
 SOURCE_CHANGING_TASK_TYPES = {
@@ -108,6 +110,8 @@ def build_approval_object(
     if task_type not in SOURCE_CHANGING_TASK_TYPES:
         return {
             "schema_version": "1.0",
+            "authority_scope": "optional_batch_executor",
+            "host_guidance": host_guidance(),
             "status": "not_applicable",
             "requires_approval": False,
             "approval_granted": False,
@@ -141,6 +145,13 @@ def build_approval_object(
         requires_approval = True
         approval_granted = False
         reason = str(action_reason or "dry_run_source_mutation")
+    elif action_skipped and (action_requires_approval or action_reason in {
+        "approval_required", "approval_scope_blocked",
+    }):
+        status = "approval_required"
+        requires_approval = True
+        approval_granted = False
+        reason = str(action_reason or "source_mutation_requires_approval")
     elif not dry_run and applied_count > 0:
         status = "approved_and_executed"
         requires_approval = False
@@ -151,11 +162,6 @@ def build_approval_object(
         requires_approval = False
         approval_granted = True
         reason = str(action.get("status"))
-    elif action_skipped and action_reason == "approval_scope_blocked":
-        status = "approval_required"
-        requires_approval = True
-        approval_granted = False
-        reason = "approval_scope_blocked"
     elif action_skipped:
         status = "not_required"
         requires_approval = False
@@ -169,6 +175,8 @@ def build_approval_object(
 
     return {
         "schema_version": "1.0",
+        "authority_scope": "optional_batch_executor",
+        "host_guidance": host_guidance(),
         "status": status,
         "requires_approval": requires_approval,
         "approval_granted": approval_granted,
@@ -181,6 +189,8 @@ def build_approval_object(
             "PAPERFIT_TYPED_FIX_LAYOUT_APPLY=1",
         ],
         "policy": {
+            "applies_to": "optional_batch_executor",
+            "native_host_scope_source": "user_request_and_current_session",
             "source_mutation_default": "dry_run",
             "source_mutation_requires_explicit_approval": True,
             "rollback_policy": task.get("rollback_policy"),
@@ -220,14 +230,16 @@ def build_approval_scope_carry_forward_check(
 ) -> Dict[str, Any]:
     """Check whether a later repair round can reuse the same approval scope.
 
-    This is a reporting contract only. It does not grant permission to mutate
-    source; hosts still need an explicit apply approval for source-changing work.
+    This reports reuse of the optional executor's apply scope. It neither grants
+    nor limits the editing host's existing authority from the user's request.
     """
 
     task_type = _task_type(task)
     if task_type not in SOURCE_CHANGING_TASK_TYPES:
         return {
             "schema_version": "1.0",
+            "authority_scope": "optional_batch_executor",
+            "host_guidance": host_guidance(),
             "status": "not_applicable",
             "task_type": task_type,
             "reason": "task_does_not_change_source",
@@ -257,6 +269,8 @@ def build_approval_scope_carry_forward_check(
 
     return {
         "schema_version": "1.0",
+        "authority_scope": "optional_batch_executor",
+        "host_guidance": host_guidance(),
         "status": status,
         "task_type": task_type,
         "reason": reason,
@@ -281,6 +295,8 @@ def build_candidate_approval_scope_gate(
     if task_type not in SOURCE_CHANGING_TASK_TYPES:
         return {
             "schema_version": "1.0",
+            "authority_scope": "optional_batch_executor",
+            "host_guidance": host_guidance(),
             "status": "not_applicable",
             "reason": "task_does_not_change_source",
             "selected_candidate_count": 0,
@@ -291,14 +307,19 @@ def build_candidate_approval_scope_gate(
     policy = approval.get("policy") if isinstance(approval.get("policy"), dict) else {}
     allowed_surface = set(str(item) for item in (policy.get("mutation_surface") or []))
     high_risk_operations = set(str(item) for item in (policy.get("high_risk_operations") or []))
-    candidates = [
+    all_candidates = [
         item
-        for item in (repair_plan.get("candidates") or [])[: max(0, int(candidate_limit or 0))]
+        for item in (repair_plan.get("candidates") or [])
         if isinstance(item, dict)
     ]
+
     candidate_risks = []
-    blocked_candidates = []
-    for index, candidate in enumerate(candidates, start=1):
+    blocked_candidates = []      
+    allowed_candidates = []      
+    deferred_candidates = []     
+    scanned = 0
+    batch_size = max(0, int(candidate_limit or 0))
+    for index, candidate in enumerate(all_candidates, start=1):
         risk = candidate.get("risk") if isinstance(candidate.get("risk"), dict) else classify_repair_candidate_risk(candidate)
         surfaces = set(str(item) for item in (risk.get("mutation_surface") or []))
         operation = str(risk.get("operation") or "")
@@ -318,25 +339,44 @@ def build_candidate_approval_scope_gate(
             },
             "allowed_under_current_scope": allowed,
         }
-        candidate_risks.append(entry)
-        if not allowed:
+        if allowed:
+            if len(allowed_candidates) < batch_size:
+                allowed_candidates.append(entry)
+        else:
+            entry["deferred_reason"] = (
+                "high_risk_operation_requires_fresh_approval"
+                if high_risk_operation
+                else "mutation_surface_outside_approval_scope"
+            )
+            deferred_candidates.append(entry)
             blocked_candidates.append(entry)
+        candidate_risks.append(entry)
+        scanned = index
+        # 批次填满后再多扫 20 个（记录 deferred 供报告），避免整份大计划全扫
+        if len(allowed_candidates) >= batch_size and batch_size and index - batch_size > 20:
+            break
 
-    status = "pass" if candidates and not blocked_candidates else "blocked" if candidates else "not_evaluated"
-    reason = (
-        "selected_candidates_within_approval_scope"
-        if status == "pass"
-        else "selected_candidate_exceeds_approval_scope"
-        if blocked_candidates
-        else "no_selected_candidates"
-    )
+    allowed_count = len(allowed_candidates)
+    if allowed_count:
+        status = "pass"
+        reason = "safe_subset_within_approval_scope" if deferred_candidates else "selected_candidates_within_approval_scope"
+    elif scanned and (deferred_candidates or blocked_candidates):
+        status = "approval_required"
+        reason = "no_candidate_allowed_under_current_scope"
+    else:
+        status = "not_evaluated"
+        reason = "no_selected_candidates"
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
+        "authority_scope": "optional_batch_executor",
+        "host_guidance": host_guidance(),
         "status": status,
         "reason": reason,
         "approval_scope": policy.get("approval_scope"),
         "candidate_limit": candidate_limit,
-        "selected_candidate_count": len(candidates),
+        "selected_candidate_count": allowed_count,
+        "allowed_candidates": allowed_candidates,
+        "deferred_candidates": deferred_candidates,
         "candidate_risks": candidate_risks,
         "blocked_candidates": blocked_candidates,
     }

@@ -80,13 +80,48 @@ def classify_repair_candidate_risk(candidate: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def conflict_keys_for(candidate: Dict[str, Any]) -> List[str]:
+    """Ranges that must not be edited by two candidates in the same round."""
+
+    target = candidate.get("target") if isinstance(candidate.get("target"), dict) else {}
+    label = str(target.get("label") or "")
+    scope = str(target.get("scope") or "")
+    family = str(candidate.get("defect_family") or "")
+    line_number = candidate.get("line_number")
+    keys: List[str] = []
+    if label:
+        keys.append(f"object:{label}")
+    if line_number not in (None, ""):
+        keys.append(f"source-line:{line_number}")
+    
+    
+    
+    
+    overflow_family = family in {"D1", "D2", "D3"}
+    if scope and not (overflow_family and scope == "overflow"):
+        keys.append(f"scope:{scope}")
+    if str(candidate.get("candidate_type") or "") == "global" or scope in {
+        "paragraph_spacing",
+        "page_budget",
+        "trailing_whitespace",
+    }:
+        keys.append("global:layout")
+    if family == "C1" or "resizebox" in str(candidate.get("proposed_action") or ""):
+        keys.append("object:tabular-resizebox")
+    if not keys:
+        keys.append(f"family:{family or 'unknown'}")
+    return keys
+
+
 def annotate_repair_candidates(candidates: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Return candidates with a stable risk object attached."""
+    """Return candidates with a stable risk object and conflict range attached."""
 
     annotated: List[Dict[str, Any]] = []
     for candidate in candidates:
         item = dict(candidate)
         if not isinstance(item.get("risk"), dict):
             item["risk"] = classify_repair_candidate_risk(item)
+        if not item.get("conflict_keys"):
+            item["conflict_keys"] = conflict_keys_for(item)
         annotated.append(item)
     return annotated

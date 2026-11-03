@@ -1,8 +1,15 @@
 """
+Simplified space-utilization helpers (DEPRECATED for execution).
+
+The canonical execution adapter is scripts/space_util_fixers.py (routed
+via scripts/fixer_registry.py). This copy lags behind it; use it only
+for reading strategy examples.
 Space Utilization Fixers - Category A 缺陷修复
 
 处理孤行寡行、末页留白、页数预算、双栏不齐等问题。
 """
+
+from __future__ import annotations
 
 import re
 from typing import Any, Dict, List, Tuple

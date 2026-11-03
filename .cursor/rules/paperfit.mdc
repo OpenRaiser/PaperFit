@@ -1,0 +1,42 @@
+---
+description: PaperFit project rule for LaTeX visual typesetting optimization
+globs:
+  - "**/*.tex"
+alwaysApply: false
+---
+
+# PaperFit Rule
+
+Use PaperFit when working on a LaTeX paper that needs visual typesetting optimization.
+
+## Product Rules
+
+- Work from the paper project root.
+- Treat PaperFit as a natural-language agent system, not a CLI-first workflow.
+- Users should describe goals directly, such as layout analysis, full repair, template migration, page-budget adjustment, or visual-only inspection.
+- Automatically infer the closest PaperFit workflow from the user's request before asking them for low-level PaperFit command syntax.
+
+## Execution Rules
+
+- Use the `paperfit` CLI, runtime, and scripts as the internal execution layer.
+- Prefer `paperfit runtime --state data/state.json run-round main.tex --template <TEMPLATE> --target-pages <N>` for the main closed loop.
+- Use `paperfit render` and `paperfit run scripts/...` only for targeted debugging, staged execution, or recovery.
+- Do not require the user to manually type internal PaperFit commands in the normal product path.
+- During long PaperFit runs, report progress proactively instead of staying silent.
+- Prefer self-recovery in recoverable failures; only ask the user to act when environment, permission, or ambiguity issues block execution.
+- Keep user-facing explanations centered on results, visual defects, repair strategy, and residual risks.
+
+## Layout Rules
+
+- Do not use `\resizebox` or `\scalebox` as brute-force table shrinking.
+- Prefer full-width or full-column table layouts that preserve readability and alignment.
+- Do not change the template font packages or the visual font appearance of body text and tables during repair.
+- Confirm fixes against rendered page images, not source-only inspection.
+- Treat visual results as the primary acceptance signal; logs and source are supporting evidence.
+- Keep semantic edits minimal and do not alter academic claims, results, or citations.
+- Do not silently delete figures, tables, captions, or labels to improve layout.
+
+## Installed Assets
+
+- Global PaperFit skills live under `~/.cursor/skills/paperfit/`.
+- This rule file is project-local and should live at `.cursor/rules/paperfit.mdc` inside the paper repository.

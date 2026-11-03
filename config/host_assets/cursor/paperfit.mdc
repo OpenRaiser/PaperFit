@@ -1,42 +1,18 @@
 ---
-description: PaperFit project rule for LaTeX visual typesetting optimization
+description: Use PaperFit to inspect and repair LaTeX paper layout from compiled page images.
 globs:
   - "**/*.tex"
 alwaysApply: false
 ---
 
-# PaperFit Rule
+PaperFit's structured visual closed loop is required: inspect actual rendered pages for diagnosis; after each coherent repair candidate, recompile, rerender and actually inspect every current physical page before accepting it or selecting the next repair; inspect every final physical page before acceptance. Record actual visual observations and keep/revise/rollback decisions. The multimodal host executes this PaperFit workflow. Auxiliary API vision supplements it; visual feedback itself is mandatory. A clean build, exact page count or final evaluator score does not substitute for candidate-level visual verification.
 
-Use PaperFit when working on a LaTeX paper that needs visual typesetting optimization.
+A candidate can contain a batch of related edits. Finish that batch before visual verification; inspect every page at readable scale and zoom into repaired objects or suspected regressions. Keep verified progress and continue when preservation/template checks pass and no confirmed regression is introduced; unchanged original defects or an ineffective sub-edit do not require discarding successful repairs. Correct or selectively revert a harmful edit where separation is reliable, then rebuild, rerender and inspect all pages of the combined result. If separation is unsafe, restore the smallest safe checkpoint and preserve previously verified rounds. Intermediate retention is distinct from final completion; do not change guarded-route thresholds or invent a PASS.
 
-## Product Rules
+# PaperFit
 
-- Work from the paper project root.
-- Treat PaperFit as a natural-language agent system, not a CLI-first workflow.
-- Users should describe goals directly, such as layout analysis, full repair, template migration, page-budget adjustment, or visual-only inspection.
-- Automatically infer the closest PaperFit workflow from the user's request before asking them for low-level PaperFit command syntax.
+Read the installed `paperfit` skill in `.cursor/skills/paperfit/SKILL.md`, or the global `~/.cursor/skills/paperfit/SKILL.md`. Follow the user's requested scope: analysis returns findings; repair uses Cursor's normal source editing tools, then recompiles and inspects rendered page images.
 
-## Execution Rules
+PaperFit provides layout expertise and executable tools. The host controls the workflow and model. `paperfit check-visual --main "<root.tex>"` gathers evidence; `paperfit root` locates bundled resources. A separate agent is optional. Preserve paper content, labels, table cells, figures, and template formatting. Inspect final page images before delivering a PDF.
 
-- Use the `paperfit` CLI, runtime, and scripts as the internal execution layer.
-- Prefer `paperfit runtime --state data/state.json run-round main.tex --template <TEMPLATE> --target-pages <N>` for the main closed loop.
-- Use `paperfit render` and `paperfit run scripts/...` only for targeted debugging, staged execution, or recovery.
-- Do not require the user to manually type internal PaperFit commands in the normal product path.
-- During long PaperFit runs, report progress proactively instead of staying silent.
-- Prefer self-recovery in recoverable failures; only ask the user to act when environment, permission, or ambiguity issues block execution.
-- Keep user-facing explanations centered on results, visual defects, repair strategy, and residual risks.
-
-## Layout Rules
-
-- Do not use `\resizebox` or `\scalebox` as brute-force table shrinking.
-- Prefer full-width or full-column table layouts that preserve readability and alignment.
-- Do not change the template font packages or the visual font appearance of body text and tables during repair.
-- Confirm fixes against rendered page images, not source-only inspection.
-- Treat visual results as the primary acceptance signal; logs and source are supporting evidence.
-- Keep semantic edits minimal and do not alter academic claims, results, or citations.
-- Do not silently delete figures, tables, captions, or labels to improve layout.
-
-## Installed Assets
-
-- Global PaperFit skills live under `~/.cursor/skills/paperfit/`.
-- This rule file is project-local and should live at `.cursor/rules/paperfit.mdc` inside the paper repository.
+Treat suggested repairs as hypotheses: **请你看看这是否是对的**. Check their current source/PDF evidence and accept, adapt or reject them. Plan requested pages, readability and complete visible content together; related corrections may form one coherent edit. Actually inspect every current physical page after each coherent repair candidate before accepting it or choosing the next repair, and all final pages after the last source change. Optional API vision need not read the entire PDF after each small edit. Recover partial edits after failures and distinguish unchanged-source preparation errors from new measured candidates.

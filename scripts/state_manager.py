@@ -62,6 +62,7 @@ class StateManager:
         max_rounds: int = 10,
         column_type: Optional[str] = None,
         page_budget_scope: Optional[str] = None,
+        page_policy: str = "at_most",
     ) -> Dict[str, Any]:
         """初始化新任务的状态文件"""
         self.backup_dir.mkdir(parents=True, exist_ok=True)
@@ -76,6 +77,7 @@ class StateManager:
             max_rounds=max_rounds,
             column_type=column_type,
             page_budget_scope=page_budget_scope,
+            page_policy=page_policy,
         )
         self.validate_state(self.state)
         self._save()
@@ -611,6 +613,11 @@ class StateManager:
             "schema_version": str(data.get("schema_version") or "1.0"),
             "status": data.get("status"),
             "applied_count": int(data.get("applied_count") or 0),
+            # phased 原子接受的逐候选计数（round_metrics 消费）
+            "accepted_count": int(data.get("accepted_count") or 0),
+            "rejected_count": int(data.get("rejected_count") or 0),
+            "rolled_back_count": int(data.get("rolled_back_count") or 0),
+            "candidate_outcomes": data.get("candidate_outcomes") or [],
             "selected_candidates": selected,
             "b2_width_selected_candidates": data.get("b2_width_selected_candidates"),
             "updated_at": datetime.now().isoformat(),
@@ -684,6 +691,26 @@ class StateManager:
             "content_integrity": self.state.get("content_integrity"),
         }
 
+    def guard_page_objective_decision(self, decision: str) -> str:
+        """A supplied DONE report is evidence, not permission to skip a page target."""
+        if not self.state:
+            self.load()
+        task = self.state.get("task") or {}
+        if str(decision).upper() != "DONE" or task.get("target_pages") is None:
+            return decision
+        from runtime_artifacts import collect_artifact_manifest
+        from page_objective import page_objective_from_manifest
+        manifest = collect_artifact_manifest(Path.cwd(), self.state.get("main_tex") or "", self._artifacts())
+        objective = page_objective_from_manifest(task, manifest)
+        if objective["target_met"] is not True:
+            self.state["terminal_success_guard"] = {
+                "status": "goal_pending", "failure_type": "page_objective_pending",
+                "reason": "page_target_unmet_or_unverified", "page_objective": objective}
+            return "CONTINUE"
+        if (self.state.get("terminal_success_guard") or {}).get("status") == "goal_pending":
+            self.state["terminal_success_guard"] = None
+        return decision
+
     def ingest_gatekeeper_decision(self, decision_path: str) -> Dict[str, Any]:
         """
         读取 gatekeeper_enforcer 决策报告，回写 last_gatekeeper_decision/status。
@@ -705,6 +732,7 @@ class StateManager:
 
         artifacts = self._artifacts()
         artifacts["gatekeeper_decision"] = rel_report
+        decision = self.guard_page_objective_decision(decision)
         self.state["last_gatekeeper_decision"] = decision
         self.state["status"] = "DONE" if decision == "DONE" else ("BLOCKED" if decision == "BLOCKED" else "EVALUATING")
         self.save()
@@ -832,6 +860,7 @@ def main():
     init_parser.add_argument("main_tex", help="Main .tex file path")
     init_parser.add_argument("--task", default="full_vto", help="Task type")
     init_parser.add_argument("--target-pages", type=int, help="Target page count")
+    init_parser.add_argument("--page-policy", choices=["at_most", "exact"], default="at_most")
     init_parser.add_argument("--template", help="Template name")
     init_parser.add_argument("--strict", action="store_true", help="Strict mode")
     init_parser.add_argument("--max-rounds", type=int, default=10, help="Max iterations")
@@ -904,6 +933,7 @@ def main():
                 max_rounds=args.max_rounds,
                 column_type=getattr(args, "column_type", None),
                 page_budget_scope=getattr(args, "page_budget_scope", None),
+                page_policy=args.page_policy,
             )
             print(f"State initialized: {manager.state_path}")
             print(json.dumps(state, indent=2))

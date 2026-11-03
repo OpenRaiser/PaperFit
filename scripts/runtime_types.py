@@ -27,6 +27,14 @@ SOURCE_CHANGING_TASK_TYPES = {
     "template_migration",
 }
 
+# M2 多轮模式预设（docs/REGRESSION_DESIGN.md 终版方案第七节）：
+# safe=单轮保守；fix-layout=默认两轮；until-stable=最多五轮+双止损
+ROUND_MODE_PRESETS = {
+    "safe": 1,
+    "fix-layout": 2,
+    "until-stable": 5,
+}
+
 
 def _as_bool(value: Any, default: bool = False) -> bool:
     if value is None:
@@ -177,6 +185,7 @@ class TaskSpec:
     template: Optional[str] = None
     target_pages: Optional[int] = None
     page_budget_scope: Optional[str] = None
+    page_policy: str = "at_most"
     page_dir: str = "data/pages"
     log_file: Optional[str] = None
     column_void_report: Optional[str] = None
@@ -186,6 +195,7 @@ class TaskSpec:
     rollback_policy: Optional[str] = None
     strict_mode: bool = False
     max_rounds: int = 1
+    round_mode: Optional[str] = None
     user_request: Optional[str] = None
     required_phases: List[str] = field(default_factory=list)
 
@@ -215,6 +225,7 @@ class TaskSpec:
             template=payload.get("template"),
             target_pages=target_pages,
             page_budget_scope=payload.get("page_budget_scope"),
+            page_policy=str(payload.get("page_policy") or "at_most"),
             page_dir=str(payload.get("page_dir") or "data/pages"),
             log_file=payload.get("log_file"),
             column_void_report=payload.get("column_void_report"),
@@ -224,6 +235,7 @@ class TaskSpec:
             rollback_policy=payload.get("rollback_policy"),
             strict_mode=_as_bool(payload.get("strict_mode"), False),
             max_rounds=int(payload.get("max_rounds") or 1),
+            round_mode=payload.get("round_mode"),
             user_request=payload.get("user_request"),
             required_phases=[str(item) for item in required_phases],
         )
@@ -235,8 +247,21 @@ class TaskSpec:
             raise ValueError(f"Unsupported task_type: {self.task_type}")
         if not self.main_tex:
             raise ValueError("TaskSpec.main_tex must be non-empty")
+        if self.page_policy not in {"at_most", "exact"}:
+            raise ValueError("TaskSpec.page_policy must be at_most or exact")
+        if self.target_pages is not None and (type(self.target_pages) is not int or self.target_pages < 1):
+            raise ValueError("TaskSpec.target_pages must be a positive integer")
+        if self.page_budget_scope not in {None, "main_body", "with_refs", "with_appendix"}:
+            raise ValueError("Unsupported page_budget_scope")
         if self.max_rounds < 1:
             raise ValueError("TaskSpec.max_rounds must be >= 1")
+        if self.round_mode is not None:
+            if self.round_mode not in ROUND_MODE_PRESETS:
+                raise ValueError(
+                    f"TaskSpec.round_mode must be one of {sorted(ROUND_MODE_PRESETS)}, got {self.round_mode!r}"
+                )
+            # 模式预设胜出：round_mode 决定 max_rounds（safe=1/fix-layout=2/until-stable=5）
+            self.max_rounds = ROUND_MODE_PRESETS[self.round_mode]
         if self.task_type == "visual_only" and self.allow_source_mutation:
             raise ValueError("visual_only tasks cannot allow source mutation")
         if self.task_type in SOURCE_CHANGING_TASK_TYPES:
@@ -257,6 +282,7 @@ class TaskSpec:
             "template": self.template,
             "target_pages": self.target_pages,
             "page_budget_scope": self.page_budget_scope,
+            "page_policy": self.page_policy,
             "page_dir": self.page_dir,
             "log_file": self.log_file,
             "column_void_report": self.column_void_report,
@@ -266,6 +292,7 @@ class TaskSpec:
             "rollback_policy": self.rollback_policy,
             "strict_mode": self.strict_mode,
             "max_rounds": self.max_rounds,
+            "round_mode": self.round_mode,
             "user_request": self.user_request,
             "required_phases": self.required_phases,
         }
@@ -289,6 +316,8 @@ class RunResult:
     repair_loop_policy: Optional[Dict[str, Any]] = None
     round_artifact_lineage: List[Dict[str, Any]] = field(default_factory=list)
     failure: Optional[Dict[str, Any]] = None
+    environment: Optional[Dict[str, Any]] = None
+    round_metrics: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -307,6 +336,8 @@ class RunResult:
             "round_artifact_lineage": self.round_artifact_lineage,
             "defect_summary": self.defect_summary,
             "failure": self.failure,
+            "environment": self.environment,
+            "round_metrics": self.round_metrics,
         }
 
 

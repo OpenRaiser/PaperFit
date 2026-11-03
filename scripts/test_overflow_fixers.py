@@ -11,7 +11,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from overflow_fixers import fix_equation_overflow  # noqa: E402
+from overflow_fixers import fix_equation_overflow, fix_table_overflow  # noqa: E402
 from repair_plan_executor import execute_repair_plan  # noqa: E402
 
 
@@ -218,6 +218,88 @@ class OverflowFixersTest(unittest.TestCase):
             self.assertEqual(report["selected_candidates"]["overflow"][0]["defect_id"], "D2")
             self.assertEqual(report["status"], "success")
             self.assertIn(r"\begin{aligned}", main_tex.read_text(encoding="utf-8"))
+
+
+TWO_TABLE_TEX = """\\documentclass{article}
+\\begin{document}
+Intro paragraph before any table.
+\\begin{table}[h]
+  \\centering
+  \\caption{Alpha table}
+  \\label{tab:alpha}
+  \\begin{tabular}{lcc}
+    alpha-one & alpha-two & alpha-three \\\\
+    alpha-four & alpha-five & alpha-six \\\\
+  \\end{tabular}
+\\end{table}
+Middle paragraph between the tables.
+\\begin{table}[h]
+  \\centering
+  \\caption{Beta table}
+  \\label{tab:beta}
+  \\begin{tabular}{lcc}
+    beta-one & beta-two & beta-three \\\\
+    beta-four & beta-five & beta-six \\\\
+  \\end{tabular}
+\\end{table}
+Closing paragraph after both tables.
+\\end{document}
+"""
+
+
+def _alpha_block(tex: str) -> str:
+    start = tex.index("\\caption{Alpha table}")
+    end = tex.index("\\end{table}", start)
+    return tex[start:end]
+
+
+def _beta_block(tex: str) -> str:
+    start = tex.index("\\caption{Beta table}")
+    end = tex.index("\\end{table}", start)
+    return tex[start:end]
+
+
+class TableOverflowTargetingTest(unittest.TestCase):
+    """fix_table_overflow must select the table the defect points at."""
+
+    # Beta table body spans lines 17-23 in TWO_TABLE_TEX.
+    BETA_LINE = 19
+
+    def test_line_number_selects_containing_table(self) -> None:
+        updated, result = fix_table_overflow(TWO_TABLE_TEX, line_number=self.BETA_LINE)
+        self.assertIsNotNone(result)
+        self.assertTrue(result.success)
+        self.assertNotIn(r"\begin{tabularx}", _alpha_block(updated))
+        self.assertIn(r"\begin{tabularx}", _beta_block(updated))
+
+    def test_table_label_selects_labeled_table(self) -> None:
+        updated, result = fix_table_overflow(TWO_TABLE_TEX, table_label="tab:beta")
+        self.assertIsNotNone(result)
+        self.assertTrue(result.success)
+        self.assertNotIn(r"\begin{tabularx}", _alpha_block(updated))
+        self.assertIn(r"\begin{tabularx}", _beta_block(updated))
+        self.assertEqual(result.object_name, "tab:beta")
+
+    def test_line_before_all_tables_picks_nearest_first_table(self) -> None:
+        updated, result = fix_table_overflow(TWO_TABLE_TEX, line_number=3)
+        self.assertIsNotNone(result)
+        self.assertTrue(result.success)
+        self.assertIn(r"\begin{tabularx}", _alpha_block(updated))
+        self.assertNotIn(r"\begin{tabularx}", _beta_block(updated))
+
+    def test_line_after_all_tables_picks_nearest_last_table(self) -> None:
+        updated, result = fix_table_overflow(TWO_TABLE_TEX, line_number=24)
+        self.assertIsNotNone(result)
+        self.assertTrue(result.success)
+        self.assertNotIn(r"\begin{tabularx}", _alpha_block(updated))
+        self.assertIn(r"\begin{tabularx}", _beta_block(updated))
+
+    def test_no_line_and_no_label_keeps_first_table_default(self) -> None:
+        updated, result = fix_table_overflow(TWO_TABLE_TEX)
+        self.assertIsNotNone(result)
+        self.assertTrue(result.success)
+        self.assertIn(r"\begin{tabularx}", _alpha_block(updated))
+        self.assertNotIn(r"\begin{tabularx}", _beta_block(updated))
 
 
 if __name__ == "__main__":

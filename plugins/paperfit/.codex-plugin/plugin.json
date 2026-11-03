@@ -1,7 +1,7 @@
 {
   "name": "paperfit",
-  "version": "1.0.6",
-  "description": "PaperFit plugin assets for Codex. Installs PaperFit skills and prompt-ready workflow metadata.",
+  "version": "1.1.0",
+  "description": "PaperFit host-native LaTeX layout skill and CLI workflow references.",
   "author": {
     "name": "OpenRaiser",
     "url": "https://github.com/OpenRaiser"
@@ -15,13 +15,12 @@
     "typesetting",
     "layout",
     "vto",
-    "academic-paper",
-    "custom-prompts"
+    "academic-paper"
   ],
   "interface": {
     "displayName": "PaperFit",
     "shortDescription": "LaTeX paper layout repair, visual inspection, and template migration",
-    "longDescription": "Use PaperFit in Codex through slash commands for layout analysis, full VTO repair, visual-only inspection, table repair, length control, template migration, status review, and rollback.",
+    "longDescription": "Use the paperfit skill in Codex to inspect page images, repair LaTeX with host editing tools, and verify the final PDF.",
     "developerName": "OpenRaiser",
     "category": "Coding",
     "capabilities": [
@@ -33,13 +32,13 @@
     "privacyPolicyURL": "https://github.com/OpenRaiser/PaperFit",
     "termsOfServiceURL": "https://github.com/OpenRaiser/PaperFit",
     "defaultPrompt": [
-      "Use /prompts:paperfit to inspect this paper's layout",
-      "Run /prompts:fix-layout to repair the paper with minimal semantic change",
-      "Use /prompts:show-status to summarize the current PaperFit round"
+      "Use $paperfit to inspect this paper layout",
+      "Use $paperfit to repair this paper layout with minimal semantic change"
     ],
     "brandColor": "#1F5E4A",
     "composerIcon": "./assets/paperfit-small.svg",
     "logo": "./assets/paperfit-logo.svg",
     "screenshots": []
-  }
+  },
+  "skills": "./skills/"
 }

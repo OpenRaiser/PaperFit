@@ -62,13 +62,13 @@ def load_templates() -> list:
         return [
             {"name": "ICLR 2025", "value": "ICLR2025", "pages": 9},
             {"name": "ICML 2025", "value": "ICML2025", "pages": 9},
-            {"name": "NeurIPS 2024", "value": "NeurIPS2024", "pages": 9},
-            {"name": "CVPR 2025", "value": "CVPR2025", "pages": 8},
+            {"name": "NeurIPS 2025", "value": "NeurIPS2025", "pages": 9},
+            {"name": "CVPR 2026", "value": "CVPR2026", "pages": 8},
             {"name": "ECCV 2024", "value": "ECCV2024", "pages": 14},
             {"name": "ICCV 2025", "value": "ICCV2025", "pages": 8},
             {"name": "AAAI 2025", "value": "AAAI2025", "pages": 7},
             {"name": "ACL 2025", "value": "ACL2025", "pages": 8},
-            {"name": "EMNLP 2024", "value": "EMNLP2024", "pages": 8},
+            {"name": "EMNLP 2025", "value": "EMNLP2025", "pages": 8},
         ]
 
     result = []

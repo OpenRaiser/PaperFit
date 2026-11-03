@@ -12,7 +12,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from diagnosis_ingest import findings_to_candidates, parse_host_diagnosis
 from runtime_repair_risk import annotate_repair_candidates
+from host_advice import host_guidance
+from visual_action_plan import document_scope_b1_authorized, normalized_visual_object_kind, vlm_table_size_semantics
 
 
 def _load_json(path: Optional[str]) -> Dict[str, Any]:
@@ -226,6 +229,10 @@ def _summarize_b2_width_conversion(
             continue
         if str(candidate.get("visual_width_subtype") or "") not in {"overflow_width", "underfilled_width"}:
             continue
+        # 诊断协议引入的 review-only 候选不算"已匹配"：unmatched 语义
+        # 保持为"没有可执行（有源码锚点）候选"的发现数
+        if candidate.get("requires_human_review"):
+            continue
         key = _b2_width_candidate_key(candidate)
         for index, entry in enumerate(remaining):
             if _b2_width_entry_key(entry) == key:
@@ -408,7 +415,7 @@ def _visual_b2_finding_priority_items(visual_report: Dict[str, Any]) -> List[Dic
         items.append(
             {
                 "page": int(finding.get("page") or 0),
-                "object_kind": str(metrics.get("object_kind") or "figure_like"),
+                "object_kind": normalized_visual_object_kind(metrics.get("object_kind") or "figure_like"),
                 "bbox": bbox,
                 "priority_score": priority_score,
                 "severity": str(finding.get("severity") or "major"),
@@ -531,6 +538,81 @@ def _build_semantic_home(
     return semantic_home or None
 
 
+_CAPTION_NUMBER_MAX_GAP_PX = 200
+
+
+def _caption_anchor_lookup(visual_report: Dict[str, Any]) -> Dict[int, List[Dict[str, Any]]]:
+    by_page: Dict[int, List[Dict[str, Any]]] = {}
+    for anchor in visual_report.get("caption_anchors") or []:
+        page = int(anchor.get("page") or 0)
+        by_page.setdefault(page, []).append(anchor)
+    return by_page
+
+
+def _floats_by_number(crossrefs_report: Dict[str, Any]) -> Dict[tuple[str, int], Dict[str, Any]]:
+    lookup: Dict[tuple[str, int], Dict[str, Any]] = {}
+    for flt in crossrefs_report.get("floats") or []:
+        label = str(flt.get("label") or "")
+        number = flt.get("number")
+        float_type = str(flt.get("float_type") or "")
+        if label and number is not None and float_type in {"figure", "table"}:
+            lookup[(float_type, int(number))] = flt
+    return lookup
+
+
+def _match_by_caption_number(
+    *,
+    anchors_by_page: Dict[int, List[Dict[str, Any]]],
+    floats_by_number: Dict[tuple[str, int], Dict[str, Any]],
+    kind: str,
+    page: int,
+    bbox: List[Any],
+) -> Optional[Dict[str, Any]]:
+    """用页面上 "Figure N/Table N" caption 编号直接解析源码 label。
+
+    比索引顺序匹配可靠：编号来自 PDF 实际渲染，与源码 label 的对应
+    由 crossrefs 的浮动体编号表给出。
+    """
+    if not bbox:
+        return None
+    float_type = "figure" if kind == "figure_like" else "table"
+    best_anchor = None
+    best_gap = None
+    for anchor in anchors_by_page.get(page) or []:
+        if str(anchor.get("object_kind") or "") != kind:
+            continue
+        anchor_bbox = anchor.get("rendered_bbox") or anchor.get("pdf_bbox")
+        if not anchor_bbox or len(anchor_bbox) != 4:
+            continue
+        ax0, ay0, ax1, ay1 = (float(v) for v in anchor_bbox)
+        try:
+            ox0, oy0, ox1, oy1 = (float(v) for v in bbox[:4])
+        except (TypeError, ValueError):
+            continue
+        if min(ox1, ax1) - max(ox0, ax0) <= 0:
+            continue
+        gap = min(abs(ay0 - oy1), abs(oy0 - ay1))
+        if best_gap is None or gap < best_gap:
+            best_gap = gap
+            best_anchor = anchor
+    if best_anchor is None or best_gap is None:
+        return None
+    if best_gap > _CAPTION_NUMBER_MAX_GAP_PX:
+        return None
+    matched_float = floats_by_number.get((float_type, int(best_anchor.get("caption_number") or 0)))
+    if matched_float is None:
+        return None
+    return {
+        "label": matched_float.get("label"),
+        "match_strategy": "caption_number",
+        "width_spec": matched_float.get("width_spec"),
+        "table_env": matched_float.get("table_env"),
+        "tabcolsep": matched_float.get("tabcolsep"),
+        "caption_number": best_anchor.get("caption_number"),
+        "number_source": matched_float.get("number_source"),
+    }
+
+
 def _match_priority_objects_to_labels(
     visual_report: Dict[str, Any],
     crossrefs_report: Dict[str, Any],
@@ -542,6 +624,9 @@ def _match_priority_objects_to_labels(
         kind = "figure_like" if float_type == "figure" else "table_like" if float_type == "table" else None
         if kind:
             by_kind[kind].append(flt)
+
+    anchors_by_page = _caption_anchor_lookup(visual_report)
+    floats_by_number = _floats_by_number(crossrefs_report)
 
     ordered_objects_by_kind: Dict[str, List[Dict[str, Any]]] = {"figure_like": [], "table_like": []}
     for pairing in visual_report.get("object_pairings") or []:
@@ -574,15 +659,25 @@ def _match_priority_objects_to_labels(
         for item in _priority_objects_with_pairing_fallback(visual_report):
             kind = str(item.get("object_kind") or "")
             enriched = dict(item)
-            source_floats = by_kind.get(kind) or []
-            idx = offsets.get(kind, 0)
-            if idx < len(source_floats):
-                enriched["label"] = source_floats[idx].get("label")
-                enriched["match_strategy"] = "source_order_proxy"
-                enriched["width_spec"] = source_floats[idx].get("width_spec")
-                enriched["table_env"] = source_floats[idx].get("table_env")
-                enriched["tabcolsep"] = source_floats[idx].get("tabcolsep")
-                offsets[kind] = idx + 1
+            caption_match = _match_by_caption_number(
+                anchors_by_page=anchors_by_page,
+                floats_by_number=floats_by_number,
+                kind=kind,
+                page=int(item.get("page") or 0),
+                bbox=item.get("bbox") or [],
+            )
+            if caption_match is not None:
+                enriched.update(caption_match)
+            else:
+                source_floats = by_kind.get(kind) or []
+                idx = offsets.get(kind, 0)
+                if idx < len(source_floats):
+                    enriched["label"] = source_floats[idx].get("label")
+                    enriched["match_strategy"] = "source_order_proxy"
+                    enriched["width_spec"] = source_floats[idx].get("width_spec")
+                    enriched["table_env"] = source_floats[idx].get("table_env")
+                    enriched["tabcolsep"] = source_floats[idx].get("tabcolsep")
+                    offsets[kind] = idx + 1
             matched.append(enriched)
         return matched
 
@@ -598,10 +693,30 @@ def _match_priority_objects_to_labels(
         width_spec = None
         table_env = None
         tabcolsep = None
+        caption_number = None
+        number_source = None
 
         visual_width_subtype = str(item.get("visual_width_subtype") or "")
         visual_width_ratio = item.get("object_width_ratio")
-        if kind == "figure_like" and visual_width_subtype in {"overflow_width", "underfilled_width"}:
+
+        # 编号定位优先：caption 锚点 + 浮动体编号表直接给出 label
+        caption_match = _match_by_caption_number(
+            anchors_by_page=anchors_by_page,
+            floats_by_number=floats_by_number,
+            kind=kind,
+            page=page,
+            bbox=bbox,
+        )
+        if caption_match is not None:
+            label = caption_match["label"]
+            match_strategy = caption_match["match_strategy"]
+            width_spec = caption_match.get("width_spec")
+            table_env = caption_match.get("table_env")
+            tabcolsep = caption_match.get("tabcolsep")
+            caption_number = caption_match.get("caption_number")
+            number_source = caption_match.get("number_source")
+
+        if label is None and kind == "figure_like" and visual_width_subtype in {"overflow_width", "underfilled_width"}:
             width_candidates: List[tuple[float, int, Dict[str, Any]]] = []
             for source_index, source_float in enumerate(by_kind.get(kind) or []):
                 source_label = str(source_float.get("label") or "")
@@ -677,6 +792,9 @@ def _match_priority_objects_to_labels(
             enriched["width_spec"] = width_spec
             enriched["table_env"] = table_env
             enriched["tabcolsep"] = tabcolsep
+        if caption_number is not None:
+            enriched["caption_number"] = caption_number
+            enriched["number_source"] = number_source
         matched.append(enriched)
     return matched
 
@@ -690,6 +808,30 @@ def _build_object_candidates(visual_report: Dict[str, Any], crossrefs_report: Di
         reason = str(item.get("reason") or "")
         label = str(item.get("label") or "")
         if not label:
+            # 诊断协议要求：无源码锚点的对象缺陷不许静默丢弃——转为人工复核候选
+            unanchored_family = "B2" if str(item.get("visual_width_subtype") or "") in {"overflow_width", "underfilled_width"} else None
+            if unanchored_family:
+                candidates.append(
+                    {
+                        "candidate_type": "object",
+                        "page": int(item.get("page") or 0),
+                        "target": {
+                            "object_kind": item.get("object_kind"),
+                            "bbox": item.get("bbox"),
+                            "label": None,
+                        },
+                        "defect_family": unanchored_family,
+                        "priority_score": max(40, int(item.get("priority_score") or 0) - 30),
+                        "severity": str(item.get("severity") or "major"),
+                        "proposed_action": "review_only",
+                        "rationale": f"source anchor unresolved: {reason}",
+                        "description": str(item.get("reason") or ""),
+                        "visual_width_subtype": item.get("visual_width_subtype"),
+                        "requires_human_review": True,
+                        "anchor_status": "unresolved",
+                        "evidence_sources": [str(item.get("source") or "visual_signal_report")],
+                    }
+                )
             continue
         semantic_distance = distance_lookup.get(label)
         semantic_float = float_lookup.get(label)
@@ -730,6 +872,8 @@ def _build_object_candidates(visual_report: Dict[str, Any], crossrefs_report: Di
                 "proposed_action": action,
                 "rationale": reason,
                 "match_strategy": item.get("match_strategy"),
+                "caption_number": item.get("caption_number"),
+                "number_source": item.get("number_source"),
                 "source_width_spec": item.get("width_spec"),
                 "source_table_env": item.get("table_env"),
                 "source_tabcolsep": item.get("tabcolsep"),
@@ -1157,10 +1301,51 @@ def _build_space_candidates(
     return candidates
 
 
+def _build_consistency_candidates(visual_report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    # VLM C1 means a visually undersized table, not proven resizebox/style
+    # inconsistency. Its action-plan entry requires review; do not bypass that
+    # decision by generating a global consistency repair from the raw code.
+    families = _active_visual_families({
+        "findings": [finding for finding in visual_report.get("findings") or []
+                     if vlm_table_size_semantics(finding) != "undersized_table"],
+    })
+    candidates: List[Dict[str, Any]] = []
+    if "C1" in families:
+        candidates.append(
+            {
+                "candidate_type": "consistency",
+                "page": None,
+                "target": {"scope": "table_consistency"},
+                "defect_family": "C1",
+                "priority_score": 70,
+                "severity": "major",
+                "proposed_action": "remove_resizebox_around_tabular",
+                "rationale": "visual report contains a resized table",
+                "evidence_sources": ["visual_signal_report"],
+            }
+        )
+    if "C3" in families:
+        candidates.append(
+            {
+                "candidate_type": "consistency",
+                "page": None,
+                "target": {"scope": "caption_setup"},
+                "defect_family": "C3",
+                "priority_score": 68,
+                "severity": "major",
+                "proposed_action": "normalize_caption_setup",
+                "rationale": "visual report contains inconsistent captions",
+                "evidence_sources": ["visual_signal_report"],
+            }
+        )
+    return candidates
+
+
 def _build_log_candidates(
     rule_report: Dict[str, Any],
     visual_report: Optional[Dict[str, Any]] = None,
     target_pages: Optional[int] = None,
+    main_tex_content: str = "",
 ) -> List[Dict[str, Any]]:
     summary = rule_report.get("summary") or {}
     visual_report = visual_report or {}
@@ -1186,35 +1371,79 @@ def _build_log_candidates(
         )
     if int(summary.get("overfull_hbox_total") or 0) > 0:
         detailed_candidates = 0
-        for warning in rule_report.get("overfull_hbox") or []:
+        textheight_boost_applied = False
+        
+        overflow_by_index: Dict[int, Any] = {}
+        try:
+            from overflow_objects import build_overflow_objects, index_by_warning
+
+            objs = build_overflow_objects(rule_report, Path.cwd(), "main.tex")
+            overflow_by_index = index_by_warning(objs)
+        except Exception:
+            overflow_by_index = {}
+        for warning_idx, warning in enumerate(rule_report.get("overfull_hbox") or []):
             subtype = str(warning.get("subtype") or "paragraph")
             overflow_pt = float(warning.get("overflow_pt") or 0.0)
             lines = str(warning.get("lines") or "").strip() or None
             line_number = int(lines.split("--", 1)[0]) if lines else None
-            candidates.append(
-                {
-                    "candidate_type": "log_warning",
-                    "page": None,
-                    "target": {
-                        "scope": "table_overflow" if subtype == "alignment" else "overflow",
-                    },
-                    "defect_family": "D1",
-                    "priority_score": min(95, 80 + int(max(overflow_pt, 0.0) // 5)),
-                    "severity": str(warning.get("severity") or "major"),
-                    "proposed_action": "repair_overfull_boxes",
-                    "rationale": (
-                        f"overfull_hbox subtype={subtype}, "
-                        f"overflow_pt={overflow_pt:.2f}, "
-                        f"lines={lines or 'unknown'}"
-                    ),
-                    "description": str(warning.get("context") or "").strip(),
-                    "overflow_amount": overflow_pt,
-                    "line_number": line_number,
-                    "lines": lines,
-                    "subtype": subtype,
-                    "evidence_sources": ["rule_report"],
-                }
-            )
+
+            
+            
+            is_textheight_cascade = False
+            if line_number is not None and not textheight_boost_applied and main_tex_content:
+                try:
+                    from overflow_fixers import _line_is_preamble_textheight_shrink
+                    if _line_is_preamble_textheight_shrink(main_tex_content, line_number):
+                        is_textheight_cascade = True
+                        textheight_boost_applied = True
+                except Exception:
+                    pass
+
+            overflow_obj = overflow_by_index.get(warning_idx)
+            candidate = {
+                "candidate_type": "log_warning",
+                "page": None,
+                "target": {
+                    "scope": "table_overflow" if subtype == "alignment" else "overflow",
+                },
+                "defect_family": "D1",
+                
+                
+                
+                "priority_score": (
+                    99 if is_textheight_cascade
+                    else 97 if overflow_pt >= 100
+                    else 94 if overflow_pt >= 50
+                    else min(93, 80 + int(max(overflow_pt, 0.0) // 5))
+                ),
+                "severity": "critical" if is_textheight_cascade else str(warning.get("severity") or "major"),
+                "proposed_action": "remove_preamble_textheight_shrink" if is_textheight_cascade else "repair_overfull_boxes",
+                "rationale": (
+                    f"overfull_hbox subtype={subtype}, "
+                    f"overflow_pt={overflow_pt:.2f}, "
+                    f"lines={lines or 'unknown'}"
+                    + (", preamble_textheight_shrink_cascade" if is_textheight_cascade else "")
+                ),
+                "description": str(warning.get("context") or "").strip(),
+                "overflow_amount": overflow_pt,
+                "line_number": line_number,
+                "lines": lines,
+                "subtype": subtype,
+                "evidence_sources": ["rule_report"],
+            }
+            if overflow_obj is not None:
+                
+                candidate.update(
+                    {
+                        "overflow_id": overflow_obj.overflow_id,
+                        "token_type": overflow_obj.token_type,
+                        "token_text": overflow_obj.token_text,
+                        "overflow_zone": overflow_obj.zone,
+                        "severity_score": overflow_obj.severity_score,
+                        "source_anchor": overflow_obj.source_anchor,
+                    }
+                )
+            candidates.append(candidate)
             detailed_candidates += 1
 
         if detailed_candidates == 0:
@@ -1234,12 +1463,166 @@ def _build_log_candidates(
     return candidates
 
 
+def _promotion_dedupe_key(
+    family: str,
+    label: Any,
+    page: Any,
+    anchor: Any,
+) -> tuple:
+    "去重键 = family + source_file + source_line + object_label + page。"
+    first_anchor = anchor[0] if isinstance(anchor, list) and anchor else {}
+    if not isinstance(first_anchor, dict):
+        first_anchor = {}
+    return (
+        family,
+        str(first_anchor.get("file") or ""),
+        str(first_anchor.get("start_line") or ""),
+        str(label if label is not None else ""),
+        str(page if page is not None else ""),
+    )
+
+
+def _promote_visual_action_plan(visual_signal_report: str) -> List[Dict[str, Any]]:
+    "从 visual_action_plan.json 提升 executable 条目为修复候选。"
+    plan_path = Path(visual_signal_report).parent / "visual_action_plan.json"
+    if not plan_path.is_file():
+        return []
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    candidates: List[Dict[str, Any]] = []
+    
+    
+    seen_keys: set[tuple[str, str]] = set()
+    family_counts: Dict[str, int] = {}
+    for entry in plan.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("status") or "") != "executable":
+            continue
+
+        finding_id = str(entry.get("finding_id") or "")
+        family = str(entry.get("family") or "")
+        label = entry.get("label")
+        page = entry.get("page")
+        anchor = entry.get("source_anchors") or []
+        anchor_status = str(entry.get("anchor_status") or "")
+        severity = str(entry.get("severity") or "minor")
+        confidence = float(entry.get("confidence") or 0.5)
+
+        dedupe_key = _promotion_dedupe_key(family, label, page, anchor)
+        if not family or dedupe_key in seen_keys:
+            continue
+        if family_counts.get(family, 0) >= 3:
+            continue
+        
+        
+        document_level_b1 = (family == "B1" and confidence >= 0.6 and not anchor
+                             and document_scope_b1_authorized(entry))
+        if family == "B1" and not anchor and not document_level_b1:
+            continue
+        if not document_level_b1:
+            if anchor_status and anchor_status != "resolved":
+                continue
+            if len(anchor) > 1:
+                continue
+            if not anchor and severity in {"major", "critical"}:
+                continue
+
+        # 按家族映射到 proposed_action
+        action_map = {
+            "A1": "apply_looseness", "A2": "compress_trailing_whitespace",
+            "A3": "reduce_page_count", "A4": "balance_final_columns",
+            "A5": "reflow_column_void", "A6": "review_density_shift",
+            "B1": "normalize_float_position_near_reference",
+            "B2": "adjust_float_width", "B3": "decluster_float_sequence",
+            "B4": "convert_to_longtable", "B5": "decluster_float_sequence",
+            "C1": "remove_resizebox_around_tabular",
+            "C3": "normalize_caption_setup", "C4": "normalize_caption_spacing",
+            "D1": "repair_overfull_boxes", "D2": "split_display_formula",
+            "D3": "wrap_url_breaking",
+        }
+        proposed_action = ("normalize_float_placements_document_level" if document_level_b1
+                           else action_map.get(family))
+        if proposed_action is None:
+            continue
+
+        priority = int(80 * confidence)
+        if severity == "critical":
+            priority += 15
+        elif severity == "major":
+            priority += 10
+
+        # 为 fixer 提供必要字段（A2 需要 whitespace_ratio 等）
+        extra_fields: Dict[str, Any] = {}
+        if document_level_b1:
+            for key in ("document_scope_approved", "hard_guard_evidence", "visual_hard_guard",
+                        "hard_guard", "endmatter_float_intrusion", "body_float_intrudes_endmatter"):
+                if entry.get(key) is not None:
+                    extra_fields[key] = entry[key]
+        if family == "A2":
+            extra_fields["whitespace_ratio"] = 0.3  # 默认值：末页有可见空白
+            extra_fields["current_pages"] = page or 0
+        elif family == "A3":
+            extra_fields["current_pages"] = page or 0
+        elif family == "A4":
+            extra_fields["height_difference"] = 0.15  # 默认值
+        elif family == "B2" and entry.get("visual_width_subtype") in {"overflow_width", "underfilled_width"}:
+            # The float executor requires an explicit width subtype. Preserve
+            # the resolved action-plan evidence instead of dropping the route.
+            extra_fields["visual_width_subtype"] = entry["visual_width_subtype"]
+            for key in ("source_taxonomy_defect_id", "source_defect_type", "routing_reason"):
+                if entry.get(key) is not None:
+                    extra_fields[key] = entry[key]
+
+        evidence = entry.get("evidence") or []
+        description = str(evidence[0]) if isinstance(evidence, (list, tuple)) and evidence else str(evidence or "")
+        candidates.append({
+            "candidate_type": "visual_plan",
+            "page": page,
+            "target": {
+                "label": label,
+                "object_kind": normalized_visual_object_kind(entry.get("object_type")),
+                "bbox": entry.get("bbox"),
+            },
+            "defect_family": family,
+            "priority_score": priority,
+            "severity": severity,
+            "proposed_action": proposed_action,
+            "rationale": f"visual_action_plan[{finding_id}]: {entry.get('defect_type', family)}",
+            "description": description,
+            "finding_id": finding_id,
+            "anchor_status": entry.get("anchor_status"),
+            "visual_confidence": confidence,
+            "match_strategy": "visual_action_plan",
+            "evidence_sources": ["visual_action_plan"],
+            **extra_fields,
+        })
+        seen_keys.add(dedupe_key)
+        family_counts[family] = family_counts.get(family, 0) + 1
+
+    return candidates
+
+
+def _build_diagnosis_candidates(diagnosis_report: Optional[str]) -> List[Dict[str, Any]]:
+    if not diagnosis_report:
+        return []
+    path = Path(diagnosis_report)
+    if not path.is_file():
+        return []
+    parsed = parse_host_diagnosis(path.read_text(encoding="utf-8"))
+    return findings_to_candidates(parsed.get("findings") or [])
+
+
 def generate_repair_plan(
     visual_signal_report: str,
     output_path: str,
     crossrefs_report: Optional[str] = None,
     rule_report: Optional[str] = None,
     target_pages: Optional[int] = None,
+    diagnosis_report: Optional[str] = None,
 ) -> Dict[str, Any]:
     visual_report = _load_json(visual_signal_report)
     crossrefs = _load_json(crossrefs_report)
@@ -1262,11 +1645,29 @@ def generate_repair_plan(
         visual_report=visual_report,
         target_pages=target_pages,
     )
+    consistency_candidates = _build_consistency_candidates(visual_report)
+    diagnosis_candidates = _build_diagnosis_candidates(diagnosis_report)
+
+    # 读取主 tex 内容（用于 textheight 缩小检测等源码级判断）
+    main_tex_content = ""
+    try:
+        report_dir = Path(visual_signal_report).parent
+        project_root = report_dir.parent
+        tex_files = [f for f in project_root.glob("*.tex") if "\\documentclass" in f.read_text(encoding="utf-8", errors="replace")[:500]]
+        if tex_files:
+            main_tex_content = max(tex_files, key=lambda f: f.stat().st_size).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
     log_candidates = _build_log_candidates(
         rule_report_data,
         visual_report=visual_report,
         target_pages=target_pages,
+        main_tex_content=main_tex_content,
     )
+
+    
+    visual_plan_candidates = _promote_visual_action_plan(visual_signal_report)
 
     candidates = (
         object_candidates
@@ -1276,7 +1677,10 @@ def generate_repair_plan(
         + semantic_band_candidates
         + space_candidates
         + visual_space_candidates
+        + consistency_candidates
+        + diagnosis_candidates
         + log_candidates
+        + visual_plan_candidates
     )
     candidates = annotate_repair_candidates(candidates)
     has_visual_b2_width_candidate = _has_visual_b2_width_candidate(candidates)
@@ -1290,6 +1694,9 @@ def generate_repair_plan(
             0 if _is_urgent_overflow_candidate(item) and not has_visual_b2_width_candidate else 1,
             -int(item.get("priority_score") or 0),
             -_candidate_severity_rank(str(item.get("severity") or "")),
+            
+            
+            -float(item.get("overflow_amount") or 0.0),
             int(item.get("page") or 0) if item.get("page") is not None else 10**6,
             str((item.get("target") or {}).get("label") or ""),
         )
@@ -1298,12 +1705,19 @@ def generate_repair_plan(
     plan = {
         "schema_version": "1.0",
         "generated_at": datetime.now().isoformat(),
+        "host_guidance": host_guidance(),
+        "selection_scope": "optional_batch_priority; not an exhaustive native-host repair menu",
         "summary": {
             "total_candidates": len(candidates),
             "object_candidates": len([c for c in candidates if c["candidate_type"] == "object"]),
             "source_anchor_candidates": len([c for c in candidates if c["candidate_type"] == "source_anchor"]),
             "semantic_band_candidates": len([c for c in candidates if c["candidate_type"] == "semantic_band"]),
             "global_candidates": len([c for c in candidates if c["candidate_type"] == "global"]),
+            "visual_plan_candidates": len(visual_plan_candidates),
+            "phased_action_classes": {
+                cls: len([c for c in candidates if c.get("action_class") == cls])
+                for cls in ("local_safe", "layout_sensitive", "global_sensitive")
+            },
             "b2_width_findings": b2_width_findings,
             "b2_width_candidates": b2_width_candidates,
             "b2_width_targetable_candidates": b2_width_targetable_candidates,
@@ -1328,6 +1742,7 @@ def main() -> None:
     parser.add_argument("--crossrefs-report", default=None)
     parser.add_argument("--rule-report", default=None)
     parser.add_argument("--target-pages", type=int, default=None)
+    parser.add_argument("--diagnosis-report", default=None)
     args = parser.parse_args()
 
     plan = generate_repair_plan(
@@ -1336,6 +1751,7 @@ def main() -> None:
         crossrefs_report=args.crossrefs_report,
         rule_report=args.rule_report,
         target_pages=args.target_pages,
+        diagnosis_report=args.diagnosis_report,
     )
     print(json.dumps(plan, indent=2, ensure_ascii=False))
 

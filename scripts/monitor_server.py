@@ -133,6 +133,10 @@ def _existing_page_count(case_root: Path) -> int:
     return count
 
 
+# /api/file 只服务渲染产物（页图与 PDF），不提供任意文件读取
+_FILE_API_SUFFIX_WHITELIST = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".pdf", ".svg"}
+
+
 def _safe_project_path(root: Path, value: Optional[str]) -> Optional[Path]:
     if not value:
         return None
@@ -971,6 +975,10 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             if path is None or not path.is_file():
                 self._send_error(HTTPStatus.NOT_FOUND, "file not found")
                 return
+            if path.suffix.lower() not in _FILE_API_SUFFIX_WHITELIST:
+                # UI 只需要页图/渲染产物；不给任意文件（如 .git/config）开读权限
+                self._send_error(HTTPStatus.FORBIDDEN, "file type not allowed")
+                return
             content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             self._send_bytes(path.read_bytes(), content_type)
             return
@@ -987,6 +995,9 @@ class MonitorRequestHandler(BaseHTTPRequestHandler):
             path = _safe_project_path(self.project_root, rel)
             if path is None or not path.is_file():
                 self._send_json({"error": "file not found"}, HTTPStatus.NOT_FOUND, send_body=False)
+                return
+            if path.suffix.lower() not in _FILE_API_SUFFIX_WHITELIST:
+                self._send_json({"error": "file type not allowed"}, HTTPStatus.FORBIDDEN, send_body=False)
                 return
             content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             self._send_bytes(path.read_bytes(), content_type, send_body=False)

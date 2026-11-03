@@ -18,15 +18,81 @@ Usage:
 
 import argparse
 import hashlib
+import difflib
 import json
 import re
 import sys
-from pathlib import Path
+import tarfile
+from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Tuple, Set
 from datetime import datetime
 
+from scientific_integrity import TEXT_WRAPPERS, FLOAT_ENVS, ZERO_ARG_LAYOUT_COMMANDS, _command, _group, _optional, _strip_layout, _envs, _literal_dimension, _macro_definitions, _shadowed_presentation_commands, active_source, minipage_layout_end, scientific_payload_diff, scientific_host_review_report, project_presentation_shadow_context, project_presentation_dynamic_context
+from layout_policy import compare_layout_policy
+from layout_prose_integrity import compare_layout_prose
 
-def extract_academic_content(tex_content: str) -> str:
+
+def _unwrap_supported_text_wrappers(text: str, *, opaque_commands: frozenset = frozenset()) -> str:
+    """Keep supported wrapper text before the legacy command remover runs."""
+    output = []
+    i = 0
+    while i < len(text):
+        if text[i] != "\\":
+            output.append(text[i])
+            i += 1
+            continue
+        name, command_end = _command(text, i)
+        star = command_end < len(text) and text[command_end] == "*"
+        if name in ZERO_ARG_LAYOUT_COMMANDS and name not in opaque_commands and not star:
+            # A standard argumentless balance control cannot consume the next
+            # grouped claim. Preserve those words for the independent legacy
+            # count/hash channel as well as the scientific and prose channels.
+            output.append(" ")
+            i = command_end
+            continue
+        argument = command_end + int(star)
+        argument = _optional(text, argument)
+        supported = name in TEXT_WRAPPERS | {"shortstack"}
+        if name == "parbox" and not star and name not in opaque_commands:
+            header_end = minipage_layout_end(text, command_end)
+            if header_end is not None:
+                argument = header_end
+                supported = True
+        while argument < len(text) and text[argument].isspace():
+            argument += 1
+        if supported and argument < len(text) and text[argument] == "{":
+            _, end = _group(text, argument)
+            if end > argument:
+                wrapper = text[i:end]
+                normalized = _strip_layout(wrapper, text_wrappers=True, opaque_commands=opaque_commands)
+                if normalized != wrapper:
+                    # A TeX cell line break separates words in plain text. The
+                    # scientific normalizer ignores whitespace, so preserve
+                    # this boundary before reusing its wrapper handling.
+                    parts = []
+                    cursor = 0
+                    while cursor < len(wrapper):
+                        if wrapper[cursor] == "\\":
+                            control, stop = _command(wrapper, cursor)
+                            if control == "\\":
+                                parts.append(" ")
+                                cursor = _optional(wrapper, stop)
+                                continue
+                            parts.append(wrapper[cursor:stop])
+                            cursor = stop
+                        else:
+                            parts.append(wrapper[cursor])
+                            cursor += 1
+                    normalized = _strip_layout("".join(parts), text_wrappers=True, opaque_commands=opaque_commands)
+                output.append(normalized)
+                i = end
+                continue
+        output.append(text[i:command_end])
+        i = command_end
+    return "".join(output)
+
+
+def extract_academic_content(tex_content: str, *, opaque_commands: frozenset[str] = frozenset()) -> str:
     """
     Extract pure academic text from LaTeX content by filtering out commands.
 
@@ -41,6 +107,16 @@ def extract_academic_content(tex_content: str) -> str:
     # Remove comments
     text = re.sub(r'%.*$', '', text, flags=re.MULTILINE)
 
+    # Consume only known literal minipage headers before stripping markers.
+    # Their optional alignment and width must not leak into academic words.
+    spans = []
+    for match in re.finditer(r'\\begin\s*\{minipage\}', text):
+        end = minipage_layout_end(text, match.end())
+        if end is not None:
+            spans.append((match.start(), end))
+    for start, end in reversed(spans):
+        text = text[:start] + ' ' + text[end:]
+
     # Remove math environments (including content) - MUST run before generic LaTeX command removal
     text = re.sub(r'\\begin\{(equation|align|align\*|gather|gather\*|multline|multline\*|displaymath)\}.*?\\end\{\1\}', ' ', text, flags=re.DOTALL)
     text = re.sub(r'\$\$.*?\$\$', ' ', text, flags=re.DOTALL)
@@ -51,6 +127,10 @@ def extract_academic_content(tex_content: str) -> str:
     # Remove remaining \begin{} and \end{} markers not caught by math environment pattern
     text = re.sub(r'\\begin\{[^}]+\}', ' ', text)
     text = re.sub(r'\\end\{[^}]+\}', ' ', text)
+
+    # Known text wrappers retain their grouped words. Unsupported makecell
+    # forms remain opaque under the same bounded scientific normalization.
+    text = _unwrap_supported_text_wrappers(text, opaque_commands=opaque_commands | _shadowed_presentation_commands(active_source(tex_content)))
 
     # Remove LaTeX commands with optional arguments
     # Handles: \command, \command[opt]{req}, \command{req}
@@ -79,7 +159,7 @@ def extract_sentences(text: str) -> List[str]:
     return [s.strip() for s in sentences if len(s.strip()) > 10]
 
 
-def semantic_hash(tex_content: str) -> str:
+def semantic_hash(tex_content: str, *, opaque_commands: frozenset[str] = frozenset()) -> str:
     """
     Compute SHA256 hash of academic content.
 
@@ -89,15 +169,23 @@ def semantic_hash(tex_content: str) -> str:
     Returns:
         Hex digest of SHA256 hash
     """
-    academic = extract_academic_content(tex_content)
+    academic = extract_academic_content(tex_content, opaque_commands=opaque_commands)
     # Normalize whitespace for consistent hashing
     normalized = ' '.join(academic.split())
     return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
 
 
 def _extract_float_blocks(tex_content: str, env_name: str) -> List[str]:
-    pattern = rf'\\begin\{{{env_name}\*?\}}.*?\\end\{{{env_name}\*?\}}'
-    return re.findall(pattern, tex_content, flags=re.DOTALL)
+    # Share the scientific parser's explicit standard-environment inventory;
+    # rotated/starred containers must retain their counts and label family.
+    # Unknown environment names are not promoted by a substring match.
+    families = {
+        family: {name for name in FLOAT_ENVS if name.removesuffix('*').endswith(family)}
+        for family in ('figure', 'table')
+    }
+    source = active_source(tex_content)
+    return [source[env['start']:env['end']] for env in _envs(source)
+            if env['name'] in families.get(env_name, {env_name})]
 
 
 def _find_bibliography_start(tex_content: str) -> Optional[int]:
@@ -120,21 +208,14 @@ def _extract_float_labels_after_offset(tex_content: str, start_offset: Optional[
         return []
 
     labels: List[str] = []
-    tail = tex_content[start_offset:]
-    pattern = re.compile(r'\\begin\{(figure\*?|table\*?)\}(?:\[[^\]]*\])?')
-    for match in pattern.finditer(tail):
-        env_name = match.group(1)
-        end_match = re.search(
-            r'\\end\{' + re.escape(env_name) + r'\}',
-            tail[match.end():],
-            re.DOTALL,
-        )
-        if not end_match:
+    tail = active_source(tex_content[start_offset:])
+    for env in _envs(tail):
+        if env['name'] not in FLOAT_ENVS:
             continue
-        block_end = match.end() + end_match.end()
-        block = tail[match.start():block_end]
+        block = tail[env['start']:env['end']]
         label_match = re.search(r'\\label\{([^}]+)\}', block)
-        labels.append(label_match.group(1) if label_match else env_name)
+        family = 'figure' if 'figure' in env['name'] else 'table'
+        labels.append(label_match.group(1) if label_match else family)
     return sorted(set(labels))
 
 
@@ -157,6 +238,7 @@ def _extract_bibliography_structure(tex_content: str) -> Dict[str, object]:
 
 
 def _extract_layout_structure(tex_content: str) -> Dict[str, object]:
+    tex_content = active_source(tex_content)
     figure_blocks = _extract_float_blocks(tex_content, "figure")
     table_blocks = _extract_float_blocks(tex_content, "table")
     includegraphics = re.findall(r'\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}', tex_content)
@@ -188,30 +270,51 @@ def structure_regression_reasons(diff: Dict) -> List[str]:
     structure = diff.get("structure_changes") or {}
     before = structure.get("before") or {}
     after = structure.get("after") or {}
+    restoration = diff.get("source_restoration") or {}
+    restored_asset = (restoration.get("asset") if restoration.get("checked") is True
+                      and restoration.get("status") == "verified" else None)
     reasons: List[str] = []
+    rearrangement = structure.get('container_rearrangement') or {}
+    logical_objects_preserved = rearrangement.get('status') == 'supported_objects_preserved'
 
-    if before.get("figure_count") != after.get("figure_count"):
+    proof = (diff.get("scientific_payload") or {}).get("layout_equivalence") or {}
+    objects = proof.get("objects", []) if proof.get("checked") is True and proof.get("status") == "proven" else []
+    # Remove only independently proven wrapper contributions from the count
+    # comparison. Unbound floats/graphics and bibliography placement remain hard.
+    def remaining_count(side, family):
+        value = (before if side == "before" else after).get(family + "_count")
+        if not isinstance(value, int):
+            return value
+        return value - sum(str(obj.get(side + "_scope")) in FLOAT_ENVS
+                           and str(obj.get(side + "_scope")).removesuffix('*').endswith(family)
+                           for obj in objects)
+    if remaining_count("before", "figure") != remaining_count("after", "figure") and not logical_objects_preserved:
         reasons.append(
             f"Figure environment count changed: {before.get('figure_count')} -> {after.get('figure_count')}"
         )
-    if before.get("table_count") != after.get("table_count"):
+    if remaining_count("before", "table") != remaining_count("after", "table") and not logical_objects_preserved:
         reasons.append(
             f"Table environment count changed: {before.get('table_count')} -> {after.get('table_count')}"
         )
-    if before.get("includegraphics_count") != after.get("includegraphics_count"):
+    checked_graphics_count = before.get("includegraphics_count")
+    if restored_asset and isinstance(checked_graphics_count, int):
+        checked_graphics_count -= 1
+    if checked_graphics_count != after.get("includegraphics_count"):
         reasons.append(
             "includegraphics count changed: "
-            f"{before.get('includegraphics_count')} -> {after.get('includegraphics_count')}"
+            f"{checked_graphics_count} -> {after.get('includegraphics_count')}"
         )
 
-    removed_figure_labels = structure.get("removed_figure_labels") or []
-    removed_table_labels = structure.get("removed_table_labels") or []
-    removed_graphics_files = structure.get("removed_graphics_files") or []
+    proven_labels = {obj.get("label") for obj in objects}
+    removed_figure_labels = [label for label in structure.get("removed_figure_labels") or [] if label not in proven_labels]
+    removed_table_labels = [label for label in structure.get("removed_table_labels") or [] if label not in proven_labels]
+    removed_graphics_files = [asset for asset in structure.get("removed_graphics_files") or []
+                             if asset != restored_asset]
     before_bibliography = before.get("bibliography") or {}
     after_bibliography = after.get("bibliography") or {}
-    if removed_figure_labels:
+    if removed_figure_labels and not logical_objects_preserved:
         reasons.append(f"Removed figure labels: {', '.join(removed_figure_labels)}")
-    if removed_table_labels:
+    if removed_table_labels and not logical_objects_preserved:
         reasons.append(f"Removed table labels: {', '.join(removed_table_labels)}")
     if removed_graphics_files:
         reasons.append(f"Removed graphics files: {', '.join(removed_graphics_files)}")
@@ -236,6 +339,61 @@ def structure_regression_reasons(diff: Dict) -> List[str]:
         )
 
     return reasons
+
+
+def _container_rearrangement(original: str, repaired: str, *, science: Dict,
+                             prose: Dict, policy: Dict) -> Dict:
+    """Do not confuse fewer containers with fewer retained scientific objects.
+
+    This narrow exemption changes only raw container/label-family diagnostics.
+    Graphics counts, bibliography flow and all independent payload/prose/policy
+    checks remain effective. Complete source ownership is not visual acceptance.
+    """
+    report = {'status': 'not_established', 'automatic_acceptance': False,
+              'visual_preservation_established': False}
+    if (science.get('checked') is not True or science.get('status') != 'pass'
+            or prose.get('checked') is not True or prose.get('status') != 'pass'
+            or policy.get('status') not in {'pass', 'manual_review'}):
+        return report
+    from scientific_integrity import standard_layout_object_inventory
+    before = standard_layout_object_inventory(original)
+    after = standard_layout_object_inventory(repaired)
+    report.update(before_complete=before.get('complete'), after_complete=after.get('complete'),
+                  before_raw_counts=before.get('raw_container_counts'),
+                  after_raw_counts=after.get('raw_container_counts'))
+    if not (before.get('checked') is True and before.get('complete') is True
+            and after.get('checked') is True and after.get('complete') is True):
+        return report
+    old = sorted((item['family'], item['label']) for item in before['objects'])
+    new = sorted((item['family'], item['label']) for item in after['objects'])
+    if not old or old != new:
+        return report
+    # Moving an object after the bibliography is still a protected flow change,
+    # including additional labels hidden by a combined outer container.
+    old_bib, new_bib = _find_bibliography_start(active_source(original)), _find_bibliography_start(active_source(repaired))
+    old_tails = {item['label'] for item in before['objects'] if old_bib is not None and item['start'] > old_bib}
+    new_tails = {item['label'] for item in after['objects'] if new_bib is not None and item['start'] > new_bib}
+    if new_tails - old_tails:
+        report['new_objects_after_bibliography'] = sorted(new_tails - old_tails)
+        return report
+    report.update(status='supported_objects_preserved', object_identities=old,
+                  before_logical_counts=before['logical_counts'], after_logical_counts=after['logical_counts'],
+                  before_source_sha256=hashlib.sha256(original.encode('utf-8')).hexdigest(),
+                  after_source_sha256=hashlib.sha256(repaired.encode('utf-8')).hexdigest(),
+                  proof_scope='Complete supported unique label/type ownership with passing independent payload and ordinary-prose checks; container grouping only, no semantic or visual quality proof.')
+    return report
+
+
+def scientific_regression_reasons(diff: Dict) -> List[str]:
+    """Independent scientific-payload drift; prose hashes are insufficient."""
+    payload = diff.get("scientific_payload") or {}
+    if not payload.get("checked"):
+        return ["Scientific payload validation unavailable"]
+    return list(payload.get("regression_reasons") or [])
+
+
+def has_scientific_regression(diff: Dict) -> bool:
+    return bool(scientific_regression_reasons(diff))
 
 
 def has_structure_regression(diff: Dict) -> bool:
@@ -344,7 +502,185 @@ def classify_content_type(tex_content: str) -> Dict:
     return result
 
 
-def compute_content_diff(original_tex: str, repaired_tex: str) -> Dict:
+def _literal_graphic_line(line: str) -> Optional[str]:
+    """One standard static invocation; macros and graphics search rules stay opaque."""
+    match = re.fullmatch(r'\s*\\includegraphics\s*(?:\[([^\[\]]*)\])?\s*\{([^{}]+)\}\s*', line)
+    if not match:
+        return None
+    asset = match.group(2)
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./ -]*\.(?:pdf|png|jpg|jpeg|eps)', asset):
+        return None
+    for option in (match.group(1) or '').split(','):
+        if not option.strip():
+            continue
+        if '=' not in option:
+            return None
+        key, value = (part.strip() for part in option.split('=', 1))
+        if key in {'width', 'height', 'totalheight'} and _literal_dimension(value):
+            continue
+        if key == 'keepaspectratio' and value in {'true', 'false'}:
+            continue
+        return None
+    return asset
+
+
+def _inactive_figure_context(source: str, line_number: int, *, active_line: bool) -> str:
+    lines = source.splitlines()
+    index = line_number - 1
+    if type(line_number) is not int or not 0 <= index < len(lines):
+        raise ValueError('source_line_out_of_range')
+    start = next((i for i in range(index - 1, max(-1, index - 61), -1)
+                  if re.fullmatch(r'\s*%\s*\\begin\{figure\*?\}(?:\[[^\]]*\])?\s*', lines[i])), None)
+    end = next((i for i in range(index + 1, min(len(lines), index + 61))
+                if re.fullmatch(r'\s*%\s*\\end\{figure\*?\}\s*', lines[i])), None)
+    if start is None or end is None:
+        raise ValueError('commented_figure_context_missing')
+    body = []
+    for i in range(start, end + 1):
+        line = lines[i].lstrip()
+        if i == index and active_line:
+            if _literal_graphic_line(line) is None:
+                raise ValueError('graphic_invocation_not_static')
+            body.append(line)
+        elif line and not line.startswith('%'):
+            raise ValueError('figure_context_contains_active_content')
+        else:
+            body.append(line[1:] if line.startswith('%') else '')
+    return '\n'.join(body)
+
+
+def _commented_figure_signature(context: str) -> Tuple:
+    """Compare the actual commented figure/caption/label, ignoring prose comments."""
+    records = []
+    i = 0
+    while i < len(context):
+        if context[i] != '\\':
+            i += 1
+            continue
+        name, end = _command(context, i)
+        if name in {'begin', 'end', 'caption', 'label'}:
+            argument, stop = _group(context, _optional(context, end))
+            if stop <= end:
+                raise ValueError('malformed_comment_context')
+            records.append((name, re.sub(r'\s+', ' ', argument).strip()))
+            i = stop
+        else:
+            i = end
+    if ([name for name, _ in records].count('caption') != 1 or
+            [name for name, _ in records].count('label') != 1 or
+            records[0][0] != 'begin' or records[-1][0] != 'end' or
+            records[0][1] not in {'figure', 'figure*'} or records[-1][1] != records[0][1]):
+        raise ValueError('complete_comment_figure_caption_label_required')
+    return tuple(records)
+
+
+def verify_missing_graphic_restoration(original: str, repaired: str, evidence_path: str,
+                                       *, scientific_payload: Dict, layout_prose: Dict,
+                                       layout_policy: Dict) -> Dict:
+    """Verify a local archived original, never a caller-supplied approval boolean.
+
+    URL metadata records provenance, not network authenticity. Other changes
+    still undergo the full independent content/policy and structure checks.
+    """
+    result = {'checked': False, 'status': 'manual_review', 'evidence_path': str(evidence_path),
+              'limits': 'Local byte/hash consistency and exact inactive-source restoration; no network-origin authentication or rendered-quality proof.'}
+    try:
+        evidence_file = Path(evidence_path).resolve()
+        evidence = json.loads(evidence_file.read_text(encoding='utf-8'))
+        if not isinstance(evidence, dict) or evidence.get('schema') != 'paperfit_source_restoration_evidence.v1':
+            raise ValueError('unsupported_evidence_schema')
+        result['evidence_sha256'] = hashlib.sha256(evidence_file.read_bytes()).hexdigest()
+        project = Path(evidence['project_root']).resolve(strict=True)
+        if not project.is_dir():
+            raise ValueError('project_root_not_directory')
+        loaded = {}
+        for role in ('before', 'after', 'reference'):
+            path = Path(evidence[role + '_source_path']).resolve(strict=True)
+            data = path.read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
+            if path.suffix.lower() not in {'.tex', '.ltx'} or digest != evidence[role + '_source_sha256']:
+                raise ValueError(role + '_source_hash_mismatch')
+            loaded[role] = data.decode('utf-8').replace('\r\n', '\n').replace('\r', '\n')
+            result[role + '_source_sha256'] = digest
+            if role == 'after' and not path.is_relative_to(project):
+                raise ValueError('after_source_outside_project')
+            if role == 'after':
+                after_directory = path.parent
+        if loaded['before'] != original or loaded['after'] != repaired:
+            raise ValueError('evidence_does_not_bind_current_source_pair')
+        # Give the specific unsupported-command reason before the aggregate
+        # protection result. Both paths still refuse this restoration exception.
+        for source in (original, repaired):
+            for record in _macro_definitions(active_source(source)):
+                target = record[1] if record[0] in {'def', 'gdef', 'edef', 'xdef', 'let'} else record[2]
+                if target.lstrip('\\') == 'includegraphics':
+                    raise ValueError('includegraphics_redefinition_requires_review')
+        if not all(report.get('checked') is True and report.get('status') == 'pass'
+                   for report in (scientific_payload, layout_prose, layout_policy)):
+            raise ValueError('independent_protection_did_not_pass')
+        probe_path = Path(evidence['provenance_probe_path']).resolve(strict=True)
+        probe_data = probe_path.read_bytes()
+        if hashlib.sha256(probe_data).hexdigest() != evidence['provenance_probe_sha256']:
+            raise ValueError('provenance_record_hash_mismatch')
+        probe = json.loads(probe_data)
+        if not isinstance(probe, dict):
+            raise ValueError('provenance_record_not_object')
+        archive = Path(probe['download']).resolve(strict=True)
+        if hashlib.sha256(archive.read_bytes()).hexdigest() != probe['sha256']:
+            raise ValueError('reference_archive_hash_mismatch')
+        member = evidence['reference_archive_member']
+        if PurePosixPath(member).is_absolute() or '..' in PurePosixPath(member).parts:
+            raise ValueError('unsafe_archive_member')
+        with tarfile.open(archive, 'r:*') as bundle:
+            entry = bundle.getmember(member)
+            if not entry.isfile() or entry.size > 5_000_000:
+                raise ValueError('reference_member_not_bounded_regular_source')
+            reference_bytes = bundle.extractfile(entry).read()
+            if hashlib.sha256(reference_bytes).hexdigest() != evidence['reference_source_sha256']:
+                raise ValueError('reference_source_not_archive_member_bytes')
+            archive_names = [entry.name for entry in bundle.getmembers()]
+        before_line, after_line, reference_line = (evidence[role + '_line'] for role in ('before', 'after', 'reference'))
+        contexts = [_inactive_figure_context(loaded[role], number, active_line=role == 'before')
+                    for role, number in zip(('before', 'after', 'reference'), (before_line, after_line, reference_line))]
+        signatures = [_commented_figure_signature(context) for context in contexts]
+        if signatures[0] != signatures[1] or signatures[1] != signatures[2]:
+            raise ValueError('original_comment_context_mismatch')
+        lines = {role: loaded[role].splitlines()[number - 1]
+                 for role, number in zip(('before', 'after', 'reference'), (before_line, after_line, reference_line))}
+        if lines['after'] != lines['reference'] or not lines['reference'].lstrip().startswith('%'):
+            raise ValueError('after_line_not_exact_original_comment')
+        # Bind the active invocation to this changed line, rather than finding
+        # an identical inactive block elsewhere after deleting the original.
+        changes = difflib.SequenceMatcher(None, original.splitlines(), repaired.splitlines(), autojunk=False).get_opcodes()
+        if not any(tag == 'replace' and old_start <= before_line - 1 < old_end
+                   and new_start <= after_line - 1 < new_end
+                   for tag, old_start, old_end, new_start, new_end in changes):
+            raise ValueError('restoration_line_not_matched_change')
+        asset = _literal_graphic_line(lines['before'])
+        if asset is None or _literal_graphic_line(lines['reference'].lstrip()[1:]) != asset:
+            raise ValueError('static_asset_reference_mismatch')
+        if any(name == asset or name.endswith('/' + asset) for name in archive_names):
+            raise ValueError('asset_present_in_reference_archive')
+        asset_path = (after_directory / asset).resolve()
+        if not asset_path.is_relative_to(project) or asset_path.exists() or asset_path.is_symlink():
+            raise ValueError('asset_not_confirmed_absent_inside_project')
+        if re.search(r'\\(?:graphicspath|DeclareGraphicsExtensions)\b', active_source(original) + active_source(repaired)):
+            raise ValueError('graphics_search_configuration_requires_review')
+        if probe.get('schema') != 'paperfit_asset_recovery_probe.v1' or probe.get('asset') != asset:
+            raise ValueError('provenance_record_asset_mismatch')
+        if not any(isinstance(row, dict) and row.get('line') == reference_line and row.get('text') == lines['reference']
+                   for row in probe.get('main_tex_asset_reference', [])):
+            raise ValueError('provenance_reference_line_mismatch')
+        result.update(checked=True, status='verified', asset=asset,
+                      before_line=before_line, after_line=after_line, reference_line=reference_line,
+                      provenance={'requested_url': probe.get('requested_url'), 'final_url': probe.get('final_url'),
+                                  'archive_sha256': probe['sha256'], 'probe_sha256': evidence['provenance_probe_sha256']})
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, IndexError, AttributeError, tarfile.TarError) as exc:
+        result['reason'] = str(exc) if isinstance(exc, ValueError) else 'restoration_evidence_unavailable:' + type(exc).__name__
+    return result
+
+
+def compute_content_diff(original_tex: str, repaired_tex: str, *, layout_policy_approvals=(), file: str = "", layout_only: bool = False, source_restoration_evidence_path: Optional[str] = None, project_root=None, review_context=None, source_review=None, opaque_commands: frozenset[str] = frozenset(), dynamic_context_commands: frozenset[str] = frozenset()) -> Dict:
     """
     Compute the difference between original and repaired content.
 
@@ -355,8 +691,16 @@ def compute_content_diff(original_tex: str, repaired_tex: str) -> Dict:
     Returns:
         Diff report with deleted/added content
     """
-    original_academic = extract_academic_content(original_tex)
-    repaired_academic = extract_academic_content(repaired_tex)
+    if project_root is not None and file:
+        captured_context = bool(opaque_commands)
+        context_main = review_context.get("main_tex", file) if isinstance(review_context, dict) else file
+        opaque_commands = opaque_commands | project_presentation_shadow_context(
+            project_root, context_main, sources=(original_tex, repaired_tex))
+        if not captured_context:
+            dynamic_context_commands = project_presentation_dynamic_context(
+                project_root, context_main, sources=(original_tex, repaired_tex))
+    original_academic = extract_academic_content(original_tex, opaque_commands=opaque_commands)
+    repaired_academic = extract_academic_content(repaired_tex, opaque_commands=opaque_commands)
 
     original_sentences = set(extract_sentences(original_academic))
     repaired_sentences = set(extract_sentences(repaired_academic))
@@ -372,8 +716,23 @@ def compute_content_diff(original_tex: str, repaired_tex: str) -> Dict:
     word_count_change = repaired_word_count - original_word_count
     word_count_change_pct = (word_count_change / original_word_count * 100) if original_word_count > 0 else 0
 
-    pre_hash = semantic_hash(original_tex)
-    post_hash = semantic_hash(repaired_tex)
+    pre_hash = semantic_hash(original_tex, opaque_commands=opaque_commands)
+    post_hash = semantic_hash(repaired_tex, opaque_commands=opaque_commands)
+
+    scientific_payload = scientific_payload_diff(original_tex, repaired_tex, opaque_commands=opaque_commands, dynamic_context_commands=dynamic_context_commands)
+    layout_policy = compare_layout_policy(original_tex, repaired_tex, approvals=layout_policy_approvals, file=file, project_root=project_root, review_context=review_context)
+    layout_prose = compare_layout_prose(original_tex, repaired_tex, opaque_commands=opaque_commands)
+    from source_review import apply_source_review, reviewable_uncertainty
+    scientific_payload, layout_prose, source_review_result = apply_source_review(
+        original_tex, repaired_tex, project_root=project_root, file=file,
+        review=source_review, scientific=scientific_payload, prose=layout_prose, opaque_commands=opaque_commands)
+    # Unsupported declarations can be uncertainty rather than established
+    # payload loss. Keep the original failed check and a pending candidate;
+    # confirmed changes, missing checks and final acceptance remain guarded.
+    scientific_payload = scientific_host_review_report(scientific_payload)
+    source_restoration = (verify_missing_graphic_restoration(original_tex, repaired_tex, source_restoration_evidence_path,
+                          scientific_payload=scientific_payload, layout_prose=layout_prose, layout_policy=layout_policy)
+                          if source_restoration_evidence_path else {'checked': False, 'status': 'not_used'})
 
     # Determine violation level and required action
     violation_level = 0
@@ -389,14 +748,23 @@ def compute_content_diff(original_tex: str, repaired_tex: str) -> Dict:
         'removed_table_labels': removed_table_labels,
         'removed_graphics_files': removed_graphics_files,
     }
-    structure_reasons = structure_regression_reasons({"structure_changes": structure_changes})
+    structure_changes['container_rearrangement'] = _container_rearrangement(
+        original_tex, repaired_tex, science=scientific_payload, prose=layout_prose, policy=layout_policy)
+    structure_reasons = structure_regression_reasons({"structure_changes": structure_changes, "source_restoration": source_restoration, "scientific_payload": scientific_payload})
     layout_structure_changed = bool(structure_reasons)
 
+    if scientific_payload["regression_reasons"]:
+        uncertain_length = scientific_payload.get("status") == "manual_review" or any((scientific_payload.get(name) or {}).get("status") == "pending" for name in ("layout_argument_uncertainty", "reference_anchor_uncertainty", "combined_layout_uncertainty", "reference_font_hook_uncertainty", "template_parameter_uncertainty"))
+        # Opaque-adjacent length syntax is unresolved, not an automatic rollback
+        # instruction. It remains a failed scientific check until host review.
+        violation_level = 2 if uncertain_length else 3
+        action_required = "manual_review" if uncertain_length else "auto_rollback"
+        violation_reasons.extend(scientific_payload["regression_reasons"])
     if layout_structure_changed:
         violation_level = 3
         action_required = 'auto_rollback'
         violation_reasons.extend(structure_reasons)
-    elif pre_hash != post_hash:
+    elif pre_hash != post_hash and not scientific_payload["regression_reasons"] and not ((scientific_payload.get("layout_equivalence", {}).get("status") == "proven" or source_review_result.get("status") == "verified") and layout_prose.get("status") == "pass"):
         if deleted_sentences:
             violation_reasons.append(f"Deleted {len(deleted_sentences)} sentence(s)")
         if abs(word_count_change_pct) > 15:
@@ -412,8 +780,33 @@ def compute_content_diff(original_tex: str, repaired_tex: str) -> Dict:
             violation_reasons.append(f"Word count changed by {word_count_change_pct:.1f}% (<5%)")
             action_required = 'log_only'
 
+    source_uncertainty = reviewable_uncertainty(original_tex, repaired_tex, opaque_commands=opaque_commands) if (
+        (layout_prose.get("status") != "pass" or scientific_payload.get("reference_font_hook_uncertainty", {}).get("status") == "pending")
+        and source_review_result.get("status") != "verified"
+    ) else {"eligible": False, "kinds": []}
+
+    # A layout shortcut can preserve all scientific content and still violate
+    # repair policy. Keep its evidence separate from content violation levels.
+    pending_document_context = scientific_payload.get("document_presentation_uncertainty", {}).get("status") == "pending"
+    if layout_policy["status"] == "blocked" or (layout_only and layout_prose.get("checked") is True and layout_prose["status"] != "pass" and not source_uncertainty["eligible"] and not pending_document_context):
+        action_required = "auto_rollback"
+    elif source_uncertainty["eligible"] and action_required != "auto_rollback":
+        action_required = "manual_review"
+    elif source_uncertainty["eligible"] and not scientific_payload["regression_reasons"] and not layout_structure_changed:
+        action_required = "manual_review"
+    elif (layout_policy["status"] == "manual_review" or (layout_only and layout_prose.get("checked") is not True)) and action_required != "auto_rollback":
+        action_required = "manual_review"
+    if source_restoration_evidence_path and source_restoration['status'] != 'verified' and action_required != 'auto_rollback':
+        action_required = 'manual_review'
+
     return {
         'timestamp': datetime.now().isoformat(),
+        'scientific_payload': scientific_payload,
+        'layout_policy': layout_policy,
+        'layout_prose': layout_prose,
+        'source_restoration': source_restoration,
+        'source_review': source_review_result,
+        'source_uncertainty': source_uncertainty,
         'hash_comparison': {
             'pre_hash': pre_hash,
             'post_hash': post_hash,
@@ -431,13 +824,7 @@ def compute_content_diff(original_tex: str, repaired_tex: str) -> Dict:
             'added_count': len(added_sentences),
             'added_sentences': list(added_sentences)
         },
-        'structure_changes': {
-            'before': original_layout,
-            'after': repaired_layout,
-            'removed_figure_labels': removed_figure_labels,
-            'removed_table_labels': removed_table_labels,
-            'removed_graphics_files': removed_graphics_files,
-        },
+        'structure_changes': structure_changes,
         'violation': {
             'level': violation_level,
             'reasons': violation_reasons,
@@ -590,15 +977,19 @@ def cmd_pre(args):
         'semantic_hash': semantic_hash(content),
         'academic_word_count': count_words(academic),
         'sentence_count': classification['sentence_count'],
-        'content': content[:500]  # First 500 chars for reference
+        'content': content[:500],  # First 500 chars for human reference only
+        # Full baseline content: 'post' must diff against the complete range,
+        # never against the truncated reference field.
+        'full_content': content,
+        'content_length': len(content)
     }
 
     if args.output:
-        with open(args.output, 'w') as f:
-            json.dump(result, f, indent=2)
+        with open(args.output, 'w', encoding='utf-8') as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
         print(f"Pre-repair snapshot saved to {args.output}")
     else:
-        print(json.dumps(result, indent=2))
+        print(json.dumps(result, indent=2, ensure_ascii=False))
 
     return result
 
@@ -610,22 +1001,38 @@ def cmd_post(args):
     line_start = int(line_range[0])
     line_end = int(line_range[1]) if len(line_range) > 1 else line_start + 50
 
-    with open(args.baseline, 'r') as f:
+    with open(args.baseline, 'r', encoding='utf-8') as f:
         baseline = json.load(f)
 
-    original_content = baseline.get('content', '')
+    full_content = baseline.get('full_content')
+    if full_content is None:
+        full_content = baseline.get('content', '')
+    # A legacy baseline only carries the truncated 500-char reference field.
+    # Word-drift levels computed against it are unreliable, so such
+    # comparisons must never trigger auto_rollback on their own.
+    baseline_truncated = 'full_content' not in baseline and len(full_content) >= 500
+    original_content = full_content
     repaired_content = get_line_range_content(file_path, line_start, line_end)
 
-    diff_result = compute_content_diff(original_content, repaired_content)
+    diff_result = compute_content_diff(original_content, repaired_content, layout_only=True)
     diff_result['file'] = file_path
     diff_result['line_range'] = [line_start, line_end]
     diff_result['baseline_file'] = args.baseline
+    diff_result['baseline_truncated'] = baseline_truncated
 
     # Determine action required
     violation_level = diff_result['violation']['level']
-    if violation_level >= 3:
+    if (diff_result.get('layout_policy') or {}).get('status') == 'blocked':
         diff_result['action_required'] = 'auto_rollback'
-    elif violation_level >= 2:
+    elif baseline_truncated:
+        diff_result['action_required'] = 'manual_review'
+        diff_result['action_note'] = (
+            'baseline lacks full_content; word-drift levels are computed against a '
+            'truncated reference and cannot support auto_rollback'
+        )
+    elif violation_level >= 3 or ((diff_result.get('layout_prose') or {}).get('checked') is True and (diff_result.get('layout_prose') or {}).get('status') != 'pass'):
+        diff_result['action_required'] = 'auto_rollback'
+    elif violation_level >= 2 or (diff_result.get('layout_policy') or {}).get('status') == 'manual_review' or (diff_result.get('layout_prose') or {}).get('checked') is not True:
         diff_result['action_required'] = 'manual_review'
     elif violation_level >= 1:
         diff_result['action_required'] = 'log_only'
@@ -633,11 +1040,11 @@ def cmd_post(args):
         diff_result['action_required'] = 'none'
 
     if args.output:
-        with open(args.output, 'w') as f:
-            json.dump(diff_result, f, indent=2)
+        with open(args.output, 'w', encoding='utf-8') as f:
+            json.dump(diff_result, f, indent=2, ensure_ascii=False)
         print(f"Post-repair validation saved to {args.output}")
     else:
-        print(json.dumps(diff_result, indent=2))
+        print(json.dumps(diff_result, indent=2, ensure_ascii=False))
 
     return diff_result
 
@@ -650,7 +1057,28 @@ def cmd_diff(args):
     with open(args.repaired, 'r', encoding='utf-8') as f:
         repaired = f.read()
 
-    result = compute_content_diff(original, repaired)
+    root = Path(args.root).resolve() if getattr(args, 'root', None) else None
+    approvals, context, source_review, relative = (), None, None, ""
+    if getattr(args, 'layout_review_json', None) or getattr(args, 'source_review_json', None):
+        if root is None:
+            raise ValueError("--root is required for explicit host review")
+        from layout_policy import _relative_path, _review_json
+        from source_review import load_source_review
+        relative = _relative_path(root, str(Path(args.repaired).resolve()))
+        if getattr(args, 'layout_review_json', None):
+            review = _review_json(root / _relative_path(root, args.layout_review_json))
+            if review.get("file") != relative:
+                raise ValueError("layout review is for another source file")
+            approvals, context = review["approvals"], review.get("context")
+        if getattr(args, 'source_review_json', None):
+            source_review = load_source_review(root / _relative_path(root, args.source_review_json))
+    elif root is not None:
+        from layout_policy import _relative_path
+        relative = _relative_path(root, str(Path(args.repaired).resolve()))
+    result = compute_content_diff(original, repaired, layout_only=True, file=relative,
+                                  source_restoration_evidence_path=getattr(args, 'source_restoration_evidence', None),
+                                  project_root=root, review_context=context, layout_policy_approvals=approvals,
+                                  source_review=source_review)
     result['original_file'] = args.original
     result['repaired_file'] = args.repaired
 
@@ -669,11 +1097,11 @@ def cmd_critical(args):
     result = check_critical_sections(args.tex_file, args.config)
 
     if args.output:
-        with open(args.output, 'w') as f:
-            json.dump(result, f, indent=2)
+        with open(args.output, 'w', encoding='utf-8') as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
         print(f"Critical sections check saved to {args.output}")
     else:
-        print(json.dumps(result, indent=2))
+        print(json.dumps(result, indent=2, ensure_ascii=False))
 
     return result
 
@@ -704,6 +1132,10 @@ def main():
     diff_parser.add_argument('original', help='Original .tex file')
     diff_parser.add_argument('repaired', help='Repaired .tex file')
     diff_parser.add_argument('--output', '-o', help='Output JSON file')
+    diff_parser.add_argument('--source-restoration-evidence', help='Hash-bound local original-source/archive evidence for one inactive missing graphic restoration')
+    diff_parser.add_argument('--root', help='Project root; required for current-build host review')
+    diff_parser.add_argument('--layout-review-json', help='Strict source/PDF/all-pages bound layout review request inside root')
+    diff_parser.add_argument('--source-review-json', help='Explicit classified-source uncertainty review inside root; raw reports retained')
     diff_parser.set_defaults(func=cmd_diff)
 
     # 'critical' command
@@ -715,12 +1147,26 @@ def main():
 
     args = parser.parse_args()
 
+    if getattr(args, 'output', None):
+        output = Path(args.output).resolve()
+        protected = {Path(value).resolve() for name in (
+            'tex_file', 'original', 'repaired', 'baseline', 'config',
+            'source_restoration_evidence', 'layout_review_json', 'source_review_json')
+            if (value := getattr(args, name, None))}
+        if output in protected:
+            parser.error('report output cannot replace a manuscript, baseline, configuration or review input')
+        output.parent.mkdir(parents=True, exist_ok=True)
+
     if not args.command:
         parser.print_help()
         sys.exit(1)
 
-    args.func(args)
+    result = args.func(args)
+    if args.command in {'diff', 'post'}:
+        action = result.get('action_required') or (result.get('violation') or {}).get('action')
+        return 3 if action == 'auto_rollback' else 2 if action == 'manual_review' else 0
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

@@ -21,7 +21,7 @@ import re
 import sys
 from pathlib import Path
 from dataclasses import dataclass, asdict
-from typing import List, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 @dataclass
@@ -589,6 +589,28 @@ def main():
     numbered_label_map = build_numbered_label_map(floats, aux_content=aux_content)
     refs = extract_refs(tex_content, numbered_label_map=numbered_label_map)
 
+    # 标注每个浮动体的展示编号（Figure N / Table N）：
+    # aux 的 \newlabel 优先，源码顺序兜底（与 LaTeX 计数器常规一致）。
+    aux_labels: Dict[str, Tuple[str, int]] = {}
+    if aux_content:
+        for (float_type, number), label in extract_aux_numbered_labels(aux_content).items():
+            aux_labels[label] = (float_type, number)
+    float_numbers: Dict[str, Dict[str, Any]] = {}
+    counters = {'figure': 0, 'table': 0}
+    for flt in sorted(floats, key=lambda item: item.line_number):
+        counters[flt.float_type] += 1
+        if flt.label in aux_labels:
+            aux_type, aux_number = aux_labels[flt.label]
+            float_numbers[flt.label] = {
+                'number': aux_number,
+                'number_source': 'aux',
+            }
+        else:
+            float_numbers[flt.label] = {
+                'number': counters[flt.float_type],
+                'number_source': 'source_order',
+            }
+
     # Analyze cross-references
     distances, orphan_refs, orphan_labels = analyze_cross_references(
         refs, floats, sections, tex_content=tex_content
@@ -630,7 +652,13 @@ def main():
         'orphan_labels': report.orphan_labels,
         'major_issues': report.major_issues,
         'distances': [asdict(d) for d in report.distances],
-        'floats': [asdict(flt) for flt in floats],
+        'floats': [
+            {
+                **asdict(flt),
+                **(float_numbers.get(flt.label) or {}),
+            }
+            for flt in floats
+        ],
     }
 
     if args.output:

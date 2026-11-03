@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional
 
+from consistency_fixers import fix_consistency_defects
 from float_fixers import fix_float_defects
 from overflow_fixers import fix_overflow_defects
 from space_util_fixers import fix_space_util_defects
@@ -49,6 +50,14 @@ _ROUTES: Dict[str, FixerRoute] = {
         status="canonical_execution_adapter",
         notes="Script adapter owns file IO, hard content gate, and end-to-end execution semantics.",
     ),
+    "C": FixerRoute(
+        family="C",
+        adapter_module="scripts/consistency_fixers.py",
+        shared_library_module="skills/latex_fixers/shared_table_helpers.py",
+        callable_name="fix_consistency_defects",
+        status="canonical_execution_adapter",
+        notes="Removes resizebox around the first tabular. Image-resolution issues stay diagnostic.",
+    ),
     "D": FixerRoute(
         family="D",
         adapter_module="scripts/overflow_fixers.py",
@@ -56,6 +65,14 @@ _ROUTES: Dict[str, FixerRoute] = {
         callable_name="fix_overflow_defects",
         status="canonical_execution_adapter",
         notes="Script adapter owns file IO and structured fix report generation.",
+    ),
+    "E": FixerRoute(
+        family="E",
+        adapter_module="scripts/template_migrate.py",
+        shared_library_module=None,
+        callable_name="blocked",
+        status="apply_blocked",
+        notes="Template migration stays blocked until a runtime-owned executor can rewrite documentclass safely.",
     ),
     "GLOBAL_PARAGRAPH_SPACING": FixerRoute(
         family="GLOBAL_PARAGRAPH_SPACING",
@@ -84,7 +101,11 @@ def canonical_execution_manifest() -> Dict[str, Any]:
 
 
 def supported_repair_families() -> List[str]:
-    return [family for family in _ROUTES.keys() if family != "GLOBAL_PARAGRAPH_SPACING"]
+    return [
+        family
+        for family, route in _ROUTES.items()
+        if family != "GLOBAL_PARAGRAPH_SPACING" and route.status == "canonical_execution_adapter"
+    ]
 
 
 def execute_float_candidates(
@@ -114,6 +135,15 @@ def execute_overflow_candidates(
     result = report.to_dict()
     result["canonical_route"] = asdict(get_canonical_route("D"))
     return result
+
+
+def execute_consistency_candidates(
+    main_tex: str,
+    defects: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    report = fix_consistency_defects(main_tex=main_tex, defects=defects)
+    report["canonical_route"] = asdict(get_canonical_route("C"))
+    return report
 
 
 def execute_space_util_candidates(

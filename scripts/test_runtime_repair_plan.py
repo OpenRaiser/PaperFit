@@ -729,10 +729,13 @@ class RuntimeRepairPlanTest(unittest.TestCase):
             )
 
             self.assertEqual(plan["summary"]["b2_width_findings"]["total"], 1)
-            self.assertEqual(plan["summary"]["b2_width_candidates"]["total"], 0)
             self.assertEqual(plan["summary"]["b2_width_targetable_candidates"]["total"], 0)
             self.assertEqual(plan["candidates"][0]["defect_family"], "D1")
             self.assertEqual(plan["candidates"][0]["line_number"], 221)
+            # 诊断协议：无锚 B2 转为 review-only 候选（不静默丢弃），执行层会过滤
+            b2_candidates = [c for c in plan["candidates"] if c["defect_family"] == "B2"]
+            self.assertTrue(all(c.get("requires_human_review") for c in b2_candidates))
+            self.assertTrue(all(c.get("proposed_action") == "review_only" for c in b2_candidates))
 
     def test_repair_plan_does_not_promote_caption_gap_hint_without_c4_finding(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1324,9 +1327,12 @@ class RuntimeRepairPlanTest(unittest.TestCase):
                 crossrefs_report=str(crossrefs_path),
             )
 
-            self.assertFalse(any(candidate["defect_family"] == "B2" for candidate in plan["candidates"]))
+            b2_candidates = [c for c in plan["candidates"] if c["defect_family"] == "B2"]
+            # 诊断协议：不再要求零候选，但必须全部 review-only（不可自动执行、无 label）
+            self.assertTrue(b2_candidates)
+            self.assertTrue(all(c.get("requires_human_review") for c in b2_candidates))
+            self.assertTrue(all((c.get("target") or {}).get("label") is None for c in b2_candidates))
             self.assertEqual(plan["summary"]["b2_width_findings"]["total"], 1)
-            self.assertEqual(plan["summary"]["b2_width_candidates"]["total"], 0)
             self.assertEqual(plan["summary"]["b2_width_unmatched_findings"], 1)
             self.assertEqual(plan["summary"]["b2_width_unmatched_pages"], [5])
             self.assertEqual(

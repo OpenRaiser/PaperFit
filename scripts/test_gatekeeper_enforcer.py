@@ -61,7 +61,7 @@ class GatekeeperEnforcerTest(unittest.TestCase):
                 decision["remaining_defects"],
             )
 
-    def test_main_body_page_budget_scope_does_not_block_endmatter_pages(self) -> None:
+    def test_unmeasured_main_body_goal_stays_pending_without_endmatter_defect(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir).resolve()
             data_dir = root / "data"
@@ -90,9 +90,75 @@ class GatekeeperEnforcerTest(unittest.TestCase):
             finally:
                 os.chdir(cwd)
 
-            self.assertEqual(decision["decision"], "DONE")
+            self.assertEqual(decision["decision"], "CONTINUE")
             self.assertTrue(decision["checks"]["category_A"]["pass"])
             self.assertEqual(decision["remaining_defects"], [])
+            self.assertIsNone(decision["checks"]["page_objective"]["target_met"])
+            self.assertEqual(decision["checks"]["page_objective"]["reason"], "scope_boundary_unverified")
+
+    def _run_decision(self, defects: list) -> dict:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            data_dir = root / "data"
+            data_dir.mkdir()
+            (data_dir / "visual_signal_report.json").write_text(
+                json.dumps({"summary": {"pages_analyzed": 9}, "findings": []}),
+                encoding="utf-8",
+            )
+            state = {
+                "compile_success": True,
+                "page_images_rendered": True,
+                "task": {},
+                "artifacts": {"visual_signal_report": "data/visual_signal_report.json"},
+                "visual_signals_summary": {"updated_at": "2026-07-05T18:43:39"},
+            }
+            cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                return make_decision(
+                    state=state,
+                    defects_payload={"defects": defects},
+                    strict_mode=False,
+                    semantic_report_path=None,
+                )
+            finally:
+                os.chdir(cwd)
+
+    def test_critical_hygiene_finding_blocks_done_in_normal_mode(self) -> None:
+        decision = self._run_decision(
+            [
+                {
+                    "id": "hygiene:1",
+                    "source": "source_hygiene_report",
+                    "defect_family": "C_hygiene",
+                    "severity": "critical",
+                    "status": "open",
+                    "description": "Unresolved reference ?? in section 4",
+                }
+            ]
+        )
+        self.assertEqual(decision["decision"], "CONTINUE")
+        self.assertFalse(decision["checks"]["source_hygiene_critical"]["pass"])
+        self.assertIn(
+            "critical source-hygiene findings remain",
+            " ".join(decision["reasons"]),
+        )
+
+    def test_minor_hygiene_finding_still_allows_done_in_normal_mode(self) -> None:
+        decision = self._run_decision(
+            [
+                {
+                    "id": "hygiene:2",
+                    "source": "source_hygiene_report",
+                    "defect_family": "C_hygiene",
+                    "severity": "minor",
+                    "status": "open",
+                    "description": "TODO comment remains",
+                }
+            ]
+        )
+        self.assertEqual(decision["decision"], "DONE")
+        self.assertTrue(decision["checks"]["source_hygiene_critical"]["pass"])
 
 
 if __name__ == "__main__":

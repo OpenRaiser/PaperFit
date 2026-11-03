@@ -19,11 +19,15 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Any
 
 from transactional_patch import atomic_write_text
+from visual_action_plan import document_scope_b1_authorized
+
+from overflow_fixers import _count_top_level_table_columns
 
 try:
-    from content_integrity_check import compute_content_diff, structure_regression_reasons
+    from content_integrity_check import compute_content_diff, structure_regression_reasons, scientific_regression_reasons
 except ImportError:
     compute_content_diff = None
+    scientific_regression_reasons = None
     structure_regression_reasons = None
 
 try:
@@ -34,6 +38,7 @@ try:
         ensure_tabularx_package,
         find_first_tabular_span,
         is_plain_alignment_column_spec,
+        mask_latex_comments,
         read_braced_group,
         remove_resizebox_around_first_tabular,
         rewrite_first_tabular_to_tabular_star,
@@ -50,6 +55,7 @@ except ModuleNotFoundError:
         ensure_tabularx_package,
         find_first_tabular_span,
         is_plain_alignment_column_spec,
+        mask_latex_comments,
         read_braced_group,
         remove_resizebox_around_first_tabular,
         rewrite_first_tabular_to_tabular_star,
@@ -425,23 +431,30 @@ def _find_labeled_float_block(
 ) -> Tuple[Optional[re.Match[str]], str, Optional[int], Optional[int]]:
     fallback_type = "table" if float_type == "figure" else "figure"
     env_names = []
+    # wrapfigure/wraptable 也是图/表的合法容器（真实案例：NeurIPS 的超宽图
+    # 在 wrapfigure 里，width=K\linewidth 的 \linewidth 指 wrap 容器宽）
+    if float_type == "figure":
+        env_names.append("wrapfigure")
+    else:
+        env_names.append("wraptable")
     for env_name in (float_type, f"{float_type}*", fallback_type, f"{fallback_type}*"):
         if env_name not in env_names:
             env_names.append(env_name)
+    active = _mask_inactive_latex(tex_content)
     for env_name in env_names:
         pattern = r'\\begin\{' + re.escape(env_name) + r'\}(\[[^\]]*\])?'
-        for match in re.finditer(pattern, tex_content):
+        for match in re.finditer(pattern, active):
             if _is_commented_at(tex_content, match.start()):
                 continue
             end_match = re.search(
                 r'\\end\{' + re.escape(env_name) + r'\}',
-                tex_content[match.end():],
+                active[match.end():],
                 re.DOTALL,
             )
             if not end_match:
                 continue
             block_end = match.end() + end_match.end()
-            block = tex_content[match.start():block_end]
+            block = active[match.start():block_end]
             label_pattern = r'\\label\{' + re.escape(float_label) + r'\}'
             for label_match in re.finditer(label_pattern, block):
                 if _is_commented_at(tex_content, match.start() + label_match.start()):
@@ -1121,7 +1134,6 @@ def _normalize_float_block_for_semantic_fix(
 ) -> str:
     block = tex_content[block_start:block_end]
     updated_block = _ensure_label_after_caption_in_block(block, float_label=float_label)
-    updated_block = _normalize_figure_width_for_semantic_fix(updated_block, env_name=env_name)
     if updated_block == block:
         return tex_content
     return tex_content[:block_start] + updated_block + tex_content[block_end:]
@@ -1223,8 +1235,9 @@ def _find_endmatter_start(tex_content: str) -> Optional[int]:
         r'\\begin\{thebibliography\}',
     ]
     candidates: List[int] = []
+    active = _mask_inactive_latex(tex_content)
     for pattern in patterns:
-        match = re.search(pattern, tex_content, flags=re.IGNORECASE | re.MULTILINE)
+        match = re.search(pattern, active, flags=re.IGNORECASE | re.MULTILINE)
         if match:
             candidates.append(match.start())
     return min(candidates) if candidates else None
@@ -1237,11 +1250,12 @@ def _enforce_endmatter_float_barrier(
     if endmatter_start is None:
         return tex_content, None
 
-    if not re.search(r'\\begin\{(figure\*?|table\*?)\}', tex_content[:endmatter_start]):
+    active = _mask_inactive_latex(tex_content)
+    if not re.search(r'\\begin\{(figure\*?|table\*?)\}', active[:endmatter_start]):
         return tex_content, None
 
     lookback_start = max(0, endmatter_start - 240)
-    if re.search(r'\\FloatBarrier\b', tex_content[lookback_start:endmatter_start]):
+    if re.search(r'\\(?:FloatBarrier|clearpage)\b', active[lookback_start:endmatter_start]):
         return tex_content, None
 
     prefix = tex_content[:endmatter_start].rstrip()
@@ -1316,23 +1330,111 @@ def add_floatbarrier_to_preamble(
 # B2：浮动体大小不适配栏宽
 # ============================================================
 
+def _graphics_commands_in_block(block: str) -> List[Dict[str, Any]]:
+    """Locate active graphics and effective width keys without guessing a panel."""
+    active = mask_latex_comments(block)
+    commands: List[Dict[str, Any]] = []
+    for match in re.finditer(r'\\includegraphics\*?(?![A-Za-z])', active):
+        cursor = match.end()
+        while cursor < len(active) and active[cursor].isspace():
+            cursor += 1
+        options_start = None
+        options_end = None
+        widths = []
+        if cursor < len(active) and active[cursor] == "[":
+            options_start = cursor
+            brace_depth = 0
+            index = cursor + 1
+            part_start = index
+            while index < len(active):
+                char = active[index]
+                if char == "\\":
+                    index += 2
+                    continue
+                if char == "{":
+                    brace_depth += 1
+                elif char == "}":
+                    brace_depth = max(0, brace_depth - 1)
+                if brace_depth == 0 and char in ",]":
+                    part = active[part_start:index]
+                    width = re.fullmatch(r'\s*width\s*=\s*(.*?)\s*', part, re.DOTALL)
+                    if width:
+                        widths.append({"start": part_start + width.start(1),
+                                       "end": part_start + width.end(1), "value": width.group(1)})
+                    part_start = index + 1
+                    if char == "]":
+                        options_end = index
+                        cursor = index + 1
+                        break
+                index += 1
+            if options_end is None:
+                continue
+        while cursor < len(active) and active[cursor].isspace():
+            cursor += 1
+        asset = read_braced_group(active, cursor)
+        if asset is None:
+            continue
+        commands.append({"start": match.start(), "command_end": match.end(), "end": asset[1], "options_start": options_start,
+                         "options_end": options_end, "widths": widths})
+    return commands
+
+
+def _graphics_is_inside_caption(block: str, position: int) -> bool:
+    active = mask_latex_comments(block)
+    for caption in re.finditer(r'\\caption\*?(?![A-Za-z])', active):
+        cursor = caption.end()
+        while cursor < len(active) and active[cursor].isspace():
+            cursor += 1
+        if cursor < len(active) and active[cursor] == "[":
+            # Both the short and full caption may contain decorative graphics.
+            short_start = cursor
+            brace_depth, bracket_depth = 0, 1
+            cursor += 1
+            while cursor < len(active) and bracket_depth:
+                char = active[cursor]
+                if char == "\\":
+                    cursor += 2
+                    continue
+                if char == "{":
+                    brace_depth += 1
+                elif char == "}":
+                    brace_depth = max(0, brace_depth - 1)
+                elif brace_depth == 0 and char == "[":
+                    bracket_depth += 1
+                elif brace_depth == 0 and char == "]":
+                    bracket_depth -= 1
+                cursor += 1
+            if bracket_depth:
+                continue
+            if short_start < position < cursor:
+                return True
+            while cursor < len(active) and active[cursor].isspace():
+                cursor += 1
+        span = read_braced_group(active, cursor)
+        if span and span[0] < position < span[1]:
+            return True
+    return False
+
+
 def fix_figure_width_mismatch(
     tex_content: str,
     figure_label: str,
     template_type: str = "single_column",
+    visual_width_subtype: Optional[str] = None,
 ) -> Tuple[str, Optional[FixResult]]:
     r"""
     修复图片宽度不适配栏宽问题
 
     策略优先级:
-    1. 设置宽度为 \linewidth
-    2. 区分单栏/跨栏 (双栏模板)
-    3. 设置高度 + keepaspectratio
+    1. 钳制已定位浮动体内明确超出可用栏宽的图片
+    2. 有明确视觉 underfill 证据时仅扩大唯一非图注主体图片
+    3. 无尺寸证据时保留多图容器，单主体保持旧版宽度规范行为
 
     Args:
         tex_content: .tex 文件内容
         figure_label: 图片标签
         template_type: 模板类型 ("single_column" | "double_column")
+        visual_width_subtype: 执行计划中的已定位视觉宽度类型
 
     Returns:
         (修改后的内容，修复结果)
@@ -1345,40 +1447,98 @@ def fix_figure_width_mismatch(
     if block_start is None or block_end is None:
         return tex_content, None
     block = tex_content[block_start:block_end]
-    include_match = re.search(r'\\includegraphics(?:\[[^\]]*\])?\{[^}]+\}', block)
-    if not include_match:
+    graphics = _graphics_commands_in_block(block)
+    if not graphics:
         return tex_content, None
-    include_graphic = include_match.group(0)
+    # The last repeated key is effective in graphicx. An earlier oversized key
+    # must not expand an author's final underfill; each panel has its own keys.
+    edits = []
+    for graphic in graphics:
+        if not graphic["widths"]:
+            continue
+        effective = graphic["widths"][-1]
+        value = effective["value"].strip()
+        if value.startswith("{") and value.endswith("}"):
+            value = value[1:-1].strip()
+        overscale = re.fullmatch(r'([0-9]*\.?[0-9]+)\s*\\(linewidth|columnwidth|textwidth)', value)
+        if overscale is None or float(overscale.group(1)) <= 1.0:
+            continue
+        unit = overscale.group(2)
+        if unit == "textwidth" and env_name != "figure*":
+            continue
+        edits.append((effective["start"], effective["end"], "\\" + unit))
+    if edits:
+        updated_block = block
+        for start, end, replacement in reversed(edits):
+            updated_block = updated_block[:start] + replacement + updated_block[end:]
+        modified_content = tex_content[:block_start] + updated_block + tex_content[block_end:]
+        return modified_content, FixResult(
+            defect_id="B2", object_name=figure_label,
+            action=f"超宽图钳制：在已定位浮动体内修正 {len(edits)} 个实际生效的 K>1 栏宽系数（含图注内图片）",
+            before=" | ".join(block[start:end] for start, end, _ in edits)[:120],
+            after=" | ".join(replacement for _, _, replacement in edits)[:120],
+            success=True,
+        )
+
+    if visual_width_subtype == "underfilled_width":
+        body_graphics = [graphic for graphic in graphics
+                         if not _graphics_is_inside_caption(block, graphic["start"])]
+        if len(body_graphics) != 1 or not body_graphics[0]["widths"]:
+            return tex_content, None
+        effective = body_graphics[0]["widths"][-1]
+        value = effective["value"].strip()
+        if value.startswith("{") and value.endswith("}"):
+            value = value[1:-1].strip()
+        underfill = re.fullmatch(r'([0-9]*\.?[0-9]+)\s*\\(linewidth|columnwidth|textwidth)', value)
+        if underfill is None or not 0.0 < float(underfill.group(1)) < 1.0:
+            return tex_content, None
+        if underfill.group(2) == "textwidth" and env_name != "figure*":
+            return tex_content, None
+        target_width = r"\textwidth" if template_type == "double_column" and env_name == "figure*" else r"\linewidth"
+        updated_block = block[:effective["start"]] + target_width + block[effective["end"]:]
+        return tex_content[:block_start] + updated_block + tex_content[block_end:], FixResult(
+            defect_id="B2", object_name=figure_label,
+            action=f"依据 underfilled_width 视觉证据将唯一非图注主体图片宽度设为 {target_width}",
+            before=block[effective["start"]:effective["end"]], after=target_width,
+            success=True,
+        )
+
+    # Multi-panel figures and caption icons need their own evidence. Changing
+    # the first graphic can enlarge an unrelated panel and leave the defect.
+    if len(graphics) != 1:
+        return tex_content, None
+    graphic = graphics[0]
+    if len(graphic["widths"]) > 1 or _graphics_is_inside_caption(block, graphic["start"]):
+        return tex_content, None
+    include_graphic = block[graphic["start"]:graphic["end"]]
+    if graphic["widths"] and "\\textwidth" in graphic["widths"][-1]["value"] and env_name != "figure*":
+        return tex_content, None
 
     target_width = r"\textwidth" if template_type == "double_column" and env_name.endswith("*") else r"\linewidth"
-    width_match = re.search(r'width=([^\s,\]]+)', include_graphic)
+    width_match = graphic["widths"][-1] if graphic["widths"] else None
     if width_match:
-        current_width = width_match.group(1).strip()
+        current_width = width_match["value"].strip()
         if current_width == target_width:
             return tex_content, None
 
     if width_match:
         # 替换现有宽度为目标栏宽；跨栏图必须显式使用 \textwidth。
-        new_graphic = re.sub(
-            r'width=[^\s,\]]+',
-            lambda _match: f"width={target_width}",
-            include_graphic
-        )
+        relative_start = width_match["start"] - graphic["start"]
+        relative_end = width_match["end"] - graphic["start"]
+        new_graphic = include_graphic[:relative_start] + target_width + include_graphic[relative_end:]
     else:
         # 没有 width 参数，添加
         # 检查是否有可选参数
-        if include_graphic.startswith('\\includegraphics['):
+        if graphic["options_end"] is not None:
             # 有可选参数，在 ] 前插入
-            bracket_pos = include_graphic.find(']')
+            bracket_pos = graphic["options_end"] - graphic["start"]
             new_graphic = include_graphic[:bracket_pos] + f',width={target_width}' + include_graphic[bracket_pos:]
         else:
             # 没有可选参数，添加
-            new_graphic = include_graphic.replace(
-                '\\includegraphics',
-                f'\\includegraphics[width={target_width}]'
-            )
+            insert_at = graphic["command_end"] - graphic["start"]
+            new_graphic = include_graphic[:insert_at] + f'[width={target_width}]' + include_graphic[insert_at:]
 
-    updated_block = block.replace(include_graphic, new_graphic, 1)
+    updated_block = block[:graphic["start"]] + new_graphic + block[graphic["end"]:]
     modified_content = tex_content[:block_start] + updated_block + tex_content[block_end:]
 
     return modified_content, FixResult(
@@ -1539,31 +1699,38 @@ def fix_wide_float_in_double_column(
     is_figure = "fig" in float_label.lower()
     float_type = "figure" if is_figure else "table"
 
-    # 查找浮动体环境
-    pattern = r'\\begin\{' + float_type + r'\}(\[[htbp]+\])?'
-    matches = list(re.finditer(pattern, tex_content))
+    # 查找浮动体环境：label 必须落在该环境的 begin/end 跨度内，
+    # 固定字符窗口在短文档里会误选到相邻浮动体。
+    begin_pattern = re.compile(r'\\begin\{' + float_type + r'\}(\[[htbp]+\])?')
+    end_pattern = re.compile(r'\\end\{' + float_type + r'\}')
+    label_pattern = re.compile(r'\\label\{' + re.escape(float_label) + r'\}')
 
     target_match = None
-    for match in matches:
-        label_pattern = r'\\label\{' + re.escape(float_label) + r'\}'
-        after_start = match.end()
-        label_match = re.search(label_pattern, tex_content[after_start:after_start + 500])
-        if label_match:
+    closing_match = None
+    for match in begin_pattern.finditer(tex_content):
+        end_match = end_pattern.search(tex_content, match.end())
+        if not end_match:
+            break
+        if label_pattern.search(tex_content, match.start(), end_match.end()):
             target_match = match
+            closing_match = end_match
             break
 
-    if not target_match:
+    if target_match is None or closing_match is None:
         return tex_content, None
 
-    # 改为跨栏环境
+    # 改为跨栏环境：必须只改目标浮动体的 begin/end，
+    # 不能用全局 replace（否则改到全文档第一个同类环境）。
+    begin_token = f"\\begin{{{float_type}}}"
     old_env = f"\\begin{{{float_type}}}"
     new_env = f"\\begin{{{float_type}*}}"
 
-    modified_content = tex_content.replace(old_env, new_env, 1)
-    modified_content = modified_content.replace(
-        f"\\end{{{float_type}}}",
-        f"\\end{{{float_type}*}}",
-        1
+    modified_content = (
+        tex_content[: target_match.start()]
+        + new_env
+        + tex_content[target_match.start() + len(begin_token) : closing_match.start()]
+        + f"\\end{{{float_type}*}}"
+        + tex_content[closing_match.end() :]
     )
 
     return modified_content, FixResult(
@@ -1853,15 +2020,15 @@ def fix_split_table(
 {header_row} \\\\
 \\hline
 \\endhead
-\\hline \\multicolumn{{{len(column_spec.strip("{}"))}}}{{r}}{{Continued on next page}} \\\\
+\\hline \\multicolumn{{{_count_top_level_table_columns(column_spec)}}}{{r}}{{Continued on next page}} \\\\
 \\endfoot
 \\hline
 \\endlastfoot
 """
-        # 添加表体 (去除第一行)
+        # 添加表体 (去除第一行)；split 会吃掉行尾的 \\ 分隔符，join 时必须补回
         body_lines = table_body.split('\\\\')
         if len(body_lines) > 1:
-            longtable_content += '\n'.join(body_lines[1:])
+            longtable_content += ' \\\\\n'.join(body_lines[1:])
 
         longtable_content += "\n\\end{longtable}"
 
@@ -1897,16 +2064,17 @@ def fix_split_figure(
     Returns:
         (修改后的内容，修复结果)
     """
-    # 定位 figure 环境
-    pattern = r'\\begin\{figure\}(\[[^\]]*\])?'
-    matches = list(re.finditer(pattern, tex_content))
+    # 定位 figure 环境：label 必须落在环境跨度内（与 fix_split_table 同口径）
+    begin_pattern = re.compile(r'\\begin\{figure\}(\[[^\]]*\])?')
+    end_pattern = re.compile(r'\\end\{figure\}')
+    label_pattern = re.compile(r'\\label\{' + re.escape(figure_label) + r'\}')
 
     target_match = None
-    for match in matches:
-        label_pattern = r'\\label\{' + re.escape(figure_label) + r'\}'
-        after_start = match.end()
-        label_match = re.search(label_pattern, tex_content[after_start:after_start + 500])
-        if label_match:
+    for match in begin_pattern.finditer(tex_content):
+        end_match = end_pattern.search(tex_content, match.end())
+        if not end_match:
+            break
+        if label_pattern.search(tex_content, match.start(), end_match.end()):
             target_match = match
             break
 
@@ -1934,6 +2102,140 @@ def fix_split_figure(
         )
 
     return tex_content, None
+
+
+# ============================================================
+# B1 文档级去堆叠（placement 归一化 + 浮动参数放宽）
+# ============================================================
+
+def _mask_inactive_latex(tex_content: str) -> str:
+    """Preserve offsets while excluding comments and common literal-source areas."""
+    chars = list(tex_content)
+    def mask(start, end):
+        for index in range(start, end):
+            if chars[index] not in "\r\n":
+                chars[index] = " "
+    # Inline verbatim is masked before comments: its delimiter can be `%`.
+    for match in re.finditer(r"(?<!\\)\\verb\*?([^\sA-Za-z])", tex_content):
+        delimiter = match.group(1)
+        line_end = tex_content.find("\n", match.end())
+        line_end = len(tex_content) if line_end < 0 else line_end
+        end = tex_content.find(delimiter, match.end(), line_end)
+        mask(match.start(), line_end if end < 0 else end + 1)
+    active = mask_latex_comments("".join(chars))
+    chars = list(active)
+    pattern = re.compile(r"\\begin\s*\{(verbatim\*?|Verbatim\*?|lstlisting|minted|comment|filecontents\*?)\}")
+    cursor = 0
+    while True:
+        match = pattern.search(active, cursor)
+        if match is None:
+            break
+        end = re.search(r"\\end\s*\{" + re.escape(match.group(1)) + r"\}", active[match.end():])
+        stop = match.end() + end.end() if end else len(active)
+        mask(match.start(), stop)
+        cursor = stop
+    return "".join(chars)
+
+
+_FLOAT_ONLY_PLACEMENT_RE = re.compile(
+    r"(\\begin\{(?:figure|table)\*?\}\s*)\[p\]"
+)
+_FLOAT_RELAX_MARKER = "% PaperFit: float placement relaxation (B1 de-stacking)"
+_FLOAT_RELAX_BLOCK = """\\makeatletter
+{FLOAT_RELAX_MARKER}
+\\renewcommand{\\topfraction}{0.9}
+\\renewcommand{\\bottomfraction}{0.8}
+\\renewcommand{\\textfraction}{0.07}
+\\renewcommand{\\floatpagefraction}{0.75}
+\\setcounter{topnumber}{3}
+\\setcounter{bottomnumber}{2}
+\\setcounter{totalnumber}{5}
+\\makeatother""".replace("{FLOAT_RELAX_MARKER}", _FLOAT_RELAX_MARKER)
+
+
+def _normalize_float_only_placements(tex_content: str) -> Tuple[str, Optional[FixResult]]:
+    r"""把 figure/table 的 [p]-only 放置归一化为 [htbp]。
+
+    `[p]` 强制浮动体只能上独立浮动页，是“表格/图被赶到文末浮动页、堆在
+    参考文献之后”这一类 B1 缺陷的最常见源码成因（也对应扰动
+    B1_float_to_page 的注入方式）。[htbp] 恢复 LaTeX 自由放置，属纯布局级
+    改动。只改 placement 可选参数，不动浮动体内容。
+    """
+    matches = list(_FLOAT_ONLY_PLACEMENT_RE.finditer(_mask_inactive_latex(tex_content)))
+    normalized = tex_content
+    for match in reversed(matches):
+        # Replace the placement only; masked comments remain byte-for-byte intact.
+        start = match.end() - len("[p]")
+        normalized = normalized[:start] + "[htbp]" + normalized[match.end():]
+    count = len(matches)
+    if count == 0:
+        return tex_content, None
+    first = matches[0] if matches else None
+    return normalized, FixResult(
+        defect_id="B1",
+        object_name="document",
+        action=f"将 {count} 处 [p]-only 浮动放置归一化为 [htbp]（允许回到正文页）",
+        before=first.group(0) if first else "[p]",
+        after="[htbp]",
+        success=True,
+    )
+
+
+def _inject_float_relaxation(tex_content: str) -> Tuple[str, Optional[FixResult]]:
+    r"""在导言区注入一次性浮动参数放宽块（幂等：标记已存在则跳过）。
+
+    LaTeX 默认参数（topfraction=0.7 等）在浮动体较多时会把整批表格推到
+    文档末尾。放宽后正文页可容纳的浮动体比例提高，堆叠自然消解。
+    """
+    if _FLOAT_RELAX_MARKER in tex_content:
+        return tex_content, None
+    begin = re.search(r"\\begin\s*\{document\}", _mask_inactive_latex(tex_content))
+    insert_at = begin.start() if begin else -1
+    if insert_at <= 0:
+        return tex_content, None
+    block = _FLOAT_RELAX_BLOCK + "\n"
+    updated = tex_content[:insert_at] + block + tex_content[insert_at:]
+    return updated, FixResult(
+        defect_id="B1",
+        object_name="document",
+        action="导言区注入浮动参数放宽块（topfraction/floatpagefraction 等）",
+        before="(默认浮动参数)",
+        after=_FLOAT_RELAX_BLOCK.splitlines()[2],
+        success=True,
+    )
+
+
+_ENDMATTER_FLUSH_MARKER = "% PaperFit: flush deferred floats before endmatter (B1)"
+_BIBLIOGRAPHY_RE = re.compile(
+    r"(?<!\\)(\\(?:bibliography(?![A-Za-z@])\s*\{|printbibliography(?![A-Za-z@])|begin\s*\{thebibliography\}))"
+)
+
+
+def _flush_floats_before_endmatter(tex_content: str) -> Tuple[str, Optional[FixResult]]:
+    r"""参考文献前插入 \clearpage：把滞留浮动体冲刷到文献列表之前。
+
+    浮动体一旦错过放置点，LaTeX 只能把它排到文档最末——落在参考文献
+    之后/中间（endmatter float intrusion）。[htbp] 归一化 + 参数放宽能让
+    大部分回到正文，但仍放不下的会在文献区堆积并触发 hard guard 整轮
+    回滚。\clearpage 在文献列表前强制冲刷，保证浮动体全部先于 References
+    出现（"图表集中在前、文献收尾"是预印本常见且可接受的版式）。
+    """
+    if _ENDMATTER_FLUSH_MARKER in tex_content:
+        return tex_content, None
+    m = _BIBLIOGRAPHY_RE.search(_mask_inactive_latex(tex_content))
+    if not m:
+        return tex_content, None
+    insert_at = m.start(1)
+    flush_line = _ENDMATTER_FLUSH_MARKER + "\n\\clearpage\n"
+    updated = tex_content[:insert_at] + flush_line + tex_content[insert_at:]
+    return updated, FixResult(
+        defect_id="B1",
+        object_name="document",
+        action="参考文献前插入 \\clearpage 冲刷滞留浮动体（消除文献区堆积）",
+        before=m.group(1).strip()[:60],
+        after="\\clearpage\n" + m.group(1).strip()[:60],
+        success=True,
+    )
 
 
 # ============================================================
@@ -1993,6 +2295,32 @@ def fix_float_defects(
         ),
     )
 
+    # Document-wide constraints are authored choices. Only an explicitly
+    # approved candidate may relax them; a page-level B1 diagnosis is evidence,
+    # not authority to rewrite every unrelated float in the manuscript.
+    document_b1 = [d for d in ordered_defects
+                   if str(d.get("defect_id") or "") == "B1"
+                   and document_scope_b1_authorized(d)]
+    if document_b1:
+        tex_content, placement_change = _normalize_float_only_placements(tex_content)
+        if placement_change is not None:
+            changes.append(placement_change)
+        needs_relaxation = len(document_b1) >= 2 or any(
+            str(d.get("severity") or "").lower() in {"major", "critical", "degrading", "blocking"}
+            for d in document_b1
+        )
+        if needs_relaxation:
+            tex_content, relax_change = _inject_float_relaxation(tex_content)
+            if relax_change is not None:
+                changes.append(relax_change)
+        if any(_defect_allows_floatbarrier(d) for d in document_b1):
+            tex_content, flush_change = _flush_floats_before_endmatter(tex_content)
+            if flush_change is not None:
+                changes.append(flush_change)
+        if tex_content != original_tex_content:
+            modified_files.add(str(tex_path))
+        tex_contents[tex_path] = tex_content
+
     # 先把纯文本编号引用标准化为 \ref，给后续同类浮动体重排留出编号更新空间
     for defect in ordered_defects:
         if str(defect.get("defect_id") or "") != "B1":
@@ -2015,7 +2343,9 @@ def fix_float_defects(
             defect["reference_source"] = "latex_ref_normalized"
             defect["reference_text"] = f"\\ref{{{object_name}}}"
 
-    if any(_defect_allows_floatbarrier(defect) for defect in ordered_defects):
+    if any(_defect_allows_floatbarrier(defect)
+           and (bool(_defect_labels(defect)) or document_scope_b1_authorized(defect))
+           for defect in ordered_defects):
         tex_content, endmatter_barrier_change = _enforce_endmatter_float_barrier(tex_content)
         if endmatter_barrier_change:
             tex_content, preamble_change = add_floatbarrier_to_preamble(tex_content)
@@ -2104,6 +2434,10 @@ def fix_float_defects(
             continue
 
         active_path = tex_path
+        # 页级 B1（无对象标签）：文档级去堆叠已在前置步骤处理
+        # （[p]→[htbp] 归一化 + 浮动参数放宽），对象级修复无从下手，跳过。
+        if defect_id == "B1" and not object_name:
+            continue
         if labels and not _contains_any_labeled_float(tex_contents.get(tex_path, tex_content), labels):
             found_path = _find_tex_file_for_defect(tex_path.parent, labels, tex_path)
             if found_path is not None:
@@ -2154,6 +2488,7 @@ def fix_float_defects(
                     active_content,
                     figure_label=object_name,
                     template_type=template_type,
+                    visual_width_subtype=defect.get("visual_width_subtype"),
                 )
             elif is_table_like:
                 new_content, fix_result = fix_table_width_mismatch(
@@ -2273,6 +2608,12 @@ def _passes_hard_content_gate(
     if compute_content_diff is None:
         return False, "缺少 content_integrity_check 依赖，按 fail-closed 策略阻断写入"
 
+    if scientific_regression_reasons is None:
+        return False, "Scientific payload validation unavailable"
+    science_reasons = scientific_regression_reasons(compute_content_diff(original_tex, repaired_tex))
+    if science_reasons:
+        return False, "; ".join(science_reasons)
+
     normalized_original = _normalize_tex_for_integrity_gate(original_tex)
     normalized_repaired = _normalize_tex_for_integrity_gate(repaired_tex)
     normalized_diff = compute_content_diff(normalized_original, normalized_repaired)
@@ -2288,7 +2629,9 @@ def _passes_hard_content_gate(
     if structure_regression_reasons is None:
         return False, "缺少结构回退检测依赖，按 fail-closed 策略阻断写入"
 
-    structure_reasons = structure_regression_reasons(compute_content_diff(original_tex, repaired_tex))
+    # 结构回退同样在归一化文本上判定：table→longtable、tabular→tabularx
+    # 这类纯排版重构不应被计为结构回退（否则对应策略永远无法落盘）。
+    structure_reasons = structure_regression_reasons(normalized_diff)
     if structure_reasons:
         return False, "；".join(structure_reasons)
 
@@ -2301,6 +2644,20 @@ def _normalize_tex_for_integrity_gate(tex_content: str) -> str:
     compares academic content instead of placement tokens.
     """
     normalized = re.sub(r'^[ \t]*%[^\n]*(?:\n|$)', '', tex_content, flags=re.MULTILINE)
+    # B4 longtable 重构的样板归一化（必须在浮动体块重排与表格组归一之前执行）：
+    # fix_split_table 生成的 longtable 带有重复表头（\endfirsthead/\endhead 之间）
+    # 与 "Continued on next page" 页脚（\endfoot/\endlastfoot 之间），并移除了
+    # table 包装。还原为 table+tabular 等价形态，两侧才能进入相同的后续归一化。
+    normalized = re.sub(
+        r'\\endfirsthead.*?\\endlastfoot',
+        '',
+        normalized,
+        flags=re.DOTALL,
+    )
+    for boilerplate in ("\\endfirsthead", "\\endhead", "\\endfoot", "\\endlastfoot"):
+        normalized = normalized.replace(boilerplate, "")
+    normalized = normalized.replace("\\begin{longtable}", "\\begin{table}\\begin{tabular}")
+    normalized = normalized.replace("\\end{longtable}", "\\end{tabular}\\end{table}")
     normalized = _canonicalize_float_blocks_for_integrity_gate(normalized)
     normalized = _normalize_table_begins_for_integrity_gate(normalized)
     normalized = re.sub(

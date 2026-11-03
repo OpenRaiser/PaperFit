@@ -22,17 +22,25 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 try:
+    from tex_engine import ENGINES, resolve_tex_engine
+    from diagnosis_ingest import classify_compile_case
     from orchestrator_runtime import OrchestratorRuntime
     from paperfit_portrait import load_templates
     from runtime_artifacts import collect_artifact_manifest
     from runtime_status import build_runtime_status
     from runtime_types import TaskSpec
+    from host_advice import host_guidance
+    from runtime_snapshots import create_pre_repair_snapshot, env_snapshot_root
 except ModuleNotFoundError:  # package import during focused tests
+    from .tex_engine import ENGINES, resolve_tex_engine
+    from .diagnosis_ingest import classify_compile_case
     from .orchestrator_runtime import OrchestratorRuntime
     from .paperfit_portrait import load_templates
     from .runtime_artifacts import collect_artifact_manifest
     from .runtime_status import build_runtime_status
     from .runtime_types import TaskSpec
+    from .host_advice import host_guidance
+    from .runtime_snapshots import create_pre_repair_snapshot, env_snapshot_root
 
 
 def package_root() -> Path:
@@ -59,6 +67,8 @@ def _decode_output(blob: bytes | str | None) -> str:
 
 
 def _run(cmd: List[str], *, cwd: Path, timeout: Optional[int] = None) -> subprocess.CompletedProcess[str]:
+    from runtime_actions import kill_process_tree, terminate_process_tree
+
     process = subprocess.Popen(
         cmd,
         cwd=str(cwd),
@@ -66,23 +76,18 @@ def _run(cmd: List[str], *, cwd: Path, timeout: Optional[int] = None) -> subproc
         stderr=subprocess.PIPE,
         text=False,
         start_new_session=True,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
     timed_out = False
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        terminate_process_tree(process)
         try:
             stdout, stderr = process.communicate(timeout=5)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            kill_process_tree(process)
             stdout, stderr = process.communicate()
 
     stdout_text = _decode_output(stdout)
@@ -215,7 +220,7 @@ def _default_target_pages(template_key: Optional[str], page_budget: str) -> Opti
 
 
 def _infer_pdf_page_count(project_root: Path, main_tex: Path) -> Optional[int]:
-    pdf_path = project_root / f"{main_tex.stem}.pdf"
+    pdf_path = main_tex.with_suffix(".pdf")
     if not pdf_path.is_file():
         return None
     result = _run(["pdfinfo", str(pdf_path)], cwd=project_root)
@@ -280,27 +285,58 @@ def _refresh_portrait(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
     return {"command": cmd, "stdout": result.stdout.strip()}
 
 
-def _compile(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
+_MISSING_STY_RE = re.compile(r"File `([A-Za-z0-9_@+-]+)\.sty' not found")
+
+
+def missing_public_sty_names(log_text: str) -> List[str]:
+    names: List[str] = []
+    for match in _MISSING_STY_RE.finditer(log_text or ""):
+        name = match.group(1)
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def _install_missing_sty(names: List[str]) -> List[str]:
+    installed: List[str] = []
+    for name in names[:5]:
+        result = _run(["tlmgr", "install", name], cwd=Path.cwd(), timeout=120)
+        if result.returncode == 0:
+            installed.append(name)
+    return installed
+
+
+def _compile(project_root: Path, *, main_tex: Path, engine: Optional[str] = None) -> Dict[str, Any]:
+    project_root = project_root.resolve()
+    main_tex = (main_tex if main_tex.is_absolute() else project_root / main_tex).resolve()
+    build_root = main_tex.parent
+    engine = resolve_tex_engine(main_tex, engine)
     timeout_sec = int(os.environ.get("PAPERFIT_COMPILE_TIMEOUT_SEC", "240"))
     if os.environ.get("PAPERFIT_BOUNDED_COMPILE") == "1":
-        bounded = _compile_bounded(project_root, main_tex=main_tex, timeout_sec=timeout_sec)
+        bounded = _compile_bounded(project_root, main_tex=main_tex, timeout_sec=timeout_sec, engine=engine)
         if bounded.get("available"):
             return bounded
 
+    try:
+        from compile_inputs import NativeCompileEvidence
+    except ModuleNotFoundError:
+        from .compile_inputs import NativeCompileEvidence
+    evidence = NativeCompileEvidence(project_root, main_tex, compiler="latexmk")
     cmd = [
         "latexmk",
-        "-pdf",
+        ENGINES[engine],
         "-interaction=nonstopmode",
         "-halt-on-error",
+        "-recorder",
         main_tex.name,
     ]
-    pdf_path = project_root / f"{main_tex.stem}.pdf"
+    pdf_path = main_tex.with_suffix(".pdf")
     _clean_main_build_artifacts(project_root, main_tex=main_tex)
     try:
         pdf_path.unlink()
     except FileNotFoundError:
         pass
-    result = _run(cmd, cwd=project_root, timeout=timeout_sec)
+    result = _run(cmd, cwd=build_root, timeout=timeout_sec)
     compile_log = project_root / "data" / "logs" / "paperfit_compile.log"
     _mkdir(compile_log)
     compile_log.write_text((result.stdout or "") + ("\n" + result.stderr if result.stderr else ""), encoding="utf-8")
@@ -308,16 +344,36 @@ def _compile(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
     combined_log = (result.stdout or "") + "\n" + (result.stderr or "")
     fatal_patterns = [
         "Fatal error occurred",
+        "Undefined control sequence",
         "Emergency stop",
         "! LaTeX Error:",
         " ==> Fatal error",
     ]
     fatal_error = any(pattern in combined_log for pattern in fatal_patterns)
     partial_pdf_available = bool(timed_out and pdf_path.is_file() and not fatal_error)
-    success = (result.returncode == 0 and pdf_path.is_file()) or partial_pdf_available
-    return {
+    success = bool(result.returncode == 0 and pdf_path.is_file() and not fatal_error)
+    if not success:
+        missing_sty = missing_public_sty_names(combined_log)
+        if missing_sty:
+            installed = _install_missing_sty(missing_sty)
+            if installed:
+                result = _run(cmd, cwd=build_root, timeout=timeout_sec)
+                combined_log = (result.stdout or "") + "\n" + (result.stderr or "")
+                compile_log.write_text(combined_log, encoding="utf-8")
+                timed_out = result.returncode == 124
+                fatal_error = any(pattern in combined_log for pattern in fatal_patterns)
+                partial_pdf_available = bool(timed_out and pdf_path.is_file() and not fatal_error)
+                success = bool(result.returncode == 0 and pdf_path.is_file() and not fatal_error)
+    case = classify_compile_case(combined_log, success=success)
+    report = {
         "success": success,
+        "engine": engine,
+        "preview_pdf_path": str(pdf_path) if pdf_path.is_file() and not success else None,
+        "case_status": case["case_status"],
+        "missing_sty": case["missing_sty"],
+        "missing_images": case["missing_images"],
         "command": cmd,
+        "cwd": str(build_root),
         "returncode": result.returncode,
         "timeout": timed_out,
         "timeout_sec": timeout_sec,
@@ -325,16 +381,19 @@ def _compile(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
         "fatal_error": fatal_error,
         "stdout_tail": (result.stdout or "")[-4000:],
         "stderr_tail": (result.stderr or "")[-4000:],
-        "log_file": f"{main_tex.stem}.log",
+        "log_file": main_tex.with_suffix(".log").relative_to(project_root).as_posix(),
         "pdf_path": str(pdf_path) if success else None,
         "compile_log": str(compile_log),
     }
 
+    return evidence.finalize(report, page_count=_pdf_page_count(pdf_path) if pdf_path.is_file() else None,
+                             stdout=result.stdout or '', stderr=result.stderr or '')
+
 
 def _clean_main_build_artifacts(project_root: Path, *, main_tex: Path) -> None:
+    main_path = main_tex if main_tex.is_absolute() else project_root / main_tex
     for suffix in [
         ".aux",
-        ".bbl",
         ".bcf",
         ".blg",
         ".fdb_latexmk",
@@ -345,7 +404,7 @@ def _clean_main_build_artifacts(project_root: Path, *, main_tex: Path) -> None:
         ".toc",
     ]:
         try:
-            (project_root / f"{main_tex.stem}{suffix}").unlink()
+            main_path.with_suffix(suffix).unlink()
         except FileNotFoundError:
             pass
 
@@ -365,12 +424,25 @@ def _pdf_page_count(pdf_path: Path) -> Optional[int]:
     return None
 
 
-def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) -> Dict[str, Any]:
-    pdflatex = shutil.which("pdflatex")
+def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int, engine: Optional[str] = None) -> Dict[str, Any]:
+    project_root = project_root.resolve()
+    main_tex = (main_tex if main_tex.is_absolute() else project_root / main_tex).resolve()
+    build_root = main_tex.parent
+    engine = resolve_tex_engine(main_tex, engine)
+    pdflatex = shutil.which(engine)
     if not pdflatex:
         return {"available": False}
-    pdf_path = project_root / f"{main_tex.stem}.pdf"
-    good_pdf_path = project_root / f"{main_tex.stem}.paperfit-good.pdf"
+    try:
+        from compile_inputs import NativeCompileEvidence
+    except ModuleNotFoundError:
+        from .compile_inputs import NativeCompileEvidence
+    evidence = NativeCompileEvidence(project_root, main_tex, compiler=engine)
+    pdf_path = main_tex.with_suffix(".pdf")
+    good_pdf_path = main_tex.with_suffix(".paperfit-good.pdf")
+    baseline_pdf = evidence.attempt.attempt_dir / "baseline.pdf"
+    had_baseline = pdf_path.is_file()
+    if had_baseline:
+        shutil.copy2(pdf_path, baseline_pdf)
     _clean_main_build_artifacts(project_root, main_tex=main_tex)
     for path in (pdf_path, good_pdf_path):
         try:
@@ -380,6 +452,8 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) ->
 
     pass_timeout = max(60, min(timeout_sec, 240))
     passes: List[Dict[str, Any]] = []
+    full_stdout: List[str] = []
+    full_stderr: List[str] = []
     timed_out = False
     fatal_error = False
     restored_good_pdf = False
@@ -387,6 +461,8 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) ->
 
     def _record(result: subprocess.CompletedProcess[str]) -> None:
         nonlocal timed_out, fatal_error
+        full_stdout.append(result.stdout or '')
+        full_stderr.append(result.stderr or '')
         timed_out = timed_out or result.returncode == 124
         combined = (result.stdout or "") + "\n" + (result.stderr or "")
         fatal_error = fatal_error or any(
@@ -412,7 +488,7 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) ->
     def _run_pdflatex() -> subprocess.CompletedProcess[str]:
         return _run(
             [pdflatex, "-interaction=nonstopmode", "-halt-on-error", "-recorder", main_tex.name],
-            cwd=project_root,
+            cwd=build_root,
             timeout=pass_timeout,
         )
 
@@ -420,12 +496,12 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) ->
     _record(result)
     have_good_pdf = _snapshot_if_readable()
 
-    aux_path = project_root / f"{main_tex.stem}.aux"
+    aux_path = main_tex.with_suffix(".aux")
     bibtex = shutil.which("bibtex")
     if aux_path.exists() and bibtex:
         aux_text = aux_path.read_text(encoding="utf-8", errors="replace")
         if r"\bibdata{" in aux_text:
-            result = _run([bibtex, main_tex.stem], cwd=project_root, timeout=max(60, min(timeout_sec, 180)))
+            result = _run([bibtex, main_tex.stem], cwd=build_root, timeout=max(60, min(timeout_sec, 180)))
             _record(result)
 
     for _ in range(2):
@@ -444,6 +520,13 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) ->
         shutil.copy2(good_pdf_path, pdf_path)
         restored_good_pdf = True
 
+    # Preserve a readable failed preview; restore the pre-attempt PDF only
+    # when this attempt left no readable artifact. Its archive survives.
+    restored_baseline_pdf = False
+    if _pdf_page_count(pdf_path) is None and had_baseline:
+        shutil.copy2(baseline_pdf, pdf_path)
+        restored_baseline_pdf = True
+
     try:
         good_pdf_path.unlink()
     except FileNotFoundError:
@@ -459,29 +542,39 @@ def _compile_bounded(project_root: Path, *, main_tex: Path, timeout_sec: int) ->
         encoding="utf-8",
     )
     page_count = _pdf_page_count(pdf_path)
-    success = page_count is not None and not fatal_error
-    return {
+    success = bool(page_count is not None and page_count > 0 and not fatal_error
+                   and not timed_out and not restored_good_pdf and not restored_baseline_pdf
+                   and passes and all(item.get("returncode") == 0 for item in passes))
+    report = {
         "available": True,
         "success": success,
+        "engine": engine,
         "command": [item.get("command") for item in passes],
+        "cwd": str(build_root),
         "returncode": 0 if success else (124 if timed_out else int((passes[-1] if passes else {}).get("returncode") or 1)),
         "timeout": timed_out,
         "timeout_sec": timeout_sec,
         "bounded_compile": True,
         "restored_good_pdf": restored_good_pdf,
-        "partial_pdf_available": False,
+        "restored_baseline_pdf": restored_baseline_pdf,
+        "baseline_pdf": str(baseline_pdf) if had_baseline else None,
+        "partial_pdf_available": bool(timed_out and page_count and not fatal_error and not restored_good_pdf and not restored_baseline_pdf),
+        "pdf_fresh": bool(page_count and not restored_good_pdf and not restored_baseline_pdf),
         "fatal_error": fatal_error,
         "passes": passes,
         "stdout_tail": "\n".join(str(item.get("stdout_tail") or "") for item in passes)[-4000:],
         "stderr_tail": "\n".join(str(item.get("stderr_tail") or "") for item in passes)[-4000:],
-        "log_file": f"{main_tex.stem}.log",
+        "log_file": main_tex.with_suffix(".log").relative_to(project_root).as_posix(),
         "pdf_path": str(pdf_path) if success else None,
         "compile_log": str(compile_log),
     }
 
+    return evidence.finalize(report, page_count=page_count,
+                             stdout='\n'.join(full_stdout), stderr='\n'.join(full_stderr))
+
 
 def _sanitize_precompile_sources(project_root: Path, *, main_tex: Path) -> Dict[str, Any]:
-    tex_path = (project_root / main_tex.name).resolve()
+    tex_path = (main_tex if main_tex.is_absolute() else project_root / main_tex).resolve()
     if not tex_path.is_file():
         return {"changed": False, "main_tex": str(tex_path), "reasons": ["main_tex_not_found"]}
 
@@ -720,6 +813,8 @@ def _run_round(
     template: Optional[str],
     target_pages: Optional[int],
     page_dir: str,
+    page_policy: str = "at_most",
+    page_budget_scope: Optional[str] = None,
 ) -> Dict[str, Any]:
     runtime = OrchestratorRuntime(state_path=str(project_root / "data" / "state.json"))
     cwd_before = Path.cwd()
@@ -727,10 +822,12 @@ def _run_round(
         os.chdir(project_root)
         state = runtime.run_round(
             main_tex=str(main_tex.relative_to(project_root)),
-            log_file=f"{main_tex.stem}.log",
+            log_file=main_tex.with_suffix(".log").relative_to(project_root).as_posix(),
             page_dir=page_dir,
             template=template,
             target_pages=target_pages,
+            page_policy=page_policy,
+            page_budget_scope=page_budget_scope,
         )
     finally:
         os.chdir(cwd_before)
@@ -739,6 +836,18 @@ def _run_round(
 
 def _execute_repair_plan(project_root: Path, *, main_tex: Path, max_candidates: int = 5) -> Dict[str, Any]:
     runtime = OrchestratorRuntime(state_path=str(project_root / "data" / "state.json"))
+    snapshot = create_pre_repair_snapshot(
+        project_root=project_root,
+        main_tex=str(main_tex.relative_to(project_root)),
+        snapshot_root=env_snapshot_root(),
+    )
+    runtime.manager.update({
+        "pre_repair_snapshot": snapshot,
+        "content_integrity": {
+            "validation_status": "snapshot_created",
+            "rollback_target": snapshot.get("rollback_target"),
+        },
+    })
     cwd_before = Path.cwd()
     try:
         os.chdir(project_root)
@@ -753,18 +862,19 @@ def _execute_repair_plan(project_root: Path, *, main_tex: Path, max_candidates: 
 
 
 def _copy_project(src_root: Path, dst_root: Path) -> Path:
+    src_root, dst_root = src_root.resolve(), dst_root.resolve()
+    if dst_root.is_relative_to(src_root):
+        raise ValueError("save-as target must be outside the source project; choose a sibling or external directory")
     if dst_root.exists():
         raise FileExistsError(f"save-as target already exists: {dst_root}")
     ignore = shutil.ignore_patterns(
         "*.aux",
-        "*.bbl",
         "*.blg",
         "*.fdb_latexmk",
         "*.fls",
         "*.log",
         "*.out",
         "*.synctex.gz",
-        "data",
         "archives",
         "page_images",
         "data/pages*",
@@ -930,6 +1040,8 @@ def _derive_priority_items(status: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "risk_level": approval.get("risk_level") or repair.get("risk_level"),
                     "plan_candidates": repair.get("plan_candidates"),
                     "approval_mechanisms": approval.get("approval_mechanisms") or [],
+                    "authority_scope": "optional_batch_executor",
+                    "native_host_alternative": "Use native editing within the user's existing repair scope; reviewable batch limits do not require a new human approval by themselves.",
                 },
                 "mutation": "read_only",
             }
@@ -1051,6 +1163,8 @@ def _run_visual_only(
     main_tex: Path,
     template: Optional[str],
     target_pages: Optional[int],
+    page_policy: str = "at_most",
+    page_budget_scope: Optional[str] = None,
 ) -> Dict[str, Any]:
     pre_compile_sanitization = {
         "changed": False,
@@ -1065,13 +1179,15 @@ def _run_visual_only(
         template=template,
         target_pages=target_pages,
         page_dir=page_dir,
-        log_file=f"{main_tex.stem}.log",
+        log_file=main_tex.with_suffix(".log").relative_to(project_root).as_posix(),
         column_void_report="data/column_void_report.json"
         if (project_root / "data" / "column_void_report.json").is_file()
         else None,
         allow_source_mutation=False,
         user_request="check-visual",
         required_phases=["observe", "diagnose", "verify"],
+        page_policy=page_policy,
+        page_budget_scope=page_budget_scope,
     )
     # `data/task.json` is the canonical runtime task. Older benchmark notes may
     # mention `data/task_visual_only.json`, but new runs no longer create it.
@@ -1110,7 +1226,11 @@ def _run_fix_layout(
     template: Optional[str],
     target_pages: Optional[int],
     max_rounds: Optional[int],
+    apply_source_mutation: bool = False,
+    page_policy: str = "at_most",
+    page_budget_scope: Optional[str] = None,
 ) -> Dict[str, Any]:
+    dry_run = not apply_source_mutation
     iterations: List[Dict[str, Any]] = []
     pending_verification = False
     stop_reason: Optional[str] = None
@@ -1134,7 +1254,11 @@ def _run_fix_layout(
             break
 
         state: Dict[str, Any] = {}
-        pre_compile_sanitization = _sanitize_precompile_sources(project_root, main_tex=main_tex)
+        pre_compile_sanitization = {
+            "changed": False,
+            "main_tex": str(main_tex),
+            "skipped_reason": "unverified_precompile_source_mutation_disabled",
+        }
         compile_result = _compile(project_root, main_tex=main_tex)
         page_dir = "data/pages"
         render_result = {"success": False, "page_dir": page_dir}
@@ -1151,6 +1275,8 @@ def _run_fix_layout(
                 template=template,
                 target_pages=target_pages,
                 page_dir=page_dir,
+                page_policy=page_policy,
+                page_budget_scope=page_budget_scope,
             )
             state_summary = _summarize_runtime_status(project_root)
         iteration: Dict[str, Any] = {
@@ -1221,6 +1347,12 @@ def _run_fix_layout(
                 blocked_reasons.append("failure_tracking_stalled")
             break
 
+        # Guard findings enter the regular candidate workflow. Do not modify
+        # source here before the plan's snapshot/fingerprint/acceptance checks.
+        if dry_run:
+            pending_verification = False
+            stop_reason = "approval_required"
+            break
         repair_state = _execute_repair_plan(project_root, main_tex=main_tex)
         repair_summary = repair_state.get("repair_execution_summary") or {}
         if not isinstance(repair_summary, dict):
@@ -1279,7 +1411,11 @@ def _run_fix_layout(
         stop_reason = "round_limit"
 
     if pending_verification:
-        pre_compile_sanitization = _sanitize_precompile_sources(project_root, main_tex=main_tex)
+        pre_compile_sanitization = {
+            "changed": False,
+            "main_tex": str(main_tex),
+            "skipped_reason": "unverified_precompile_source_mutation_disabled",
+        }
         compile_result = _compile(project_root, main_tex=main_tex)
         page_dir = "data/pages"
         render_result = {"success": False, "page_dir": page_dir}
@@ -1300,6 +1436,8 @@ def _run_fix_layout(
                 template=template,
                 target_pages=target_pages,
                 page_dir=page_dir,
+                page_policy=page_policy,
+                page_budget_scope=page_budget_scope,
             )
             state_summary = _summarize_runtime_status(project_root)
             if not compile_result.get("success"):
@@ -1330,6 +1468,9 @@ def _run_fix_layout(
         final_state_summary = iterations[-1].get("state_summary") or final_state_summary
     report = {
         "mode": "fix_layout",
+        "runtime_contract": "full_vto",
+        "host_guidance": host_guidance(),
+        "dry_run_source_mutation": dry_run,
         "project_root": str(project_root),
         "iterations": iterations,
         "final_state_summary": final_state_summary,
@@ -1341,6 +1482,10 @@ def _run_fix_layout(
         "round_count": len(iterations),
         "stop_reason": stop_reason or "unknown",
         "blocked_reasons": blocked_reasons,
+        "next_actions": [
+            "Review the plan and continue native editing within the user's existing repair scope.",
+            "Use --apply only when requesting this optional legacy batch to write source changes.",
+        ] if stop_reason == "approval_required" else [],
     }
     report_path = project_root / "data" / "fix_layout_report.json"
     _write_json(report_path, report)
@@ -1361,6 +1506,9 @@ def _run_typed_source_changing(
     run_result_output_path: str = "data/run_result_fix_layout_typed.json",
     report_output_path: str = "data/fix_layout_typed_report.json",
     report_mode: str = "typed_fix_layout",
+    round_mode: Optional[str] = None,
+    page_policy: str = "at_most",
+    page_budget_scope: Optional[str] = None,
 ) -> Dict[str, Any]:
     dry_run = _typed_fix_layout_dry_run(apply_source_mutation=apply_source_mutation)
     task_spec = TaskSpec(
@@ -1370,7 +1518,7 @@ def _run_typed_source_changing(
         template=template,
         target_pages=target_pages,
         page_dir="data/pages",
-        log_file=f"{main_tex.stem}.log",
+        log_file=main_tex.with_suffix(".log").relative_to(project_root).as_posix(),
         column_void_report="data/column_void_report.json"
         if (project_root / "data" / "column_void_report.json").is_file()
         else None,
@@ -1379,9 +1527,13 @@ def _run_typed_source_changing(
         dry_run_source_mutation=dry_run,
         rollback_policy="required",
         max_rounds=max_rounds or 1,
+        round_mode=round_mode,
         user_request=user_request,
         required_phases=["observe", "diagnose", "repair", "verify"],
+        page_policy=page_policy,
+        page_budget_scope=page_budget_scope,
     )
+    task_spec.validate()
     _write_json(project_root / "data" / "task.json", task_spec.to_dict())
     runtime = OrchestratorRuntime(state_path=str(project_root / "data" / "state.json"))
     run_result = runtime.run_task(task_spec=task_spec, output_path=run_result_output_path)
@@ -1552,7 +1704,8 @@ def _layout_completion_status(fix_report: Dict[str, Any]) -> Dict[str, Any]:
         reasons.append("visual_defects_remaining")
     if stop_reason == "blocked":
         reasons.extend(str(reason) for reason in blocked_reasons)
-    status = "done" if done else ("blocked" if stop_reason == "blocked" or terminal_success_guard else "incomplete")
+    status = ("done" if done else "blocked" if stop_reason == "blocked" or terminal_success_guard
+              else "approval_required" if stop_reason == "approval_required" else "incomplete")
     return {
         "status": status,
         "gatekeeper_decision": decision or None,
@@ -1578,6 +1731,8 @@ def _handle_paperfit_request(
     run_result_output_path: str = "data/run_result_fix_layout_typed.json",
     report_output_path: str = "data/fix_layout_typed_report.json",
     report_mode: str = "typed_fix_layout",
+    page_policy: str = "at_most",
+    page_budget_scope: Optional[str] = None,
 ) -> Dict[str, Any]:
     inferred = OrchestratorRuntime.infer_task_from_request(request)
     task_type = inferred.get("task_type")
@@ -1614,7 +1769,7 @@ def _handle_paperfit_request(
         working_root = project_root
         if save_as:
             working_root = _copy_project(project_root, save_as.resolve())
-            main_tex = _detect_main_tex(working_root, main_tex.name)
+            main_tex = _detect_main_tex(working_root, main_tex.relative_to(project_root).as_posix())
         if working_root != project_root:
             _build_portrait(
                 working_root,
@@ -1657,6 +1812,8 @@ def _handle_paperfit_request(
             run_result_output_path=run_result_output_path,
             report_output_path=report_output_path,
             report_mode=report_mode,
+            page_policy=page_policy,
+            page_budget_scope=page_budget_scope,
         )
 
     if task_type == "visual_only":
@@ -1665,6 +1822,8 @@ def _handle_paperfit_request(
             main_tex=main_tex,
             template=template,
             target_pages=target_pages,
+            page_policy=page_policy,
+            page_budget_scope=page_budget_scope,
         )
 
     if task_type in {"full_vto", "adjust_length", "repair_table"}:
@@ -1681,6 +1840,8 @@ def _handle_paperfit_request(
                 run_result_output_path=run_result_output_path,
                 report_output_path=report_output_path,
                 report_mode=report_mode,
+                page_policy=page_policy,
+                page_budget_scope=page_budget_scope,
             )
         fix_report = _run_fix_layout(
             project_root,
@@ -1688,6 +1849,9 @@ def _handle_paperfit_request(
             template=template,
             target_pages=target_pages or inferred.get("target_pages"),
             max_rounds=max_rounds,
+            apply_source_mutation=apply_source_mutation,
+            page_policy=page_policy,
+            page_budget_scope=page_budget_scope,
         )
         completion = _layout_completion_status(fix_report)
         return {
@@ -1701,7 +1865,60 @@ def _handle_paperfit_request(
         main_tex=main_tex,
         template=template,
         target_pages=target_pages,
+        page_policy=page_policy,
+        page_budget_scope=page_budget_scope,
     )
+
+
+def _normalized_final_status(report: Dict[str, Any]) -> str:
+    """统一归一化普通报告与 typed 嵌套报告的最终状态。
+
+    typed 报告（_run_typed_source_changing）没有顶层 status，真实终态在
+    report["run_result"]["status"]；普通/迁移报告顶层就有。两者都查，取先命中。
+    """
+    status = str(report.get("status") or "").strip().lower()
+    if status:
+        return status
+    nested = report.get("run_result")
+    if isinstance(nested, dict):
+        return str(nested.get("status") or "").strip().lower()
+    return ""
+
+
+def _report_changes_source(report: Dict[str, Any]) -> bool:
+    """Natural-language entries must retain their inferred task's exit contract."""
+    source_tasks = {"full_vto", "repair_table", "adjust_length", "template_migration"}
+    if report.get("runtime_contract") in source_tasks or report.get("mode") == "fix_layout":
+        return True
+    nested = report.get("run_result")
+    nested = nested if isinstance(nested, dict) else {}
+    for task in (report.get("task"), nested.get("task")):
+        if isinstance(task, dict) and (task.get("task_type") or task.get("type")) in source_tasks:
+            return True
+    return False
+
+
+def _source_changing_exit_code(report: Dict[str, Any], project_root: Path, main_tex: Path) -> int:
+    """P2：不把退出码 0 当作修复成功，磁盘上的旧 PDF 不等于本次修复成功。
+
+    退出码表（可测试、不静默归 0）：
+      0  done（明确满足成功条件的终态）
+      3  approval_required / needs_approval（可选批处理需授权或超出工具范围；不限制已授权宿主原生编辑）
+      2  blocked / failed / compile_failed / runner_crash / 状态缺失（fail-closed）
+      1  continue / partial / incomplete 等已运行但未达 done 的状态
+    """
+    status = _normalized_final_status(report)
+    if status == "done":
+        return 0
+    layout = report.get("layout_completion") or {}
+    if str(layout.get("status") or "").lower() == "done":
+        return 0
+    if status in {"approval_required", "needs_approval"} or "requires_approval" in status:
+        return 3
+    if status in {"blocked", "failed", "runner_crash", "compile_failed", ""}:
+        return 2
+    # continue / partial / incomplete 等：明确非零，PDF 是否存在不改变该判定
+    return 1
 
 
 def main() -> None:
@@ -1711,10 +1928,20 @@ def main() -> None:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--main", default=None)
     common.add_argument("--template", default=None)
+    common.add_argument("--engine", choices=sorted(ENGINES), default=None,
+                        help="Preserve the manuscript engine; alternatively set PAPERFIT_TEX_ENGINE")
     common.add_argument("--target-pages", type=int, default=None)
+    common.add_argument("--page-policy", choices=["at_most", "exact"], default="at_most")
+    common.add_argument("--page-budget-scope", choices=["main_body", "with_refs", "with_appendix"], default=None)
     common.add_argument("--page-budget", default="main_body", choices=["main_body", "with_refs", "with_appendix"])
     common.add_argument("--strict", action="store_true")
     common.add_argument("--max-rounds", type=int, default=None)
+    common.add_argument(
+        "--round-mode",
+        default=None,
+        choices=["safe", "fix-layout", "until-stable"],
+        help="多轮模式预设（safe=1/fix-layout=2/until-stable=5+双止损），优先于 --max-rounds",
+    )
     common.add_argument("--save-as", default=None)
     common.add_argument(
         "--apply",
@@ -1737,6 +1964,8 @@ def main() -> None:
     migrate_parser.add_argument("target_template")
 
     args = parser.parse_args()
+    if args.engine:
+        os.environ["PAPERFIT_TEX_ENGINE"] = args.engine
 
     project_root = Path.cwd().resolve()
     main_tex = _detect_main_tex(project_root, args.main)
@@ -1777,6 +2006,8 @@ def main() -> None:
             run_result_output_path=run_result_output_path,
             report_output_path=report_output_path,
             report_mode=report_mode,
+            page_policy=args.page_policy,
+            page_budget_scope=args.page_budget_scope,
         )
     elif args.command == "fix-layout":
         _build_portrait(
@@ -1798,6 +2029,9 @@ def main() -> None:
                 max_rounds=effective_max_rounds,
                 user_request="fix-layout",
                 apply_source_mutation=args.apply,
+                round_mode=args.round_mode,
+                page_policy=args.page_policy,
+                page_budget_scope=args.page_budget_scope,
             )
         else:
             report = _run_fix_layout(
@@ -1806,6 +2040,9 @@ def main() -> None:
                 template=template,
                 target_pages=target_pages,
                 max_rounds=effective_max_rounds,
+                apply_source_mutation=args.apply,
+                page_policy=args.page_policy,
+                page_budget_scope=args.page_budget_scope,
             )
             completion = _layout_completion_status(report)
             report["status"] = completion["status"]
@@ -1825,6 +2062,8 @@ def main() -> None:
             main_tex=main_tex,
             template=template,
             target_pages=target_pages,
+            page_policy=args.page_policy,
+            page_budget_scope=args.page_budget_scope,
         )
     elif args.command == "migrate-template":
         target_template = _resolve_template_key(args.target_template)
@@ -1833,7 +2072,7 @@ def main() -> None:
         working_root = project_root
         if args.save_as:
             working_root = _copy_project(project_root, Path(args.save_as).resolve())
-            main_tex = _detect_main_tex(working_root, main_tex.name)
+            main_tex = _detect_main_tex(working_root, main_tex.relative_to(project_root).as_posix())
         _build_portrait(
             working_root,
             main_tex=main_tex,
@@ -1864,7 +2103,7 @@ def main() -> None:
                 run_result_output_path="data/run_result_template_migration.json",
             )
             print(json.dumps(report, ensure_ascii=False, indent=2))
-            return
+            raise SystemExit(_source_changing_exit_code(report, working_root, main_tex))
         report = _run_typed_source_changing(
             working_root,
             task_type="template_migration",
@@ -1877,11 +2116,16 @@ def main() -> None:
             run_result_output_path="data/run_result_template_migration.json",
             report_output_path="data/template_migration_typed_report.json",
             report_mode="migrate_template",
+            page_policy=args.page_policy,
+            page_budget_scope=args.page_budget_scope,
         )
     else:
         raise SystemExit(f"unsupported command: {args.command}")
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
+
+    if args.command in {"fix-layout", "fix", "migrate-template"} or _report_changes_source(report):
+        raise SystemExit(_source_changing_exit_code(report, project_root, main_tex))
 
 
 if __name__ == "__main__":

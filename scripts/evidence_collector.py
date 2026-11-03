@@ -197,9 +197,11 @@ class EvidenceCollector:
                     result = subprocess.run(
                         ["diff", "-u", str(backups[0]), str(file_path)],
                         capture_output=True,
-                        text=True
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
                     )
-                    diffs[str(file_path)] = result.stdout
+                    diffs[str(file_path)] = result.stdout or ""
                 except Exception:
                     diffs[str(file_path)] = f"# Unable to generate diff for {file_path}"
             else:

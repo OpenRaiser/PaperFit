@@ -1,6 +1,6 @@
 {
   "name": "paperfit-cli",
-  "version": "1.0.6",
+  "version": "1.1.0",
   "description": "Visual Typesetting Optimization Agent System for LaTeX papers",
   "main": "bin/paperfit.js",
   "bin": {
@@ -9,12 +9,13 @@
   },
   "scripts": {
     "verify": "npm run validate:config && npm run check:node && npm run check:py-warnings",
-    "validate:config": ".venv/bin/python scripts/config_validator.py",
+    "validate:config": "node bin/paperfit.js run scripts/config_validator.py",
     "check:node": "node --check bin/paperfit.js",
-    "check:py-warnings": ".venv/bin/python -W error scripts/check_python_warnings.py",
+    "check:py-warnings": "node bin/paperfit.js run scripts/check_python_warnings.py",
     "postinstall": "node scripts/postinstall.js",
     "upgrade": "bash install.sh --update --local",
-    "upgrade:registry": "bash install.sh --update"
+    "upgrade:registry": "bash install.sh --update",
+    "test:hosts": "node --test scripts/test_host_install.js"
   },
   "files": [
     "bin/",
@@ -31,7 +32,17 @@
     "LICENSE",
     "CONTRIBUTING.md",
     "requirements.txt",
-    "install.sh"
+    "install.sh",
+    "docs/",
+    "protocols/",
+    "plugin.json",
+    "!**/__pycache__/**",
+    "!**/*.pyc",
+    "!**/*.pyo",
+    "!**/.env",
+    "!**/.env.*",
+    "!regression_runs/**",
+    "!data/**"
   ],
   "repository": {
     "type": "git",

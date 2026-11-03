@@ -17,12 +17,38 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Any
 
 try:
-    from content_integrity_check import compute_content_diff, structure_regression_reasons
+    from content_integrity_check import compute_content_diff, structure_regression_reasons, scientific_regression_reasons
+    from math_safe_breaking import split_safe_additive_terms, verify_split_preserves_tokens
 except ImportError:
     compute_content_diff = None
     structure_regression_reasons = None
+    scientific_regression_reasons = None
+    from math_safe_breaking import split_safe_additive_terms, verify_split_preserves_tokens
 
 from transactional_patch import atomic_write_text
+from source_map import masked_tex
+
+try:
+    from skills.latex_fixers.shared_table_helpers import (
+        convert_last_text_column_to_x,
+        count_table_columns,
+        find_first_tabular_span,
+        find_resizebox_wrapping_span,
+        mask_latex_comments,
+        tighten_tabcolsep_for_overflow,
+    )
+except ModuleNotFoundError:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from skills.latex_fixers.shared_table_helpers import (
+        convert_last_text_column_to_x,
+        count_table_columns,
+        find_first_tabular_span,
+        find_resizebox_wrapping_span,
+        mask_latex_comments,
+        tighten_tabcolsep_for_overflow,
+    )
 
 
 # ============================================================
@@ -73,11 +99,11 @@ class OverflowFixReport:
 
 
 def _passes_structure_write_gate(original_tex: str, updated_tex: str) -> Tuple[bool, str]:
-    if compute_content_diff is None or structure_regression_reasons is None:
+    if compute_content_diff is None or structure_regression_reasons is None or scientific_regression_reasons is None:
         return False, "缺少内容完整性依赖，按 fail-closed 策略阻断写入"
 
     diff = compute_content_diff(original_tex, updated_tex)
-    reasons = structure_regression_reasons(diff)
+    reasons = structure_regression_reasons(diff) + scientific_regression_reasons(diff)
     if reasons:
         return False, "；".join(reasons)
     return True, "pass"
@@ -87,6 +113,52 @@ _PARAGRAPH_BOUNDARY_RE = re.compile(
     r"\\(?:begin|end|section|subsection|subsubsection|paragraph|chapter|maketitle|appendix|bibliography|bibliographystyle)\b"
 )
 _DISPLAY_MATH_ENV_RE = re.compile(r"\\begin\{(equation\*?|align\*?|multline\*?|gather\*?)\}(.*?)\\end\{\1\}", re.DOTALL)
+
+
+
+
+_BRACKET_DISPLAY_RE = re.compile(r"(?<!\\)\\\[ *(\S.*?) *(?<!\\)\\\]", re.DOTALL)
+
+
+class _SourceDisplayMatch:
+    """Expose original text groups for a position-preserving masked match."""
+
+    def __init__(self, match: "re.Match[str]", source: str) -> None:
+        self._match = match
+        self._source = source
+
+    def group(self, index: int) -> Optional[str]:
+        if self._match.group(index) is None:
+            return None
+        return self._source[self._match.start(index):self._match.end(index)]
+
+    def start(self) -> int:
+        return self._match.start()
+
+    def end(self) -> int:
+        return self._match.end()
+
+
+class _BracketDisplayMatch:
+    r"""把 `\[...\]` 匹配包装成与 _DISPLAY_MATH_ENV_RE 一致的接口（group(1)=None 表示无编号）。"""
+
+    def __init__(self, match: "re.Match[str]") -> None:
+        self._match = match
+
+    def group(self, index: int) -> Optional[str]:
+        if index == 0:
+            return self._match.group(0)
+        if index == 1:
+            return None
+        if index == 2:
+            return self._match.group(1)
+        return None
+
+    def start(self) -> int:
+        return self._match.start()
+
+    def end(self) -> int:
+        return self._match.end()
 _TABLE_LIKE_ENV_RE = re.compile(
     r"\\(begin|end)\{(table\*?|tabular\*?|tabularx|longtable|sidewaystable)\}"
 )
@@ -228,6 +300,483 @@ def _find_paragraph_span_by_text(
     return None
 
 
+def _line_is_preamble_textheight_shrink(tex_content: str, line_number: Optional[int]) -> bool:
+    """检测行号是否在导言区且附近有 \\addtolength{\\textheight}{-...}。"""
+    if line_number is None or line_number < 1:
+        return False
+    begin_doc = tex_content.find("\\begin{document}")
+    if begin_doc < 0:
+        return False
+    # 行号必须在 \\begin{document} 之前
+    lines_before_doc = tex_content[:begin_doc].count("\n") + 1
+    if line_number > lines_before_doc:
+        return False
+    # 附近 5 行内有负向 textheight 修改
+    lines = tex_content.splitlines()
+    context = "\n".join(lines[max(0, line_number - 6):line_number + 5])
+    return bool(re.search(r"\\addtolength\s*\{\s*\\textheight\s*\}\s*\{\s*-", context))
+
+
+def _remove_preamble_textheight_shrink(
+    tex_content: str, line_number: Optional[int]
+) -> Tuple[str, Optional[FixResult]]:
+    """移除导言区导致全文溢出的负向 textheight 修改（含扰动标记块）。"""
+    if not _line_is_preamble_textheight_shrink(tex_content, line_number):
+        return tex_content, None
+
+    # 优先移除带 DISTURBANCE 标记的完整块
+    tagged = re.compile(
+        r"\n?[ \t]*%[^\n]*DISTURBANCE:E2[^\n]*:BEGIN[^\n]*\n"
+        r"[ \t]*\\addtolength\s*\{\s*\\textheight\s*\}\s*\{\s*-[^}]+\}[^\n]*\n"
+        r"[ \t]*%[^\n]*DISTURBANCE:E2[^\n]*:END[^\n]*\n?",
+        re.IGNORECASE,
+    )
+    match = tagged.search(tex_content)
+    if match:
+        removed = match.group(0)
+        modified = tex_content[:match.start()] + tex_content[match.end():]
+        return modified, FixResult(
+            defect_id="D1→A3",
+            object_name="导言区 textheight 缩小",
+            action="移除导言区的负向 textheight 修改（含扰动标记块）",
+            before=removed.strip()[:80],
+            after="(removed)",
+            line_number=line_number,
+            success=True,
+        )
+
+    # 兜底：移除孤立负向 textheight 行
+    standalone = re.compile(
+        r"^([ \t]*\\addtolength\s*\{\s*\\textheight\s*\}\s*\{\s*-[^}]+\}[ \t]*)$",
+        re.MULTILINE,
+    )
+    match = standalone.search(tex_content)
+    if match and match.start() < tex_content.find("\\begin{document}", 0):
+        removed_line = match.group(0)
+        modified = tex_content[:match.start()] + tex_content[match.end():]
+        return modified, FixResult(
+            defect_id="D1→A3",
+            object_name="导言区 textheight 缩小",
+            action="移除导言区的负向 textheight 修改",
+            before=removed_line.strip(),
+            after="(removed)",
+            line_number=line_number,
+            success=True,
+        )
+
+    return tex_content, None
+
+
+def _resolve_overfull_file_candidates(project_root: Path, main_tex_name: str) -> Dict[int, List[Path]]:
+    """Keep all files reporting a local line; a collision needs a source anchor."""
+    try:
+        from multi_file_overfull import find_file_in_project, resolve_overfull_to_source
+        log_path = project_root / f"{Path(main_tex_name).stem}.log"
+        if not log_path.is_file():
+            return {}
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+        resolutions = resolve_overfull_to_source(log_text, project_root, main_tex_name)
+        mapping: Dict[int, List[Path]] = {}
+        for r in resolutions:
+            actual = find_file_in_project(project_root, r["file"])
+            if actual is not None:
+                candidates = mapping.setdefault(r["line_start"], [])
+                actual = actual.resolve()
+                if actual not in candidates:
+                    candidates.append(actual)
+        return mapping
+    except Exception:
+        return {}
+
+
+def _resolve_overfull_files(project_root: Path, main_tex_name: str) -> Dict[int, Path]:
+    """Legacy unique-line lookup; never silently overwrite an include collision."""
+    main_path = (project_root / main_tex_name).resolve()
+    return {line: files[0] for line, files in _resolve_overfull_file_candidates(project_root, main_tex_name).items()
+            if len(files) == 1 and files[0] != main_path}
+
+
+def _fix_overfull_in_included_file(
+    included_path: Path,
+    line_number: int,
+    overflow_amount: float,
+    description: str,
+) -> Optional[Tuple[str, FixResult]]:
+    """在子文件里执行 D1 段落溢出修复。策略链：长token → 引用拆分 → sloppy → stretch。"""
+    try:
+        content = included_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    stretch = "3em" if overflow_amount > 20 else ("2em" if overflow_amount > 10 else "1em")
+
+    # 策略 1: D1-A 长 token
+    long_token_result = _fix_long_token_with_breaks(content, description, line_number)
+    if long_token_result is not None:
+        modified, fix = long_token_result
+        from transactional_patch import atomic_write_text
+        atomic_write_text(included_path, modified)
+        fix.object_name = f"{included_path.name} 长 token"
+        return str(included_path), fix
+
+    # 策略 2: 引用串拆分——\citep{a,b,c,d} → \citep{a,b} \citep{c,d}
+    citation_result = _split_citation_clusters(content, line_number)
+    if citation_result is not None:
+        from transactional_patch import atomic_write_text
+        atomic_write_text(included_path, citation_result[0])
+        return str(included_path), citation_result[1]
+
+    # 策略 3: \sloppy 段落——允许 TeX 更宽松的断行
+    sloppy_result = _apply_sloppy_to_paragraph(content, line_number)
+    if sloppy_result is not None:
+        from transactional_patch import atomic_write_text
+        atomic_write_text(included_path, sloppy_result[0])
+        return str(included_path), sloppy_result[1]
+
+    # 策略 4: 分级 emergencystretch
+    paragraph_span = _find_paragraph_span_by_line_number(content, line_number)
+    if paragraph_span is None:
+        paragraph_span = _find_paragraph_span_by_text(content, description)
+    if paragraph_span is not None:
+        modified = _wrap_paragraph_with_emergencystretch(content, paragraph_span, stretch=stretch)
+        if modified != content:
+            from transactional_patch import atomic_write_text
+            atomic_write_text(included_path, modified)
+            return str(included_path), FixResult(
+                defect_id="D1",
+                object_name=f"{included_path.name} 段落",
+                action=f"在子文件 {included_path.name} L{line_number} 段落添加 \\emergencystretch={stretch}",
+                before=f"(original paragraph at L{line_number})",
+                after=f"{{\\emergencystretch={stretch} ...}}",
+                line_number=line_number,
+                success=True,
+            )
+    return None
+
+
+# 多 key 引用串：\citep{a,b,c,d} 或 \cite{a,b,c,d}
+_CITE_CLUSTER_RE = re.compile(r"(\\cite[pt]?\{)([A-Za-z0-9_\-]+(?:,[A-Za-z0-9_\-]+){2,})(\})")
+
+
+def _split_citation_clusters(
+    content: str,
+    line_number: Optional[int] = None,
+) -> Optional[Tuple[str, FixResult]]:
+    """拆分长引用串允许 TeX 在两个 \\citep 之间断行。
+
+    \\citep{a,b,c,d} → \\citep{a,b} \\citep{c,d}
+    语义不变（引用同一组论文），只是允许断行。
+    """
+    lines = content.splitlines(keepends=True)
+    # 目标行号附近 ±2 行
+    search_start = max(0, (line_number or 1) - 3)
+    search_end = min(len(lines), (line_number or len(lines)) + 2)
+
+    for idx in range(search_start, search_end):
+        line = lines[idx]
+        match = _CITE_CLUSTER_RE.search(line)
+        if not match:
+            continue
+        keys = match.group(2).split(",")
+        if len(keys) < 3:
+            continue
+        # 拆成两半
+        mid = (len(keys) + 1) // 2
+        first_half = ",".join(keys[:mid])
+        second_half = ",".join(keys[mid:])
+        cmd = match.group(1).rstrip("{")  # \citep or \cite or \citet
+        replacement = f"{cmd}{{{first_half}}} {cmd}{{{second_half}}}"
+        new_line = line[:match.start()] + replacement + line[match.end():]
+        lines[idx] = new_line
+        modified = "".join(lines)
+        return modified, FixResult(
+            defect_id="D1",
+            object_name=f"引用串拆分",
+            action=f"拆分 {cmd}{{{match.group(2)[:30]}...}} 为两个引用以允许断行",
+            before=f"{cmd}{{{match.group(2)[:40]}}}",
+            after=replacement[:60],
+            line_number=line_number,
+            success=True,
+        )
+    return None
+
+
+def _apply_sloppy_to_paragraph(
+    content: str,
+    line_number: Optional[int] = None,
+) -> Optional[Tuple[str, FixResult]]:
+    """对指定段落应用 \\sloppy 模式（允许更宽松的断行和间距）。"""
+    paragraph_span = _find_paragraph_span_by_line_number(content, line_number)
+    if paragraph_span is None:
+        paragraph_span = _find_paragraph_span_by_text(content, "")
+    if paragraph_span is None:
+        return None
+    start, end = paragraph_span
+    paragraph = content[start:end]
+    if r"\sloppy" in paragraph:
+        return None  # 已有 sloppy
+    wrapped = f"{{\\sloppy\n{paragraph.rstrip()}\n}}"
+    modified = content[:start] + wrapped + content[end:]
+    return modified, FixResult(
+        defect_id="D1",
+        object_name="段落 sloppy 模式",
+        action=f"对 L{line_number} 段落应用 \\sloppy（tolerance=9999, emergencystretch=3em）",
+        before=f"(original paragraph)",
+        after=f"{{\\sloppy ...}}",
+        line_number=line_number,
+        success=True,
+    )
+
+
+def _batch_fix_included_file_overfull(
+    included_path: Path,
+    line_numbers: List[int],
+    max_overflow: float,
+) -> Optional[Tuple[str, FixResult]]:
+    """对一个子文件里的多个溢出行一次性全部修复。
+
+    策略：对整个文件范围应用 \\sloppy（一次修完比逐段修更高效且更一致），
+    加上引用串拆分。
+    """
+    try:
+        content = included_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    original = content
+    actions = []
+
+    # 1. 拆分文件里所有 ≥3 key 的引用串
+    cite_count = 0
+    for match in _CITE_CLUSTER_RE.finditer(content):
+        keys = match.group(2).split(",")
+        if len(keys) < 3:
+            continue
+        mid = (len(keys) + 1) // 2
+        cmd = match.group(1).rstrip("{")
+        replacement = f"{cmd}{{{','.join(keys[:mid])}}} {cmd}{{{','.join(keys[mid:])}}}"
+        content = content.replace(match.group(0), replacement, 1)
+        cite_count += 1
+    if cite_count > 0:
+        actions.append(f"拆分 {cite_count} 处引用串")
+
+    # 1.5 把 ~\citep 替换为空格+\citep（允许 TeX 在引用前断行）
+    tilde_count = content.count("~\\citep") + content.count("~\\cite")
+    if tilde_count > 0:
+        content = content.replace("~\\citep", " \\citep").replace("~\\cite", " \\cite")
+        actions.append(f"释放 {tilde_count} 处引用前断行点")
+
+    # 1.7 缩小过宽的 wraptable（>0.45\textwidth 的缩到 0.45）
+    # wraptable 压缩正文宽度导致周围所有段落溢出
+    wraptable_count = 0
+    for wt_match in re.finditer(r"\\begin\{wraptable\}\{[lr]\}\{([\d.]+)\\textwidth\}", content):
+        try:
+            width = float(wt_match.group(1))
+        except ValueError:
+            continue
+        if width > 0.45:
+            old_spec = wt_match.group(0)
+            new_spec = old_spec.replace(f"{width}\\textwidth", "0.45\\textwidth")
+            content = content.replace(old_spec, new_spec, 1)
+            wraptable_count += 1
+    if wraptable_count > 0:
+        actions.append(f"缩小 {wraptable_count} 处过宽 wraptable 至 0.45\\textwidth")
+
+    # 2. 对整个正文区域应用 \\sloppy
+    begin_doc = content.find("\\begin{document}")
+    if begin_doc < 0:
+        begin_doc = 0
+    if "\\sloppy" not in content:
+        insert_pos = content.find("\n", begin_doc) + 1
+        if insert_pos > 0:
+            content = content[:insert_pos] + "\\sloppy\n" + content[insert_pos:]
+            actions.append("全文 \\sloppy 模式")
+
+    if content == original:
+        return None
+
+    from transactional_patch import atomic_write_text
+    atomic_write_text(included_path, content)
+    return str(included_path), FixResult(
+        defect_id="D1",
+        object_name=f"{included_path.name} 批量溢出修复",
+        action=f"批量修复 {included_path.name} 的 {len(line_numbers)} 处溢出：{'；'.join(actions)}",
+        before=f"({len(line_numbers)} overfull paragraphs at lines {line_numbers[:5]})",
+        after=f"({'; '.join(actions)})",
+        line_number=line_numbers[0] if line_numbers else None,
+        success=True,
+    )
+
+
+def _fix_long_token_with_breaks(
+    tex_content: str,
+    overfull_line: str,
+    line_number: Optional[int] = None,
+) -> Optional[Tuple[str, FixResult]]:
+    """D1-A：为不可断长 token（≥30 字符标识符）添加安全断点。
+
+    在 camelCase 边界、下划线、句点、斜杠处插入 \\allowbreak，
+    不用 \\texttt 包裹（那会改变字体观感——终版方案 D1-A 第 5 条）。
+    """
+    
+    
+    
+    long_tokens: List[str] = []
+    if line_number is not None:
+        try:
+            source_lines = tex_content.splitlines()
+            # 警告行号是段落范围，token 可能比段落起始行还靠前 1-2 行（TeX 行统计
+            # 与源行有偏移），窗口从 line_number-3 起向下 14 行
+            start_idx = max(0, line_number - 3)
+            window = "\n".join(source_lines[start_idx : start_idx + 14])
+            long_tokens = re.findall(r"[A-Za-z][A-Za-z0-9_/.]{29,}", window)
+        except Exception:
+            long_tokens = []
+    if not long_tokens:
+        long_tokens = re.findall(r"[A-Za-z][A-Za-z0-9_/.]{29,}", overfull_line)
+
+    if not long_tokens:
+        return None
+
+    # 取最长的
+    token = max(long_tokens, key=len)
+
+    # 已经有 \allowbreak 的不重复处理
+    if "\\allowbreak" in overfull_line:
+        return None
+
+    # 在安全边界插入 \allowbreak
+    breakable = _insert_safe_breaks_in_token(token)
+    if breakable == token:
+        return None  # 没有可断点
+
+    # 在全文中替换（只替换第一次出现，且确认不在数学环境/命令名内）
+    if f"\\{token}" in tex_content:
+        return None  # 可能是命令名，不动
+    token_pos = tex_content.find(token)
+    if token_pos < 0:
+        return None
+    # 安全守卫（真实事故形态：NeurIPS L133/L617 的图形溢出被误判为 D1，
+    # token 实为文件路径/引用键——在它们内部插 \allowbreak 会直接破坏编译
+    # 或引用解析）。token 出现在下列参数内一律拒绝，转由正确家族处理：
+    guarded = _token_inside_guarded_argument(tex_content, token, token_pos)
+    if guarded:
+        return None
+    prefix = tex_content[:token_pos]
+    # 数学环境判定用 $ 配对奇偶：旧正则 \$[^$]*token 对"前方出现过任意 $"
+    # 一律误判成数学环境，导致正文长 token 永远修不了
+    if (prefix.count("$") - prefix.count(r"\$")) % 2 == 1:
+        return None  # 在行内数学环境内
+
+    modified = tex_content.replace(token, breakable, 1)
+    if modified == tex_content:
+        return None
+
+    return modified, FixResult(
+        defect_id="D1",
+        object_name="段落文本",
+        action=f"为长标识符 '{token[:20]}...' ({len(token)} 字符) 添加安全断点",
+        before=token[:60] + "..." if len(token) > 60 else token,
+        after=breakable[:60] + "..." if len(breakable) > 60 else breakable,
+        line_number=line_number,
+        success=True,
+    )
+
+
+# token 绝不允许插断点的命令参数（文件路径 / 引用键 / 标签键）
+_GUARDED_ARG_COMMANDS = (
+    "includegraphics", "input", "include", "bibliography", "bibliographystyle",
+    "addbibresource", "graphicspath", "cite", "citep", "citet", "citealp",
+    "citeauthor", "citeyear", "ref", "eqref", "autoref", "pageref", "label",
+    "vref", "cref", "Cref",
+)
+
+
+def _token_inside_guarded_argument(tex_content: str, token: str, token_pos: int) -> bool:
+    r"""token 是否位于受保护命令的 {...} 参数内或 display math 环境内。
+
+    判定方式：从 token 位置向前找最近的未闭合 \cmd{ 开括号——若它属于
+    _GUARDED_ARG_COMMANDS，token 在其参数内；括号越过行首的 display math
+    开始（\begin{equation/align/...}）同样视为受保护。
+    """
+    depth = 0
+    scan = tex_content[:token_pos]
+    # 从右往左扫描，找包裹 token 的最近一层的开命令
+    for i in range(len(scan) - 1, -1, -1):
+        ch = scan[i]
+        if ch == "}":
+            depth += 1
+        elif ch == "{":
+            if depth > 0:
+                depth -= 1
+                continue
+            # 这是一个尚未闭合的 { —— 检查它前面的命令名（允许中间隔着 [options]）
+            cmd_match = re.search(r"\\([a-zA-Z]+)(?:\[[^\]]*\])?\s*$", scan[:i])
+            if cmd_match:
+                cmd = cmd_match.group(1)
+                if cmd in _GUARDED_ARG_COMMANDS:
+                    return True
+                if cmd == "begin":
+                    # \begin{equation} 等显示数学环境的参数
+                    env = re.search(r"\\begin\{([a-zA-Z*]+)\}\s*$", scan[: i + 1])
+                    if env and env.group(1) in {"equation", "equation*", "align", "align*", "gather", "gather*", "multline", "multline*", "eqnarray", "displaymath"}:
+                        return True
+            # 非受保护命令的参数（如 \mathrm{...}）：继续向外层找
+    # display math 环境整体包裹判定（token 不在命令参数里但在环境内）
+    env_patterns = [
+        (r"\\begin\{(?:equation\*?|align\*?|gather\*?|multline\*?|eqnarray\*?|displaymath)\}", r"\\end\{(?:equation\*?|align\*?|gather\*?|multline\*?|eqnarray\*?|displaymath)\}"),
+        (r"\\\[", r"\\\]"),
+    ]
+    for begin_pat, end_pat in env_patterns:
+        for m in re.finditer(begin_pat, tex_content):
+            end_m = re.search(end_pat, tex_content[m.end():])
+            if end_m and m.end() <= token_pos <= m.end() + end_m.start():
+                return True
+    return False
+
+
+def _insert_safe_breaks_in_token(token: str) -> str:
+    """在 camelCase 边界、下划线、句点、斜杠后插入 \\allowbreak。
+
+    无自然边界的长串（如 56 连 X 的注入 token）按固定间隔补断点，
+    保证任意连续不可断片段不超过 12 字符——否则 173pt 级溢出无法回行。
+    """
+    result = list(token)
+    insert_positions = []
+
+    for idx in range(1, len(token) - 1):
+        char = token[idx]
+        prev = token[idx - 1]
+        next_char = token[idx + 1]
+
+        # camelCase 边界：小写→大写
+        if prev.islower() and char.isupper():
+            insert_positions.append(idx)
+        # 下划线/句点/斜杠后
+        elif char in "_/." and next_char.isalnum():
+            insert_positions.append(idx + 1)
+
+    # 固定间隔补断：相邻断点（含首尾）间距超过 12 的空档内，每 10 字符断一次
+    bounded = sorted(set(insert_positions))
+    interval_positions = []
+    prev_cut = 0
+    for pos in bounded:
+        while pos - prev_cut > 12:
+            prev_cut += 10
+            if prev_cut < pos:
+                interval_positions.append(prev_cut)
+        prev_cut = pos
+    while len(token) - prev_cut > 12:
+        prev_cut += 10
+        interval_positions.append(prev_cut)
+
+    # 从后往前插入（避免位置偏移）
+    for pos in reversed(sorted(set(insert_positions) | set(interval_positions))):
+        result.insert(pos, r"\allowbreak ")
+
+    return "".join(result)
+
+
 def _wrap_paragraph_with_emergencystretch(
     tex_content: str,
     paragraph_span: Tuple[int, int],
@@ -254,7 +803,10 @@ def _find_display_math_match(
     equation_label: Optional[str] = None,
     tolerance: int = 2,
 ):
-    matches = list(_DISPLAY_MATH_ENV_RE.finditer(tex_content))
+    active = masked_tex(tex_content)
+    matches: List[Any] = [_SourceDisplayMatch(m, tex_content) for m in _DISPLAY_MATH_ENV_RE.finditer(active)]
+    matches.extend(_BracketDisplayMatch(_SourceDisplayMatch(m, tex_content))
+                   for m in _BRACKET_DISPLAY_RE.finditer(active))
     if not matches:
         return None
 
@@ -329,50 +881,29 @@ def _choose_equation_break(rhs: str) -> Optional[Tuple[str, str]]:
 
 
 def _split_top_level_additive_terms(rhs: str) -> List[str]:
-    terms: List[str] = []
-    brace_depth = 0
-    term_start = 0
-    idx = 0
-    while idx < len(rhs):
-        char = rhs[idx]
-        if char == "{":
-            brace_depth += 1
-        elif char == "}":
-            brace_depth = max(0, brace_depth - 1)
-        elif (
-            brace_depth == 0
-            and char in {"+", "-"}
-            and idx > 0
-            and rhs[idx - 1].isspace()
-            and idx + 1 < len(rhs)
-            and rhs[idx + 1].isspace()
-        ):
-            term = rhs[term_start:idx].strip()
-            if term:
-                terms.append(term)
-            term_start = idx
-        idx += 1
-
-    final_term = rhs[term_start:].strip()
-    if final_term:
-        terms.append(final_term)
-    return terms
+    """M3 token-aware 安全切分：委托 math_safe_breaking，不在保护区间内断行。"""
+    return split_safe_additive_terms(rhs)
 
 
-def _rewrite_equation_to_aligned_terms(lhs: str, rhs: str) -> Optional[str]:
+def _rewrite_equation_to_aligned_terms(lhs: str, rhs: str, starred: bool = False) -> Optional[str]:
     terms = _split_top_level_additive_terms(rhs)
     if len(terms) < 3:
         return None
 
+    # M3 token 验证：切分后数学 token 序列必须与原始一致
+    if not verify_split_preserves_tokens(rhs, terms):
+        return None
+
+    outer_env = "equation*" if starred else "equation"
     lines = [
-        "\\begin{equation}",
+        f"\\begin{{{outer_env}}}",
         "\\begin{aligned}",
         f"  {lhs} &= {terms[0]} \\\\",
     ]
     for term in terms[1:-1]:
         lines.append(f"  &\\quad {term} \\\\")
     lines.append(f"  &\\quad {terms[-1]}")
-    lines.extend(["\\end{aligned}", "\\end{equation}"])
+    lines.extend(["\\end{aligned}", f"\\end{{{outer_env}}}"])
     return "\n".join(lines)
 
 
@@ -410,7 +941,7 @@ def _break_long_mathrm_subscripts(expression: str) -> str:
     return re.sub(r"_\{\\mathrm\{([A-Za-z][A-Za-z0-9]{39,})\}\}", replace, expression)
 
 
-def _rewrite_equation_to_multline(equation_body: str) -> Optional[str]:
+def _rewrite_equation_to_multline(equation_body: str, starred: bool = False) -> Optional[str]:
     normalized = " ".join(equation_body.strip().split())
     if "=" not in normalized:
         return None
@@ -421,16 +952,17 @@ def _rewrite_equation_to_multline(equation_body: str) -> Optional[str]:
     concat_fraction_break = _find_safe_concat_fraction_break(rhs)
     if concat_fraction_break is not None:
         first_line_rhs, second_line_rhs = concat_fraction_break
+        outer_env = "equation*" if starred else "equation"
         return (
-            "\\begin{equation}\n"
+            f"\\begin{{{outer_env}}}\n"
             "\\begin{aligned}\n"
             f"  {lhs} &= {first_line_rhs} \\\\\n"
             f"  &{second_line_rhs}\n"
             "\\end{aligned}\n"
-            "\\end{equation}"
+            f"\\end{{{outer_env}}}"
         )
 
-    aligned_terms = _rewrite_equation_to_aligned_terms(lhs, rhs)
+    aligned_terms = _rewrite_equation_to_aligned_terms(lhs, rhs, starred=starred)
     if aligned_terms is not None:
         return aligned_terms
 
@@ -439,11 +971,12 @@ def _rewrite_equation_to_multline(equation_body: str) -> Optional[str]:
         return None
 
     first_line_rhs, second_line_rhs = break_pair
+    env = "multline*" if starred else "multline"
     return (
-        "\\begin{multline}\n"
+        f"\\begin{{{env}}}\n"
         f"  {lhs} = {first_line_rhs} \\\\\n"
         f"  {second_line_rhs}\n"
-        "\\end{multline}"
+        f"\\end{{{env}}}"
     )
 
 
@@ -507,7 +1040,13 @@ def fix_paragraph_overflow(
     if _line_is_within_table_like_env(tex_content, line_number):
         return tex_content, None
 
-    # 策略 1: 为长单词添加断词点
+    # 策略 0 (D1-A): 不可断长 token（≥30 字符标识符）→ 语义安全断点
+    # 优先于盲断词：camelCase/下划线/斜杠边界比每 4-5 字母的 \- 更精准
+    long_token_result = _fix_long_token_with_breaks(tex_content, overfull_line, line_number)
+    if long_token_result is not None:
+        return long_token_result
+
+    # 策略 1: 为长单词添加断词点（适合 12-29 字符的普通长词）
     # 查找长度 > 10 的单词 (可能是复合词或长学术术语)
     long_words = re.findall(r'\b[a-zA-Z]{10,}\b', overfull_line)
 
@@ -574,63 +1113,72 @@ def add_hyphenation_points(word: str) -> str:
 
 
 def _count_top_level_table_columns(column_spec: str) -> int:
-    spec = column_spec.strip("{}")
-    brace_depth = 0
-    count = 0
-    idx = 0
-    while idx < len(spec):
-        char = spec[idx]
-        if char == "{":
-            brace_depth += 1
-        elif char == "}":
-            brace_depth = max(0, brace_depth - 1)
-        elif brace_depth == 0 and char in {"l", "r", "c", "X"}:
-            count += 1
-        elif brace_depth == 0 and char in {"p", "m", "b"} and idx + 1 < len(spec) and spec[idx + 1] == "{":
-            count += 1
-        idx += 1
-    return count
+    return count_table_columns(column_spec)
 
 
-def _tighten_table_block_layout(block: str) -> Tuple[str, List[str]]:
+def _tighten_table_block_layout(
+    block: str, overflow_amount: float = 0, initial_padding_pt: Optional[float] = 6.0,
+) -> Tuple[str, List[str]]:
     actions: List[str] = []
-    tabular_match = re.search(r"\\begin\{tabularx?\}(?:\{[^}]+\})?(\{[^}]+\})", block)
-    if not tabular_match:
+    tabular = find_first_tabular_span(block)
+    if not tabular:
         return block, actions
-
-    column_spec = tabular_match.group(1)
-    column_count = _count_top_level_table_columns(column_spec)
     updated = block
 
-    if column_count >= 6 and r"\begin{table*}" not in updated:
-        updated = re.sub(r"\\begin\{table\}(?:\[[^\]]*\])?", r"\\begin{table*}[t]", updated, count=1)
-        updated = updated.replace(r"\end{table}", r"\end{table*}", 1)
-        updated = updated.replace(r"\linewidth", r"\textwidth")
-        actions.append("promoted wide table to table*")
-
-    if column_count >= 6 and r"\small" not in updated and r"\footnotesize" not in updated:
-        begin_match = re.search(r"\\begin\{table\*?\}(?:\[[^\]]*\])?", updated)
-        if begin_match:
-            updated = updated[: begin_match.end()] + "\n\\small" + updated[begin_match.end() :]
-            actions.append("added \\small to wide table")
-
-    tabcolsep_match = re.search(r"\\setlength\{\\tabcolsep\}\{([0-9.]+)mm\}", updated)
-    if tabcolsep_match:
-        current = float(tabcolsep_match.group(1))
-        if current > 2.0:
+    # \resizebox{1.19\textwidth}{!} 之类的过宽缩放是表格溢出的直接原因；
+    # resizebox 内换 tabularx 不起作用（外层已强制总宽），必须先钳制缩放系数
+    resize_span = find_resizebox_wrapping_span(block, tabular["begin_start"], tabular["end_end"])
+    resize_prefix = mask_latex_comments(block[resize_span[0]:tabular["begin_start"]]) if resize_span else ""
+    over_scale = re.search(
+        r"\\resizebox\{\s*([0-9]*\.?[0-9]+)\s*\\(textwidth|linewidth|columnwidth)\s*\}",
+        resize_prefix,
+    )
+    if over_scale:
+        factor = float(over_scale.group(1))
+        if factor > 1.0:
+            scale_start = resize_span[0] + over_scale.start()
+            scale_end = resize_span[0] + over_scale.end()
             updated = (
-                updated[: tabcolsep_match.start()]
-                + r"\setlength{\tabcolsep}{2mm}"
-                + updated[tabcolsep_match.end() :]
+                updated[: scale_start]
+                + f"\\resizebox{{\\{over_scale.group(2)}}}"
+                + updated[scale_end :]
             )
-            actions.append("tightened \\tabcolsep to 2mm")
-    elif column_count >= 5:
-        centering_match = re.search(r"\\centering", updated)
-        insert_at = centering_match.end() if centering_match else 0
-        updated = updated[:insert_at] + "\n\\setlength{\\tabcolsep}{2mm}" + updated[insert_at:]
-        actions.append("inserted \\tabcolsep 2mm")
+            actions.append(f"clamped resizebox scale {factor} to 1.0")
+            # Recompile this isolated correction before spending more padding.
+            return updated, actions
+
+    padding = tighten_tabcolsep_for_overflow(updated, overflow_amount, initial_padding_pt)
+    if padding:
+        updated = padding["updated"]
+        actions.append(f"measured table padding: {padding['before']} -> {padding['after']} ({padding['columns']} columns)")
 
     return updated, actions
+
+
+def _inherited_table_padding(tex_prefix: str) -> Optional[float]:
+    """Use known explicit padding; don't overwrite a template's unknown setting."""
+    active = mask_latex_comments(tex_prefix)
+    active = re.sub(r"\\begin\{(table\*?|sidewaystable|figure\*?)\}.*?\\end\{\1\}", "", active, flags=re.DOTALL)
+    settings = list(re.finditer(r"\\(?:setlength|addtolength)\s*\{\s*\\tabcolsep\s*\}\s*\{([^}]*)\}", active))
+    value = 6.0
+    for setting in settings:
+        # Skip macro definitions and complete local brace groups.
+        prefix = re.sub(r"\\[{}]", "", active[:setting.start()])
+        if prefix.count("{") != prefix.count("}"):
+            continue
+        dimension = re.fullmatch(r"\s*([+-]?[0-9]+(?:\.[0-9]+)?)\s*(pt|mm)\s*", setting.group(1))
+        if dimension is None:
+            value = None
+            continue
+        amount = float(dimension.group(1)) * (72.27 / 25.4 if dimension.group(2) == "mm" else 1.0)
+        if setting.group(0).startswith(r"\setlength"):
+            value = amount
+        elif value is not None:
+            value += amount
+    # Direct assignments/macros can change padding without setlength.
+    if re.search(r"\\tabcolsep\s*(?:=|[0-9])", active):
+        return None
+    return value
 
 
 # ============================================================
@@ -641,51 +1189,76 @@ def fix_table_overflow(
     tex_content: str,
     table_label: Optional[str] = None,
     line_number: Optional[int] = None,
+    overflow_amount: float = 0,
 ) -> Tuple[str, Optional[FixResult]]:
     """
     修复表格单元格溢出
 
-    策略优先级:
-    1. 改用 tabularx 环境
-    2. 手动设置列宽 (p{宽度})
-    3. 精简表头
-    4. 调整字号
+    有量化溢出时，先修正无效的外层超宽系数，再按列数减少必要的局部
+    tabcolsep，保留至少 3pt。保留数值列对齐、字号和浮动体栏制。
+    无量化信息的旧调用保留 tabularx 兼容策略。
 
     Args:
         tex_content: .tex 文件内容
         table_label: 表格标签 (如 "tab:results")
         line_number: 溢出行号
+        overflow_amount: 日志中的溢出宽度（pt）
 
     Returns:
         (修改后的内容，修复结果)
     """
-    # 定位表格环境
-    if table_label:
-        # 通过标签定位表格
-        pattern = r'(\\begin\{(?:table|table\*|sidewaystable)\}(?:\[[htbp]+\])?.*?)(\\begin\{tabular\})(\{[^}]+\})(.*?)(\\end\{tabular\})(.*?\\end\{(?:table|table\*|sidewaystable)\})'
-    else:
-        # 查找最近的 tabular 环境
-        pattern = r'(\\begin\{(?:table|table\*|sidewaystable)\}(?:\[[htbp]+\])?.*?)(\\begin\{tabular\})(\{[^}]+\})(.*?)(\\end\{tabular\})(.*?\\end\{(?:table|table\*|sidewaystable)\})'
-
-    matches = list(re.finditer(pattern, tex_content, re.DOTALL))
+    # 定位表格环境：table+tabular 块（label 与行号在选择阶段使用）
+    pattern = r'\\begin\{(table\*?|sidewaystable)\}(?:\[[^\]]*\])?.*?\\end\{\1\}'
+    matches = [match for match in re.finditer(pattern, mask_latex_comments(tex_content), re.DOTALL)
+               if find_first_tabular_span(match.group(0)) is not None]
 
     if not matches:
         return tex_content, None
 
-    # 如果有 line_number，找到最接近的表格
-    target_match = matches[0]
-    if line_number:
-        for match in matches:
-            if match.start() <= line_number <= match.end():
-                target_match = match
-                break
+    def _line_of(offset: int) -> int:
+        # match.start()/end() are character offsets; defects carry 1-indexed
+        # line numbers, so convert before comparing.
+        return tex_content.count("\n", 0, offset) + 1
 
-    full_table = target_match.group(0)
-    column_spec = target_match.group(3)
+    # 有 label 时优先在携带该 label 的表格里选择
+    candidates = matches
+    if table_label:
+        labeled = [
+            match
+            for match in matches
+            if re.search(r"\\label\s*\{\s*" + re.escape(table_label) + r"\s*\}", match.group(0))
+        ]
+        if not labeled:
+            return tex_content, None
+        candidates = labeled
 
-    tightened_table, tighten_actions = _tighten_table_block_layout(full_table)
+    target_match = candidates[0]
+    if line_number is not None:
+        containing = [
+            match
+            for match in candidates
+            if _line_of(match.start()) <= line_number <= _line_of(match.end())
+        ]
+        if containing:
+            target_match = containing[0]
+        else:
+            # 溢出行不在任何候选表格内：选行距最近的表格
+            target_match = min(
+                candidates,
+                key=lambda match: min(
+                    abs(line_number - _line_of(match.start())),
+                    abs(line_number - _line_of(match.end())),
+                ),
+            )
+
+    full_table = tex_content[target_match.start():target_match.end()]
+    tabular = find_first_tabular_span(full_table)
+    column_spec = tabular["column_spec"]
+
+    inherited_padding = _inherited_table_padding(tex_content[:target_match.start()])
+    tightened_table, tighten_actions = _tighten_table_block_layout(full_table, overflow_amount, inherited_padding)
     if tighten_actions:
-        modified_content = tex_content.replace(full_table, tightened_table, 1)
+        modified_content = tex_content[:target_match.start()] + tightened_table + tex_content[target_match.end():]
         return modified_content, FixResult(
             defect_id="D1",
             object_name=table_label or "表格",
@@ -696,30 +1269,27 @@ def fix_table_overflow(
             success=True,
         )
 
+    # Once a measured numeric table exhausts safe padding, avoid replacing a
+    # numeric alignment column with X or changing the template/font as a guess.
+    if overflow_amount:
+        return tex_content, None
+
     # 策略 1: 改用 tabularx
     # 检查是否有文本列 (l, r, c) 可以改为 X 列
     if _has_top_level_text_columns(column_spec):
         # 将 tabular 改为 tabularx，将部分列改为 X 列
         new_column_spec = convert_to_tabularx_columns(column_spec)
-        begin_pattern = re.compile(r"\\begin\{tabular\}\s*" + re.escape(column_spec))
-        new_table, begin_count = begin_pattern.subn(
-            f"\\begin{{tabularx}}{{\\linewidth}}{new_column_spec}",
-            full_table,
-            count=1,
-        )
-        if begin_count <= 0:
+        # 替换文本含 \linewidth / 列规格的反斜杠，必须用函数替换，
+        # 走模板替换会因非法转义（如 \l）抛 re.error。
+        if new_column_spec == column_spec:
             return tex_content, None
+        width = r"\textwidth" if target_match.group(1) == "table*" else r"\linewidth"
+        begin_replacement = f"\\begin{{tabularx}}{{{width}}}{tabular.get('optional_position', '')}{new_column_spec}"
+        new_table = (full_table[:tabular["begin_start"]] + begin_replacement
+                     + full_table[tabular["column_end"]:tabular["end_start"]]
+                     + r"\end{tabularx}" + full_table[tabular["end_end"]:])
 
-        new_table, end_count = re.subn(
-            r"\\end\{tabular\}",
-            r"\\end{tabularx}",
-            new_table,
-            count=1,
-        )
-        if end_count <= 0:
-            return tex_content, None
-
-        modified_content = tex_content.replace(full_table, new_table, 1)
+        modified_content = tex_content[:target_match.start()] + new_table + tex_content[target_match.end():]
         modified_content = _ensure_tabularx_package(modified_content)
         return modified_content, FixResult(
             defect_id="D1",
@@ -731,42 +1301,6 @@ def fix_table_overflow(
             success=True,
         )
 
-    # 策略 2: 添加\small 字号
-    if '\\small' not in full_table and '\\footnotesize' not in full_table:
-        # 在表格环境内、tabular 之前添加 \small
-        tabular_match = re.search(r'\\begin\{tabular\}', full_table)
-        if tabular_match:
-            insert_pos = tabular_match.start()
-            new_table = full_table[:insert_pos] + "\\small\n" + full_table[insert_pos:]
-            modified_content = tex_content.replace(full_table, new_table, 1)
-            return modified_content, FixResult(
-                defect_id="D1",
-                object_name=table_label or "表格",
-                action="在表格环境内添加\\small 字号以压缩表格",
-                before=full_table[:100] + "...",
-                after=new_table[:100] + "...",
-                line_number=line_number,
-                success=True,
-            )
-
-        table_env_match = re.search(
-            r'\\begin\{(table[^}]*)\}(\[[htbp]+\])?',
-            full_table
-        )
-        if table_env_match:
-            insert_pos = table_env_match.end(0)
-            new_table = full_table[:insert_pos] + "\n\\small" + full_table[insert_pos:]
-            modified_content = tex_content.replace(full_table, new_table, 1)
-            return modified_content, FixResult(
-                defect_id="D1",
-                object_name=table_label or "表格",
-                action="在表格环境内添加\\small 字号以压缩表格",
-                before=full_table[:100] + "...",
-                after=new_table[:100] + "...",
-                line_number=line_number,
-                success=True,
-            )
-
     return tex_content, None
 
 
@@ -776,30 +1310,7 @@ def convert_to_tabularx_columns(column_spec: str) -> str:
 
     策略：将最宽的文本列改为 X 列
     """
-    # 移除两侧的 { }
-    spec = column_spec.strip('{}')
-
-    # 统计列类型
-    text_columns = []  # l, r, c 列的位置
-    brace_depth = 0
-    for i, c in enumerate(spec):
-        if c == '{':
-            brace_depth += 1
-            continue
-        if c == '}':
-            brace_depth = max(0, brace_depth - 1)
-            continue
-        if brace_depth == 0 and c in 'lrc':
-            text_columns.append((i, c))
-
-    if not text_columns:
-        return column_spec
-
-    # 将最后一个文本列改为 X 列 (通常是描述性列)
-    last_text_idx, last_type = text_columns[-1]
-    new_spec = spec[:last_text_idx] + 'X' + spec[last_text_idx + 1:]
-
-    return '{' + new_spec + '}'
+    return convert_last_text_column_to_x(column_spec)
 
 
 def _has_top_level_text_columns(column_spec: str) -> bool:
@@ -820,6 +1331,21 @@ def _has_top_level_text_columns(column_spec: str) -> bool:
 # ============================================================
 # D2: 长公式溢出修复
 # ============================================================
+
+_AMSMATH_ENV_RE = re.compile(
+    r"\\begin\{(?:aligned\*?|substack|multline\*?|gather\*?|split)\}|\\substack\{"
+)
+
+
+def _uses_amsmath_envs(snippet: str) -> bool:
+    return bool(_AMSMATH_ENV_RE.search(snippet))
+
+
+def _amsmath_loaded(tex_content: str) -> bool:
+    return bool(
+        re.search(r"\\usepackage(?:\[[^\]]*\])?\{(?:amsmath|mathtools)\}", tex_content)
+    )
+
 
 def fix_equation_overflow(
     tex_content: str,
@@ -852,11 +1378,29 @@ def fix_equation_overflow(
 
     original_equation = match.group(0)
     equation_body = match.group(2)
-    rewritten_equation = _rewrite_equation_to_multline(equation_body)
+    env_name = match.group(1)
+    # 无编号环境（equation*、\[...\]）重写后必须保持无编号：
+    # multline/aligned 默认带编号，会把编号注入原本无编号的公式（内容完整性事故）。
+    starred = env_name is None or env_name.endswith("*")
+    rewritten_equation = _rewrite_equation_to_multline(equation_body, starred=starred)
     if rewritten_equation is None:
-        rewritten_equation = f"\\begin{{multline}}\n{equation_body.strip()}\n\\end{{multline}}"
+        # Renaming an unsplit/already aligned equation to multline does not
+        # create a break and can add horizontal spacing, worsening overflow.
+        # Unsupported structures need a host-selected mathematical layout.
+        return tex_content, None
 
     modified_content = tex_content[:match.start()] + rewritten_equation + tex_content[match.end():]
+    
+    
+    
+    if _uses_amsmath_envs(rewritten_equation) and not _amsmath_loaded(modified_content):
+        insert_at = modified_content.find("\\begin{document}")
+        if insert_at > 0:
+            modified_content = (
+                modified_content[:insert_at]
+                + "\\usepackage{amsmath}\n"
+                + modified_content[insert_at:]
+            )
     return modified_content, FixResult(
         defect_id="D2",
         object_name=equation_label or "公式",
@@ -989,7 +1533,13 @@ def fix_overflow_defects(
     Returns:
         OverflowFixReport: 修复报告
     """
-    tex_path = Path(tex_file_path)
+    tex_path = Path(tex_file_path).resolve()
+    project_root = Path.cwd().resolve()
+    try:
+        main_tex_name = tex_path.relative_to(project_root).as_posix()
+    except ValueError:
+        project_root = tex_path.parent
+        main_tex_name = tex_path.name
     if not tex_path.exists():
         return OverflowFixReport(
             status="failed",
@@ -1003,7 +1553,12 @@ def fix_overflow_defects(
             status="failed",
             unresolved=[f"无法读取文件 {tex_file_path}: {e}"]
         )
-    original_tex_content = tex_content
+    original_contents = {tex_path: tex_content}
+    source_contents = dict(original_contents)
+
+    # 多文件解析：确定 D1 溢出实际发生在哪个 \input 的子文件
+    # LaTeX 日志的行号属于最近打开的子文件，不是 main.tex
+    multi_file_map = _resolve_overfull_file_candidates(project_root, main_tex_name)
 
     modified_files = set()
     changes = []
@@ -1016,6 +1571,40 @@ def fix_overflow_defects(
         object_name = defect.get("object", "")
         overflow_amount = defect.get("overflow_amount", 0)
 
+        # A source line is meaningful only together with its file. Preserve the
+        # host/plan's explicit identity; a legacy line-only collision is unsafe.
+        anchor = defect.get("source_anchor") or {}
+        anchor_file = anchor.get("file")
+        explicit_file = defect.get("source_file") or anchor_file
+        working_path = tex_path
+        if line_number is None:
+            line_number = anchor.get("start_line")
+        if explicit_file:
+            working_path = (project_root / str(explicit_file)).resolve()
+            if anchor_file and (project_root / str(anchor_file)).resolve() != working_path:
+                unresolved.append(f"{defect_id}: source_file and source_anchor disagree")
+                continue
+            try:
+                working_path.relative_to(project_root)
+            except ValueError:
+                unresolved.append(f"{defect_id}: source anchor is outside the paper project")
+                continue
+        elif defect_id in {"D1", "D2"} and line_number is not None:
+            possible_files = multi_file_map.get(line_number, [])
+            if len(possible_files) > 1:
+                unresolved.append(f"{defect_id} L{line_number}: ambiguous source file; provide source_anchor")
+                continue
+            if possible_files:
+                working_path = possible_files[0]
+
+        if working_path not in source_contents:
+            try:
+                source_contents[working_path] = working_path.read_text(encoding="utf-8")
+                original_contents[working_path] = source_contents[working_path]
+            except (OSError, UnicodeDecodeError) as e:
+                unresolved.append(f"{defect_id}: cannot read source {working_path}: {e}")
+                continue
+        tex_content = source_contents[working_path]
         new_content = tex_content
         fix_result = None
 
@@ -1026,7 +1615,16 @@ def fix_overflow_defects(
                     tex_content,
                     table_label=object_name if object_name.startswith("tab:") else None,
                     line_number=line_number,
+                    overflow_amount=overflow_amount,
                 )
+            elif str(defect.get("proposed_action") or "") == "remove_preamble_textheight_shrink" or _line_is_preamble_textheight_shrink(tex_content, line_number):
+                
+                
+                new_content, fix_result = _remove_preamble_textheight_shrink(
+                    tex_content, line_number
+                )
+                if fix_result is not None:
+                    fix_result.defect_id = "D1→A3"
             elif _line_is_within_display_math(tex_content, line_number):
                 new_content, fix_result = fix_equation_overflow(
                     tex_content,
@@ -1036,6 +1634,7 @@ def fix_overflow_defects(
                 new_content, fix_result = fix_table_overflow(
                     tex_content,
                     line_number=line_number,
+                    overflow_amount=overflow_amount,
                 )
             else:
                 new_content, fix_result = fix_paragraph_overflow(
@@ -1062,11 +1661,24 @@ def fix_overflow_defects(
 
         # 检查修复是否成功
         if fix_result and new_content != tex_content:
-            tex_content = new_content
+            source_contents[working_path] = new_content
+            if working_path != tex_path:
+                # Dependencies belong in the real document preamble, never in
+                # an included section after \begin{document}.
+                main_content = source_contents[tex_path]
+                if _uses_amsmath_envs(new_content) and not _amsmath_loaded(main_content):
+                    insert_at = main_content.find(r"\begin{document}")
+                    if insert_at > 0:
+                        main_content = main_content[:insert_at] + "\\usepackage{amsmath}\n" + main_content[insert_at:]
+                if r"\begin{tabularx}" in new_content:
+                    main_content = _ensure_tabularx_package(main_content)
+                if main_content != source_contents[tex_path]:
+                    source_contents[tex_path] = main_content
+                    modified_files.add(str(tex_path))
             fix_result.page = page
             fix_result.line_number = line_number
             changes.append(fix_result)
-            modified_files.add(str(tex_path))
+            modified_files.add(str(working_path))
         else:
             unresolved.append(
                 f"{defect_id} ({object_name or '未知对象'}): 无法自动修复，可能需要语义改写或人工调整"
@@ -1074,17 +1686,20 @@ def fix_overflow_defects(
 
     # 写入修改后的内容
     if modified_files:
-        gate_passed, gate_reason = _passes_structure_write_gate(original_tex_content, tex_content)
-        if not gate_passed:
-            unresolved.append(f"图表结构硬门禁拦截：{gate_reason}")
-            return OverflowFixReport(
-                status="failed",
-                modified_files=[],
-                changes=[],
-                unresolved=unresolved,
-            )
+        # Check every changed include before writing any of them. Included
+        # tables/equations use the same scoped repair and payload gate as main.
+        for file_name in sorted(modified_files):
+            source_path = Path(file_name)
+            gate_passed, gate_reason = _passes_structure_write_gate(
+                original_contents[source_path], source_contents[source_path])
+            if not gate_passed:
+                unresolved.append(f"图表结构硬门禁拦截 ({source_path.name})：{gate_reason}")
+                return OverflowFixReport(
+                    status="failed", modified_files=[], changes=[], unresolved=unresolved)
         try:
-            atomic_write_text(tex_path, tex_content, backup_dir=tex_path.parent / "data" / "backups")
+            for file_name in sorted(modified_files):
+                source_path = Path(file_name)
+                atomic_write_text(source_path, source_contents[source_path], backup_dir=project_root / "data" / "backups")
         except OSError as e:
             unresolved.append(f"无法写入文件 {tex_path}: {e}")
             return OverflowFixReport(

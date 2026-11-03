@@ -1,8 +1,15 @@
 """
+Simplified overflow-repair helpers (DEPRECATED for execution).
+
+The canonical execution adapter is scripts/overflow_fixers.py (routed via
+scripts/fixer_registry.py). This copy lags behind it; use it only for
+reading strategy examples.
 Overflow Repair Fixers - Category D 缺陷修复
 
 处理 overfull hbox、公式溢出、URL 溢出等问题。
 """
+
+from __future__ import annotations
 
 import re
 from pathlib import Path
@@ -204,7 +211,7 @@ def _tighten_table_layout(table_tex: str) -> tuple[str, list[str]]:
 
 
 def fix_table_overflow(tex_content: str, line_number: int | None = None) -> Tuple[str, Dict[str, Any]]:
-    """
+    r"""
     修复表格溢出。
 
     策略：

@@ -8,8 +8,12 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 try:
+    from runtime_artifacts import collect_artifact_manifest
+    from page_objective import page_objective_from_manifest
     from runtime_approval import build_approval_object
 except ModuleNotFoundError:  # package import during unit tests
+    from .runtime_artifacts import collect_artifact_manifest
+    from .page_objective import page_objective_from_manifest
     from .runtime_approval import build_approval_object
 
 
@@ -28,6 +32,44 @@ def _first_present(*values: Any, default: Any = None) -> Any:
         if value is not None:
             return value
     return default
+
+
+def _artifact_identities(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    """Identify checked content without relying on timestamps retained by editors."""
+    entries = manifest.get("artifacts") or {}
+    identities: Dict[str, Any] = {}
+    for key in ("source_set", "pdf", "page_images", "visual_signal_report", "defect_report", "gatekeeper_decision"):
+        entry = entries.get(key)
+        if not isinstance(entry, dict):
+            continue
+        files = entry.get("files") if key == "source_set" else entry.get("pages") if key == "page_images" else [entry]
+        identities[key] = {
+            str(item.get("path")): item.get("sha256") if item.get("exists") else None
+            for item in files or []
+            if isinstance(item, dict)
+        }
+    return identities
+
+
+def _live_artifact_freshness(
+    root: Path, main_tex: Any, artifacts: Dict[str, Any], recorded: Dict[str, Any]
+) -> tuple[Dict[str, Any], list[str]]:
+    recorded_freshness = recorded.get("freshness") or {}
+    # Legacy summaries may contain timestamps only and no local manuscript.
+    # Current results always contain identities; recheck even deleted sources.
+    if (not main_tex or (not artifacts and not recorded.get("artifacts"))
+            or (not (root / str(main_tex)).is_file() and not recorded.get("artifacts"))):
+        return recorded_freshness, []
+    live = collect_artifact_manifest(root, str(main_tex), artifacts)
+    freshness = live["freshness"]
+    old_identities = _artifact_identities(recorded)
+    live_identities = _artifact_identities(live)
+    changed = [key for key, identity in old_identities.items() if live_identities.get(key) != identity]
+    if changed:
+        freshness["status"] = "stale_or_missing"
+        freshness["blocking_checks"].append("artifacts_match_checked_run")
+        freshness["checks"]["artifacts_match_checked_run"] = {"pass": False, "changed_artifacts": changed}
+    return freshness, changed
 
 
 def _sort_defects_for_display(defects: Any) -> list[Dict[str, Any]]:
@@ -202,7 +244,9 @@ def build_runtime_status(
         candidate = Path(str(repair_execution_artifact))
         repair_execution_path = candidate if candidate.is_absolute() else root / candidate
     repair_execution_report = _load_json(repair_execution_path) if repair_execution_path is not None else {}
-    freshness = ((run_result.get("artifact_manifest") or {}).get("freshness") or {})
+    freshness, changed_artifacts = _live_artifact_freshness(
+        root, state.get("main_tex"), artifacts, run_result.get("artifact_manifest") or {}
+    )
     repair_action = ((run_result.get("runtime_actions") or {}).get("repair_plan_executor") or {})
     repair_loop_policy = run_result.get("repair_loop_policy")
     if not isinstance(repair_loop_policy, dict):
@@ -264,6 +308,32 @@ def build_runtime_status(
         runtime_state = "EVALUATING"
     elif gatekeeper_decision == "BLOCKED":
         runtime_state = "BLOCKED"
+    page_manifest = collect_artifact_manifest(root, str(state.get("main_tex") or ""), artifacts) if state.get("main_tex") else {}
+    if page_manifest and freshness.get("status") != "pass":
+        page_manifest["freshness"] = freshness
+    objective = page_objective_from_manifest(task, page_manifest)
+    objective_pending = task.get("target_pages") is not None and objective["target_met"] is not True
+    if runtime_state == "DONE" and objective_pending:
+        runtime_state = "EVALUATING"
+        terminal_success_guard = {"status": "revalidation_required",
+            "failure_type": "current_page_objective_not_met",
+            "reason": "Page target is unmet or unverified for the current PDF",
+            "page_objective": objective}
+    needs_revalidation = runtime_state == "DONE" and freshness.get("status") == "stale_or_missing"
+    if needs_revalidation:
+        runtime_state = "EVALUATING"
+        terminal_success_guard = {
+            "status": "revalidation_required",
+            "failure_type": "current_artifacts_require_revalidation",
+            "reason": "Current source or visual artifacts no longer match the checked run",
+            "artifact_freshness": freshness,
+        }
+    if "source_set" in changed_artifacts:
+        content_integrity = {
+            **content_integrity,
+            "recorded_validation_status": content_integrity.get("validation_status"),
+            "validation_status": "revalidation_required",
+        }
     status_consistency = {
         "state_status": state.get("status"),
         "effective_status": runtime_state,
@@ -283,6 +353,9 @@ def build_runtime_status(
             "runtime.last_runtime_state",
             "repair_loop_policy",
         ]
+    if needs_revalidation:
+        status_consistency["reason"] = "current_artifacts_require_revalidation"
+        status_consistency["stale_sections"] = ["artifact_freshness", "gatekeeper", "content_integrity"]
     repair_plan_json_summary = repair_plan.get("summary") or {}
     b2_width_candidates = (
         repair_plan_summary.get("b2_width_candidates")
@@ -352,9 +425,11 @@ def build_runtime_status(
             "type": task.get("type"),
             "target_pages": task.get("target_pages"),
             "page_budget_scope": task.get("page_budget_scope"),
+            "page_policy": task.get("page_policy") or "at_most",
             "template": task.get("template"),
         },
         "status": runtime_state,
+        "page_objective": objective,
         "gatekeeper_decision": gatekeeper_decision,
         "status_consistency": status_consistency,
         "gatekeeper": {
@@ -365,6 +440,7 @@ def build_runtime_status(
         "visual": {
             "total_findings": int((visual_report.get("summary") or {}).get("total_findings") or 0),
             "b2_width_findings": (visual_report.get("summary") or {}).get("b2_width_findings"),
+            "vlm_diagnosis": visual_report.get("vlm_diagnosis") or {},
         },
         "defect_summary": {
             "initial_total": int(defect_summary.get("initial_total") or 0),
@@ -420,19 +496,22 @@ def build_runtime_status(
         "round_artifact_lineage": round_artifact_lineage,
         "content_integrity": {
             "validation_status": content_integrity.get("validation_status"),
+            "recorded_validation_status": content_integrity.get("recorded_validation_status"),
             "action_taken": content_integrity.get("action_taken"),
             "rollback_target": content_integrity.get("rollback_target"),
         },
         "artifact_freshness": {
             "status": freshness.get("status"),
             "blocking_checks": freshness.get("blocking_checks") or [],
+            "changed_artifacts": changed_artifacts,
         },
         "terminal_success_guard": terminal_success_guard,
-        "next_actions": state.get("next_actions") or [],
+        "next_actions": ["Run fresh diagnostics and inspect the current page images before final acceptance"]
+        if needs_revalidation else state.get("next_actions") or [],
     }
     if result_path is not None:
         try:
-            status["run_result_path"] = str(result_path.resolve().relative_to(root))
+            status["run_result_path"] = result_path.resolve().relative_to(root).as_posix()
         except ValueError:
-            status["run_result_path"] = str(result_path)
+            status["run_result_path"] = Path(result_path).as_posix()
     return status

@@ -1,4 +1,8 @@
 """
+Full-width table strategy helpers (NOT wired into the executor).
+
+scripts/repair_plan_executor.py never routes here; treat this as a
+reference implementation until it is registered in fixer_registry.py.
 Full-Width and Reference Separation Fixers
 
 确保：
@@ -11,6 +15,8 @@ Full-Width and Reference Separation Fixers
 - 强制使用 tabularx 宏包配合 \\textwidth
 - 通过自动弹性列（X 格式）、动态字号、列间距微调实现满宽
 """
+
+from __future__ import annotations
 
 import re
 from typing import Any, Dict, Tuple

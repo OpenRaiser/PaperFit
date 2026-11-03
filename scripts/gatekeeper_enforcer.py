@@ -22,6 +22,10 @@ except ImportError:
 
 from state_schema import normalize_state, validate_state
 from transactional_patch import atomic_write_text
+from layout_policy import snapshot_source_edit_checks, _relative_path
+from visibility_review import review_pdf_visibility
+from runtime_artifacts import collect_artifact_manifest
+from page_objective import page_objective_from_manifest
 
 
 DEFAULT_GATEKEEPER_RULES: Dict[str, Any] = {
@@ -167,6 +171,7 @@ def _summarize_defects(state: Dict[str, Any], defects_payload: Any) -> Dict[str,
                 "page": defect.get("page"),
                 "label": defect.get("label"),
                 "description": defect.get("description"),
+                "source": defect.get("source"),
             }
         )
 
@@ -228,39 +233,42 @@ def _category_passes(
     }
 
 
-def _load_rule_report_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
+def _load_rule_report_from_state(state: Dict[str, Any], project_root: Path | None = None) -> Dict[str, Any]:
     artifacts = state.get("artifacts") or {}
     candidate = artifacts.get("rule_report")
     if not candidate:
         return {}
     path = Path(candidate)
     if not path.is_absolute():
-        path = Path.cwd() / path
+        path = (project_root or Path.cwd()) / path
     return _load_json(path)
 
 
-def _load_visual_report_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
+def _load_visual_report_from_state(state: Dict[str, Any], project_root: Path | None = None) -> Dict[str, Any]:
     artifacts = state.get("artifacts") or {}
     candidate = artifacts.get("visual_signal_report")
     if not candidate:
         return {}
     path = Path(candidate)
     if not path.is_absolute():
-        path = Path.cwd() / path
+        path = (project_root or Path.cwd()) / path
     return _load_json(path)
 
 
-def _page_budget_defect_from_state(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _page_budget_defect_from_state(state: Dict[str, Any], objective: Optional[Dict[str, Any]] = None, project_root: Path | None = None) -> Optional[Dict[str, Any]]:
     task = state.get("task") or {}
     target_pages = int(task.get("target_pages") or 0)
     if target_pages <= 0:
         return None
-    if str(task.get("page_budget_scope") or "") == "main_body":
+    if str(task.get("page_budget_scope") or "") in {"main_body", "with_refs"}:
         return None
 
-    visual_report = _load_visual_report_from_state(state)
-    current_pages = int(((visual_report.get("summary") or {}).get("pages_analyzed")) or 0)
-    if current_pages <= target_pages:
+    visual_report = _load_visual_report_from_state(state, project_root)
+    current_pages = int((objective or {}).get("measured_pages") or ((visual_report.get("summary") or {}).get("pages_analyzed")) or 0)
+    if task.get("page_policy") == "exact":
+        if current_pages <= 0 or current_pages == target_pages:
+            return None
+    elif current_pages <= target_pages:
         return None
 
     return {
@@ -279,7 +287,21 @@ def make_decision(
     defects_payload: Dict[str, Any],
     strict_mode: bool,
     semantic_report_path: Path | None,
+    vlm_gated_score: float | None = None,
+    layout_policy_approvals: Optional[List[Dict[str, Any]]] = None,
+    project_root: Path | None = None,
+    review_context: Optional[Dict[str, str]] = None,
+    source_reviews: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
+    root = Path(project_root).resolve() if project_root is not None else Path.cwd().resolve()
+    main_tex = state.get("main_tex") or (state.get("task") or {}).get("main_tex")
+    def matches_main(context):
+        try:
+            return isinstance(context, dict) and isinstance(main_tex, str) and _relative_path(root, context.get("main_tex", "")) == _relative_path(root, main_tex)
+        except (ValueError, TypeError):
+            return False
+    review_context = review_context if matches_main(review_context) else None
+    source_reviews = [item for item in source_reviews or () if isinstance(item, dict) and matches_main(item.get("context"))]
     rules = (_load_layout_rules().get("gatekeeper") or DEFAULT_GATEKEEPER_RULES)
     checks: Dict[str, Dict[str, Any]] = {}
     reasons: List[str] = []
@@ -321,6 +343,46 @@ def make_decision(
         decision = "CONTINUE"
         reasons.append("visual signal evidence missing/incomplete")
 
+    # Recheck the live physical PDF. A stale report or an empty VLM diagnosis
+    # must not hide off-page glyphs. This requests review, not source rollback.
+    if isinstance(main_tex, str) and main_tex.strip() and compile_success:
+        main_path = (root / main_tex).resolve()
+        visibility = review_pdf_visibility(main_path.with_suffix('.pdf'), root=root,
+                               reviews_path=root / 'data/pdf_visibility_reviews.json')
+    else:
+        visibility = {"pass": True, "status": "not_used", "checked": False,
+                      "reason": "no_compiled_main_in_state", "findings": []}
+    checks["pdf_visibility"] = visibility
+    if not visibility["pass"]:
+        decision = "CONTINUE"
+        reasons.append("physical PDF text visibility requires current evidence or host review")
+
+    task = state.get("task") or {}
+    if isinstance(main_tex, str) and main_tex.strip():
+        page_manifest = collect_artifact_manifest(root, main_tex, artifacts)
+    else:
+        page_manifest = {}
+    # The gatekeeper report is being produced now, so its previous timestamp
+    # cannot be a prerequisite for measuring the current PDF. Vision/render
+    # freshness remains an independent terminal gate.
+    page_checks = (page_manifest.get("freshness") or {}).get("checks") or {}
+    if page_checks:
+        current_pdf = all(page_checks.get(key, {}).get("pass") is True for key in
+                          ("pdf_exists", "native_build_inputs_current", "pdf_not_older_than_source_set", "pdf_page_count_available"))
+        page_manifest = {**page_manifest, "freshness": {"status": "pass" if current_pdf else "stale_or_missing"}}
+        checks["native_build_inputs"] = page_checks.get("native_build_inputs_current") or {
+            "pass": False, "status": "unknown", "source_pdf_binding": "unverified",
+            "reason": "native_build_input_check_unavailable",
+        }
+        if not current_pdf:
+            decision = "CONTINUE"
+            reasons.append("current PDF has no verified native input binding")
+    objective = page_objective_from_manifest(task, page_manifest)
+    checks["page_objective"] = {**objective, "pass": objective["target_met"]}
+    if task.get("target_pages") is not None and objective["target_met"] is not True:
+        decision = "CONTINUE"
+        reasons.append("page objective is unmet or unverified")
+
     semantic_summary = state.get("semantic_budget_summary")
     semantic_used = semantic_summary is not None or artifacts.get("semantic_patch_report") is not None
     if semantic_used:
@@ -330,6 +392,8 @@ def make_decision(
         ok = False
         msg = "semantic report path unavailable"
         if semantic_report_path is not None:
+            if not semantic_report_path.is_absolute():
+                semantic_report_path = root / semantic_report_path
             ok, msg = _validate_semantic_report(semantic_report_path)
         summary_ok = isinstance(semantic_summary, dict)
         checks["semantic_report"] = {
@@ -371,7 +435,7 @@ def make_decision(
         decision = "CONTINUE"
         reasons.append(f"repair execution status={repair_status}")
 
-    rule_report = _load_rule_report_from_state(state)
+    rule_report = _load_rule_report_from_state(state, root)
     rule_summary = rule_report.get("summary") or {}
     undefined_references = int(rule_summary.get("undefined_references") or 0)
     undefined_citations = int(rule_summary.get("citation_issues") or 0)
@@ -402,8 +466,55 @@ def make_decision(
         decision = "CONTINUE"
         reasons.append("content_integrity missing for semantic round")
 
+    # Recompute from the verified baseline and live sources, including includes.
+    # A past clean policy report cannot authorize a later host edit.
+    rollback_target = ci.get("rollback_target")
+    if not rollback_target:
+        snapshot = artifacts.get("pre_repair_snapshot") or {}
+        if isinstance(snapshot, dict):
+            rollback_target = snapshot.get("rollback_target")
+    mutation_used = repair_used or str(ci.get("validation_status") or "").startswith("mutation")
+    if rollback_target:
+        source_checks = snapshot_source_edit_checks(root, rollback_target, approvals=layout_policy_approvals or (),
+                                                   review_context=review_context, source_reviews=source_reviews)
+        policy = source_checks["layout_policy"]
+        prose = source_checks["layout_prose"]
+        scientific = source_checks["scientific_payload"]
+    elif mutation_used:
+        policy = {"checked": False, "status": "manual_review", "findings": [], "reason": "source-changing acceptance requires a verified policy baseline"}
+        prose = dict(policy)
+        scientific = dict(policy)
+    else:
+        policy = {"checked": False, "status": "not_used", "findings": []}
+        prose = dict(policy)
+        scientific = dict(policy)
+    policy_pass = policy.get("status") in {"pass", "not_used"}
+    checks["layout_policy"] = {"pass": policy_pass, **policy}
+    if policy.get("status") == "blocked":
+        decision = "BLOCKED"
+        reasons.append("new or changed forbidden layout operation")
+    elif not policy_pass and decision != "BLOCKED":
+        decision = "CONTINUE"
+        reasons.append("layout policy requires independent review or a valid baseline")
+    prose_pass = prose.get("status") in {"pass", "not_used"}
+    checks["layout_prose"] = {"pass": prose_pass, **prose}
+    if prose.get("status") == "blocked":
+        decision = "BLOCKED"
+        reasons.append("ordinary prose changed during layout-only repair")
+    elif not prose_pass and decision != "BLOCKED":
+        decision = "CONTINUE"
+        reasons.append("layout-only prose preservation requires a valid baseline")
+    scientific_pass = scientific.get("status") in {"pass", "not_used"}
+    checks["scientific_payload"] = {"pass": scientific_pass, **scientific}
+    if scientific.get("status") == "blocked":
+        decision = "BLOCKED"
+        reasons.append("protected scientific payload changed in current source")
+    elif not scientific_pass and decision != "BLOCKED":
+        decision = "CONTINUE"
+        reasons.append("scientific payload preservation requires a valid baseline")
+
     defect_summary = _summarize_defects(state, defects_payload)
-    page_budget_defect = _page_budget_defect_from_state(state)
+    page_budget_defect = _page_budget_defect_from_state(state, objective, root)
     if page_budget_defect is not None:
         defect_summary["open_defects"].append(page_budget_defect)
         defect_summary["by_severity"]["critical"] += 1
@@ -430,6 +541,24 @@ def make_decision(
             decision = "CONTINUE"
         reasons.append("major alignment overflow remains")
 
+    # 源码卫生（未解析 ?? / 乱码占位符）的 critical 发现必须压住 DONE，
+    # 即便 normal 模式的 C 类阈值列表为空——这类问题不是排版风格问题。
+    hygiene_criticals = sum(
+        1
+        for defect in defect_summary["open_defects"]
+        if str(defect.get("source") or "") == "source_hygiene_report"
+        and str(defect.get("severity") or "") == "critical"
+    )
+    checks["source_hygiene_critical"] = {
+        "pass": hygiene_criticals == 0,
+        "blocking_count": hygiene_criticals,
+    }
+    if hygiene_criticals > 0:
+        checks["defects"]["pass"] = False
+        if decision != "BLOCKED":
+            decision = "CONTINUE"
+        reasons.append("critical source-hygiene findings remain (unresolved references or mojibake)")
+
     for category in ("A", "B", "C", "D", "E", "SYSTEM"):
         result = _category_passes(
             category=category,
@@ -447,6 +576,23 @@ def make_decision(
     if checks["defects"]["pass"]:
         checks["defects"]["pass"] = alignment_blockers == 0
 
+    # M4：VLM 分数降级门（可选，只降不升——方案第十五节：VLM 不适合单独决定
+    # 编译成功或内容完整，但低分可以阻止不合格的 DONE）
+    if vlm_gated_score is not None and decision == "DONE":
+        VLM_SCORE_THRESHOLD = 3.0  # 5 分制
+        score_pass = float(vlm_gated_score) >= VLM_SCORE_THRESHOLD
+        checks["vlm_gated_score"] = {
+            "pass": score_pass,
+            "value": float(vlm_gated_score),
+            "threshold": VLM_SCORE_THRESHOLD,
+        }
+        if not score_pass:
+            decision = "CONTINUE"
+            reasons.append(
+                f"VLM gated score {vlm_gated_score:.2f} below threshold {VLM_SCORE_THRESHOLD}; "
+                "visual quality not sufficient for DONE"
+            )
+
     return {
         "gatekeeper": "quality-gatekeeper-enforcer",
         "timestamp": datetime.now().isoformat(),
@@ -461,12 +607,16 @@ def make_decision(
             "compile": checks["compile_success"]["pass"],
             "page_images": checks["page_images_rendered"]["pass"],
             "visual_inspection": checks["visual_inspection"]["pass"],
+            "pdf_visibility": checks["pdf_visibility"]["pass"],
             "category_A": checks["category_A"]["pass"],
             "category_B": checks["category_B"]["pass"],
             "category_C": checks["category_C"]["pass"],
             "category_D": checks["category_D"]["pass"],
             "category_E": checks["category_E"]["pass"],
             "content_integrity": checks["content_integrity"]["pass"],
+            "layout_policy": checks["layout_policy"]["pass"],
+            "layout_prose": checks["layout_prose"]["pass"],
+            "scientific_payload": checks["scientific_payload"]["pass"],
             "repair_execution": checks["repair_execution"]["pass"],
             "semantic_report": checks["semantic_report"]["pass"],
         },
@@ -475,11 +625,18 @@ def make_decision(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="PaperFit gatekeeper decision enforcer")
+    parser.add_argument("--root", type=Path, default=None, help="Project root; defaults to cwd")
+    parser.add_argument("--layout-review-json", action="append", default=[], help="Strict current-source/PDF/all-pages bound layout review; repeat for changed files")
+    parser.add_argument("--source-review-json", action="append", default=[], help="Explicit classified-source uncertainty review; repeat for changed files")
     parser.add_argument("--state", default="data/state.json", help="Path to state.json")
     parser.add_argument("--defects", default=None, help="Path to defects json")
     parser.add_argument("--strict", action="store_true", help="Strict mode: minor defects block DONE")
     parser.add_argument(
         "--semantic-report", default=None, help="Path to semantic_patch_report.json"
+    )
+    parser.add_argument(
+        "--layout-policy-approvals", default=None,
+        help="Host-reviewed exact spacing/endmatter approvals JSON; never inferred from VLM findings",
     )
     parser.add_argument(
         "--output",
@@ -491,22 +648,56 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    state_path = Path(args.state)
+    root = args.root.resolve() if args.root is not None else Path.cwd().resolve()
+    state_path = root / args.state
     state = normalize_state(_load_json(state_path))
-    defects_path: Optional[Path] = Path(args.defects) if args.defects else None
+    # Decision reports are separate from source, state and review inputs.
+    # Reject a mistaken destination before any decision or state write occurs.
+    out_path = (root / args.output).resolve()
+    protected = {state_path.resolve()}
+    for value in (args.defects, args.semantic_report, args.layout_policy_approvals,
+                  *args.layout_review_json, *args.source_review_json):
+        if value:
+            protected.add((root / value).resolve())
+    for key in ('defect_report', 'rule_report', 'visual_signal_report'):
+        value = (state.get('artifacts') or {}).get(key)
+        if isinstance(value, str) and value:
+            protected.add((root / value).resolve())
+    actual_main = state.get('main_tex') or (state.get('task') or {}).get('main_tex')
+    if isinstance(actual_main, str) and actual_main:
+        main_path = (root / actual_main).resolve()
+        protected.update((main_path, main_path.with_suffix('.pdf'), main_path.with_suffix('.log')))
+        from runtime_snapshots import discover_source_files
+        protected.update(path.resolve() for path in discover_source_files(root, actual_main))
+    if out_path in protected:
+        parser.error('decision report cannot replace a manuscript, state, artifact or review input')
+    try:
+        if args.layout_policy_approvals and args.layout_review_json:
+            raise ValueError("use strict --layout-review-json separately from legacy --layout-policy-approvals")
+        # The shared loader is read-only; it never executes repair candidates.
+        from repair_plan_executor import _explicit_review_inputs
+        actual_main = state.get("main_tex") or (state.get("task") or {}).get("main_tex")
+        if (args.layout_review_json or args.source_review_json) and not actual_main:
+            raise ValueError("explicit review requires the actual task main_tex")
+        approvals, context, source_reviews = _explicit_review_inputs(root, actual_main or "main.tex", args.layout_review_json, args.source_review_json)
+        if args.layout_policy_approvals:
+            approvals = _load_json(root / args.layout_policy_approvals).get("approvals") or []
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        parser.error(str(error))
+    defects_path: Optional[Path] = root / args.defects if args.defects else None
     if defects_path is None:
         candidate = ((state.get("artifacts") or {}).get("defect_report"))
         if candidate:
-            defects_path = Path(candidate)
+            defects_path = root / candidate
     defects_payload = _load_json(defects_path) if defects_path else {}
     decision = make_decision(
         state=state,
         defects_payload=defects_payload,
         strict_mode=args.strict or bool(((state.get("task") or {}).get("strict_mode"))),
-        semantic_report_path=Path(args.semantic_report) if args.semantic_report else None,
+        semantic_report_path=root / args.semantic_report if args.semantic_report else None,
+        layout_policy_approvals=approvals, project_root=root, review_context=context, source_reviews=source_reviews,
     )
 
-    out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(
         out_path,
@@ -523,7 +714,7 @@ def main() -> None:
         )
         try:
             state["artifacts"]["gatekeeper_decision"] = str(
-                out_path.resolve().relative_to(Path.cwd().resolve())
+                out_path.resolve().relative_to(root)
             )
         except ValueError:
             state["artifacts"]["gatekeeper_decision"] = str(out_path.resolve())

@@ -1,4 +1,9 @@
 """
+Semantic micro-tuning helpers (NOT wired into the executor).
+
+The runtime-controlled semantic path is scripts/semantic_budgeter.py
+(guarded writes, risk scores, audit reports); treat this module as a
+reference implementation only.
 Semantic Micro-Tuning - 语义级动态微调执行器
 
 当物理排版手段（\looseness、浮动体参数等）用尽后，
@@ -72,6 +77,32 @@ def minimalist_shorten(
     modified = section_content
     words_removed = 0
 
+    def _shrink_with_budget(text: str, pattern: str, replacement: str, changes: List[Dict[str, Any]]) -> Tuple[str, int]:
+        """逐个替换匹配并把游标移过替换文本，避免缓存偏移失效/自我包含死循环。"""
+        regex = re.compile(pattern)
+        removed = 0
+        pos = 0
+        while True:
+            match = regex.search(text, pos)
+            if match is None:
+                break
+            old_words = match.group(0).split()
+            new_words = replacement.split() if replacement else []
+            saved = len(old_words) - len(new_words)
+            if saved <= 0:
+                pos = match.end()
+                continue
+            text = text[: match.start()] + replacement + text[match.end():]
+            pos = match.start() + len(replacement)
+            removed += saved
+            changes.append({
+                "type": "pattern_shorten",
+                "original": match.group(0),
+                "replacement": replacement or "(deleted)",
+                "words_saved": saved,
+            })
+        return text, removed
+
     # 策略 1: 精简填充词（最高优先级，最安全）
     filler_patterns = [
         (r'\bin order to\b', 'to'),  # 节省 2 词
@@ -87,75 +118,40 @@ def minimalist_shorten(
     ]
 
     for pattern, replacement in filler_patterns:
-        matches = list(re.finditer(pattern, modified))
-        for match in matches:
-            if words_removed >= max_words_to_remove:
-                break
-            old_words = match.group(0).split()
-            new_words = replacement.split() if replacement else []
-            saved = len(old_words) - len(new_words)
-            if saved > 0:
-                modified = modified[:match.start()] + replacement + modified[match.end():]
-                words_removed += saved
-                change_record["changes"].append({
-                    "type": "filler_removal",
-                    "original": match.group(0),
-                    "replacement": replacement or "(deleted)",
-                    "words_saved": saved,
-                })
+        if words_removed >= max_words_to_remove:
+            break
+        modified, removed = _shrink_with_budget(modified, pattern, replacement, change_record["changes"])
+        words_removed += removed
 
     # 策略 2: 被动语态 → 主动语态（谨慎使用，需要上下文理解）
     # 仅处理简单模式：is/are + V-ed + by → 主动
     passive_patterns = [
-        (r'\bwas conducted by\b', ' conducted'),  # "was conducted by authors" → "authors conducted"
-        (r'\bwere performed by\b', ' performed'),
-        (r'\bis proposed by\b', ' proposed'),
+        (r'\bwas conducted by\b', 'conducted'),  # "X was conducted by Y" → "Y conducted X" 结构简化
+        (r'\bwere performed by\b', 'performed'),
+        (r'\bis proposed by\b', 'proposed'),
     ]
 
     for pattern, replacement in passive_patterns:
         if words_removed >= max_words_to_remove:
             break
-        matches = list(re.finditer(pattern, modified))
-        for match in matches:
-            # 检查后文是否有 by 的执行者（简化处理：直接删除 was/were）
-            old_words = match.group(0).split()
-            new_words = replacement.split()
-            saved = len(old_words) - len(new_words)
-            modified = modified[:match.start()] + replacement + modified[match.end():]
-            words_removed += saved
-            change_record["changes"].append({
-                "type": "passive_to_active",
-                "original": match.group(0),
-                "replacement": replacement,
-                "words_saved": saved,
-            })
+        modified, removed = _shrink_with_budget(modified, pattern, replacement, change_record["changes"])
+        words_removed += removed
 
     # 策略 3: 合并从句（which/that → 分词）
     # "which shows that" → "showing"
     clause_patterns = [
-        (r'\bwhich demonstrates\b', ' demonstrating'),
-        (r'\bwhich indicates\b', ' indicating'),
-        (r'\bwhich suggests\b', ' suggesting'),
-        (r'\bwhich reveals\b', ' revealing'),
-        (r'\bthat is based on\b', ' based on'),
+        (r'\bwhich demonstrates\b', 'demonstrating'),
+        (r'\bwhich indicates\b', 'indicating'),
+        (r'\bwhich suggests\b', 'suggesting'),
+        (r'\bwhich reveals\b', 'revealing'),
+        (r'\bthat is based on\b', 'based on'),
     ]
 
     for pattern, replacement in clause_patterns:
         if words_removed >= max_words_to_remove:
             break
-        matches = list(re.finditer(pattern, modified))
-        for match in matches:
-            old_words = match.group(0).split()
-            new_words = replacement.split()
-            saved = len(old_words) - len(new_words)
-            modified = modified[:match.start()] + replacement + modified[match.end():]
-            words_removed += saved
-            change_record["changes"].append({
-                "type": "clause_reduction",
-                "original": match.group(0),
-                "replacement": replacement,
-                "words_saved": saved,
-            })
+        modified, removed = _shrink_with_budget(modified, pattern, replacement, change_record["changes"])
+        words_removed += removed
 
     change_record["words_removed"] = words_removed
     if words_removed > 0:
@@ -224,7 +220,8 @@ def deep_expand(
     words_added = 0
 
     # 策略 1: 添加逻辑连接词（最安全，最自然）
-    # 在段首或句首添加连接词
+    # 在段首或句首添加连接词；替换文本用 match.expand 展开（\1 等组引用），
+    # 且游标越过替换点，避免缓存偏移失效。
     transition_additions = [
         (r'^(\\?This)', r'Notably, \1'),  # 添加在段首
         (r'^(\\?These)', r'Furthermore, \1'),
@@ -235,22 +232,31 @@ def deep_expand(
     for pattern, replacement in transition_additions:
         if words_added >= max_words_to_add:
             break
-        matches = list(re.finditer(pattern, modified, re.MULTILINE))
-        for match in matches:
-            added_phrase = replacement.replace('\\1', '').replace(match.group(1), '').strip()
-            added_words = len(added_phrase.split())
-            if added_words > 0 and words_added + added_words <= max_words_to_add:
-                modified = modified[:match.start()] + replacement + modified[match.end():]
-                words_added += added_words
-                change_record["changes"].append({
-                    "type": "transition_added",
-                    "location": match.start(),
-                    "added": added_phrase,
-                    "words_added": added_words,
-                })
+        regex = re.compile(pattern, re.MULTILINE)
+        pos = 0
+        while words_added < max_words_to_add:
+            match = regex.search(modified, pos)
+            if match is None:
+                break
+            new_text = match.expand(replacement)
+            added_words = len(new_text.split()) - len(match.group(0).split())
+            if added_words <= 0 or words_added + added_words > max_words_to_add:
+                pos = match.end()
+                continue
+            modified = modified[: match.start()] + new_text + modified[match.end():]
+            pos = match.start() + len(new_text)
+            words_added += added_words
+            change_record["changes"].append({
+                "type": "transition_added",
+                "original": match.group(0),
+                "added_text": new_text,
+                "words_added": added_words,
+            })
 
     # 策略 2: 扩展结果讨论句型
-    # "X improves Y" → "X significantly improves Y, which suggests..."
+    # "X improves Y" → "X significantly improves Y"
+    # 注意替换文本包含原词（significantly improves 含 improves），
+    # 游标必须越过替换点，否则同一处会被反复匹配。
     expansion_patterns = [
         (r'\bimproves\b', 'significantly improves'),  # +1 词
         (r'\benhances\b', 'substantially enhances'),  # +1 词
@@ -261,47 +267,53 @@ def deep_expand(
     for pattern, replacement in expansion_patterns:
         if words_added >= max_words_to_add:
             break
-        matches = list(re.finditer(pattern, modified))
-        for match in matches:
+        regex = re.compile(pattern)
+        pos = 0
+        while words_added < max_words_to_add:
+            match = regex.search(modified, pos)
+            if match is None:
+                break
             added_words = len(replacement.split()) - len(match.group(0).split())
-            if added_words > 0 and words_added + added_words <= max_words_to_add:
-                modified = modified[:match.start()] + replacement + modified[match.end():]
-                words_added += added_words
-                change_record["changes"].append({
-                    "type": "adverb_added",
-                    "original": match.group(0),
-                    "expanded": replacement,
-                    "words_added": added_words,
-                })
-
-    # 策略 3: 添加因果解释（高质量扩容）
-    # 在关键陈述后添加 "This result aligns with..." 或 "This finding suggests..."
-    # 查找句号后跟随大写字母的位置
-    sentence_endings = list(re.finditer(r'\.\\?\s*\\?([A-Z])', modified))
-    for match in sentence_endings:
-        if words_added >= max_words_to_add:
-            break
-        # 随机选择一个扩展短语（简化：总是添加相同的）
-        expansion_phrases = [
-            " This finding aligns with prior work.",
-            " This result demonstrates the effectiveness of our approach.",
-            " Notably, this improvement is consistent across all benchmarks.",
-        ]
-        # 选择第一个（实际应用中可根据上下文选择）
-        phrase = expansion_phrases[words_added % len(expansion_phrases)]
-        added_words = len(phrase.split())
-        if words_added + added_words <= max_words_to_add:
-            # 在句号后插入
-            insert_pos = match.end() - 1  # 句号位置
-            # 找到句号的实际位置（考虑 LaTeX 转义）
-            full_match_end = match.end()
-            modified = modified[:insert_pos] + phrase + modified[insert_pos:]
+            if added_words <= 0 or words_added + added_words > max_words_to_add:
+                pos = match.end()
+                continue
+            modified = modified[: match.start()] + replacement + modified[match.end():]
+            pos = match.start() + len(replacement)
             words_added += added_words
             change_record["changes"].append({
-                "type": "causal_explanation",
-                "added": phrase.strip(),
+                "type": "adverb_added",
+                "original": match.group(0),
+                "expanded": replacement,
                 "words_added": added_words,
             })
+
+    # 策略 3: 添加因果解释（高质量扩容）
+    # 在句号之后、下一句之前插入完整短句；每次插入后游标越过新插入文本。
+    expansion_phrases = [
+        " This finding aligns with prior work.",
+        " This result demonstrates the effectiveness of our approach.",
+        " Notably, this improvement is consistent across all benchmarks.",
+    ]
+    sentence_regex = re.compile(r'\.\\?\s*\\?([A-Z])')
+    pos = 0
+    while words_added < max_words_to_add:
+        match = sentence_regex.search(modified, pos)
+        if match is None:
+            break
+        phrase = expansion_phrases[words_added % len(expansion_phrases)]
+        added_words = len(phrase.split())
+        if words_added + added_words > max_words_to_add:
+            pos = match.end()
+            continue
+        insert_pos = match.start() + 1  # 句号之后
+        modified = modified[:insert_pos] + phrase + modified[insert_pos:]
+        pos = insert_pos + len(phrase)
+        words_added += added_words
+        change_record["changes"].append({
+            "type": "causal_explanation",
+            "added": phrase.strip(),
+            "words_added": added_words,
+        })
 
     change_record["words_added"] = words_added
     if words_added > 0:
@@ -348,6 +360,7 @@ def semantic_intervention(
             # 默认不干预
             change_record["note"] = "page_deficit required for auto mode"
             return tex_content, change_record
+    change_record["intervention_type"] = intervention_type
 
     if intervention_type == "shorten":
         modified, shorten_record = minimalist_shorten(tex_content, target_section)

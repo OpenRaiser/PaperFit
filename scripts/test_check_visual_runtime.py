@@ -24,6 +24,41 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _run_cli(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout: int = 120,
+    check: bool = True,
+) -> subprocess.CompletedProcess:
+    """以显式 UTF-8 解码捕获 CLI 输出（Windows GBK locale 安全）。
+
+    只写 text=True 不写 encoding 时，读者线程按本地代码页（cp936）解码，
+    遇到非 GBK 字节抛 UnicodeDecodeError，stdout 变 None。这里显式
+    encoding/errors 并把 None 归一化为 ""，保证夹具产出的
+    CompletedProcess 永远 stdout/stderr 可读、returncode 保真。
+    """
+    result = subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd is not None else None,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        check=False,
+    )
+    completed = subprocess.CompletedProcess(
+        args=cmd,
+        returncode=result.returncode,
+        stdout="" if result.stdout is None else result.stdout,
+        stderr="" if result.stderr is None else result.stderr,
+    )
+    if check:
+        completed.check_returncode()
+    return completed
+
+
 class CheckVisualRuntimeTest(unittest.TestCase):
     def test_infer_repair_this_paper_layout_as_full_vto(self) -> None:
         inferred = OrchestratorRuntime.infer_task_from_request(
@@ -458,7 +493,10 @@ class CheckVisualRuntimeTest(unittest.TestCase):
                 mock.patch.object(paperfit_command, "_migrate_template") as legacy_migrator,
                 mock.patch("builtins.print"),
             ):
-                paperfit_command.main()
+                # P2 契约：源码改动型命令现在用退出码报告"无新 PDF"，dry-run 期望 SystemExit
+                with self.assertRaises(SystemExit) as exit_ctx:
+                    paperfit_command.main()
+                self.assertIn(exit_ctx.exception.code, (0, 2))
 
             self.assertFalse(legacy_migrator.called)
             self.assertEqual(typed_runner.call_args.args[0], root.resolve())
@@ -508,7 +546,9 @@ class CheckVisualRuntimeTest(unittest.TestCase):
                 mock.patch.object(paperfit_command, "_migrate_template") as legacy_migrator,
                 mock.patch("builtins.print") as print_mock,
             ):
-                paperfit_command.main()
+                with self.assertRaises(SystemExit) as stopped:
+                    paperfit_command.main()
+                self.assertEqual(stopped.exception.code, 2)
 
             self.assertFalse(legacy_migrator.called)
             self.assertFalse(typed_runner.called)
@@ -819,6 +859,8 @@ class CheckVisualRuntimeTest(unittest.TestCase):
                 template: str | None,
                 target_pages: int | None,
                 page_dir: str,
+                page_policy: str = "at_most",
+                page_budget_scope: str | None = None,
             ) -> dict[str, object]:
                 state = {
                     "main_tex": main_tex.name,
@@ -887,18 +929,8 @@ class CheckVisualRuntimeTest(unittest.TestCase):
         node_cli = repo_root / "bin" / "paperfit.js"
         py_cli = repo_root / "scripts" / "paperfit_command.py"
 
-        node_help = subprocess.run(
-            ["node", str(node_cli), "run-agent", "--help"],
-            check=True,
-            text=True,
-            capture_output=True,
-        ).stdout
-        py_help = subprocess.run(
-            [sys.executable, str(py_cli), "run-agent", "--help"],
-            check=True,
-            text=True,
-            capture_output=True,
-        ).stdout
+        node_help = _run_cli(["node", str(node_cli), "run-agent", "--help"]).stdout
+        py_help = _run_cli([sys.executable, str(py_cli), "run-agent", "--help"]).stdout
 
         self.assertIn("source-changing typed runtime", node_help)
         self.assertNotIn("typed fix-layout", node_help)
@@ -1019,6 +1051,52 @@ class CheckVisualRuntimeTest(unittest.TestCase):
             self.assertFalse(task.dry_run_source_mutation)
             self.assertEqual(captured["output_path"], "data/run_result_fix_layout_typed.json")
             self.assertFalse(report["dry_run_source_mutation"])
+
+
+class CliCaptureFixtureTest(unittest.TestCase):
+    """夹具自检：_run_cli 在命令失败、无输出、非 GBK 字节输出下都可读。"""
+
+    def test_failed_command_keeps_readable_streams(self) -> None:
+        result = _run_cli(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.write('partial out'); "
+                "sys.stderr.write('boom'); sys.exit(3)",
+            ],
+            check=False,
+        )
+        self.assertEqual(result.returncode, 3)
+        self.assertIsInstance(result.stdout, str)
+        self.assertIsInstance(result.stderr, str)
+        self.assertIn("partial out", result.stdout)
+        self.assertIn("boom", result.stderr)
+
+    def test_no_output_command_returns_empty_strings_not_none(self) -> None:
+        result = _run_cli([sys.executable, "-c", "pass"], check=False)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+
+    def test_non_gbk_byte_output_stays_readable(self) -> None:
+        # 模拟 TeX 编译日志：UTF-8 数学符号 + 根本不在 GBK 里的字节
+        result = _run_cli(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write("
+                "'Overfull \\\\hbox (12.34pt too wide) étendu ✓\\n'.encode('utf-8') + b'\\x81\\x8b\\xff\\xfe'); "
+                "sys.stdout.buffer.flush(); sys.stderr.buffer.write(b'\\x81 log')",
+            ],
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIsInstance(result.stdout, str)
+        self.assertIsInstance(result.stderr, str)
+        self.assertIn("Overfull", result.stdout)
+        self.assertIn("12.34pt", result.stdout)
+        # stderr 含非 GBK 字节也必须可读（替换字符），不能是 None
+        self.assertIn("log", result.stderr)
 
 
 if __name__ == "__main__":

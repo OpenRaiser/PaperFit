@@ -15,8 +15,11 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import orchestrator_runtime  # noqa: E402
+from pdf_test_support import synthetic_native_compile, write_test_pdf, write_test_png  # noqa: E402
 from orchestrator_runtime import OrchestratorRuntime  # noqa: E402
 from runtime_types import TaskSpec  # noqa: E402
+
+
 
 
 class RuntimeSourceChangingTest(unittest.TestCase):
@@ -33,7 +36,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 encoding="utf-8",
             )
             pdf = root / "main.pdf"
-            pdf.write_bytes(b"%PDF fixture\n")
+            write_test_pdf(pdf)
             core_calls = {"count": 0}
 
             def fake_core(
@@ -50,8 +53,8 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 defect_report = root / "data" / "defect_report.json"
                 gatekeeper_report = root / "data" / "gatekeeper_decision.json"
                 page = page_dir / "page_001.png"
-                page.write_bytes(b"png")
-                visual_report.write_text("{}", encoding="utf-8")
+                write_test_png(page)
+                visual_report.write_text(json.dumps({"summary": {"pages_analyzed": 8}}), encoding="utf-8")
                 defect_report.write_text("{}", encoding="utf-8")
                 gatekeeper_report.write_text("{}", encoding="utf-8")
                 base_mtime = 1_800_000_000 + core_calls["count"] * 10
@@ -153,7 +156,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 main_tex.write_text(
                     "\\documentclass{article}\n"
                     "\\begin{document}\n"
-                    "Mutated by fake repair.\n"
+                    "\\noindent Source changing fixture.\n% Mutated by fake repair.\n"
                     "\\end{document}\n",
                     encoding="utf-8",
                 )
@@ -185,12 +188,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 mock.patch.object(
                     orchestrator_runtime,
                     "compile_latex",
-                    return_value={
-                        "success": True,
-                        "pdf_path": str(pdf),
-                        "timeout": False,
-                        "log_file": "main.log",
-                    },
+                    side_effect=synthetic_native_compile,
                 ),
                 mock.patch.object(
                     orchestrator_runtime,
@@ -203,7 +201,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                     return_value={"available": True, "hard_failures": []},
                 ),
                 mock.patch.object(OrchestratorRuntime, "_run_round_core", fake_core),
-                mock.patch.object(OrchestratorRuntime, "execute_repair_plan", fake_execute),
+                mock.patch.object(OrchestratorRuntime, "execute_repair_plan_phased", fake_execute),
             ):
                 result = OrchestratorRuntime(state_path=str(root / "data" / "state.json")).run_task(
                     task_spec=spec,
@@ -222,7 +220,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
             self.assertEqual(result["approval"]["execution"]["applied_count"], 1)
             policy = result["repair_loop_policy"]
             self.assertEqual(policy["execution_mode"], "bounded_apply")
-            self.assertEqual(policy["candidate_batch_limit"], 1)
+            self.assertEqual(policy["candidate_batch_limit"], 8)  # 吞吐上调后
             self.assertEqual(policy["applied_count"], 1)
             self.assertEqual(policy["stop_condition"], "done")
             self.assertFalse(policy["next_round_allowed"])
@@ -263,7 +261,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
             )
             main_tex.write_text(original_tex, encoding="utf-8")
             pdf = root / "main.pdf"
-            pdf.write_bytes(b"%PDF fixture\n")
+            write_test_pdf(pdf)
             core_calls = {"count": 0}
 
             def fake_core(
@@ -281,8 +279,8 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 defect_report = root / "data" / "defect_report.json"
                 gatekeeper_report = root / "data" / "gatekeeper_decision.json"
                 repair_plan = root / "data" / "repair_plan.json"
-                page.write_bytes(b"png")
-                visual_report.write_text("{}", encoding="utf-8")
+                write_test_png(page)
+                visual_report.write_text(json.dumps({"summary": {"pages_analyzed": 8}}), encoding="utf-8")
                 defect_report.write_text("{}", encoding="utf-8")
                 gatekeeper_report.write_text(json.dumps({"decision": "CONTINUE"}), encoding="utf-8")
                 repair_plan.write_text(
@@ -380,17 +378,21 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 }
             )
 
+            _failing_guard = {
+                "available": True,
+                "endmatter_start_page": 8,
+                "endmatter_heading": "Acknowledgements",
+                "intrusions": [{"page": 8, "captions": ["Figure 7:"]}],
+                "hard_failures": [
+                    "Body float caption detected on endmatter pages starting at page 8 (Acknowledgements): page 8: Figure 7:"
+                ],
+            }
             hard_guard_reports = [
                 {"available": True, "hard_failures": []},
-                {
-                    "available": True,
-                    "endmatter_start_page": 8,
-                    "endmatter_heading": "Acknowledgements",
-                    "intrusions": [{"page": 8, "captions": ["Figure 7:"]}],
-                    "hard_failures": [
-                        "Body float caption detected on endmatter pages starting at page 8 (Acknowledgements): page 8: Figure 7:"
-                    ],
-                },
+                # 第三次：heal_endmatter_float_intrusion 治疗后的复检仍失败
+                # （侵入无法通过去堆叠消除时，回滚+BLOCKED 语义保持不变）
+                _failing_guard,
+                dict(_failing_guard),
             ]
 
             with (
@@ -415,7 +417,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                     side_effect=hard_guard_reports,
                 ),
                 mock.patch.object(OrchestratorRuntime, "_run_round_core", fake_core),
-                mock.patch.object(OrchestratorRuntime, "execute_repair_plan", fake_execute),
+                mock.patch.object(OrchestratorRuntime, "execute_repair_plan_phased", fake_execute),
             ):
                 result = OrchestratorRuntime(state_path=str(root / "data" / "state.json")).run_task(
                     task_spec=spec,
@@ -595,7 +597,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 encoding="utf-8",
             )
             pdf = root / "main.pdf"
-            pdf.write_bytes(b"%PDF fixture\n")
+            write_test_pdf(pdf)
             core_calls = {"count": 0}
             execute_calls = {"count": 0}
 
@@ -606,8 +608,8 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 visual_report = root / "data" / "visual_signal_report.json"
                 defect_report = root / "data" / "defect_report.json"
                 gatekeeper_report = root / "data" / "gatekeeper_decision.json"
-                page.write_bytes(b"png")
-                visual_report.write_text("{}", encoding="utf-8")
+                write_test_png(page)
+                visual_report.write_text(json.dumps({"summary": {"pages_analyzed": 8}}), encoding="utf-8")
                 defect_report.write_text("{}", encoding="utf-8")
                 gatekeeper_report.write_text(json.dumps({"decision": decision}), encoding="utf-8")
                 for offset, path in enumerate([pdf, page, visual_report, defect_report, gatekeeper_report]):
@@ -693,7 +695,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 main_tex.write_text(
                     "\\documentclass{article}\n"
                     "\\begin{document}\n"
-                    f"Mutated by fake repair round {execute_calls['count']}.\n"
+                    f"\\noindent Round zero fixture.\n% Mutated by fake repair round {execute_calls['count']}.\n"
                     "\\end{document}\n",
                     encoding="utf-8",
                 )
@@ -726,12 +728,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 mock.patch.object(
                     orchestrator_runtime,
                     "compile_latex",
-                    return_value={
-                        "success": True,
-                        "pdf_path": str(pdf),
-                        "timeout": False,
-                        "log_file": "main.log",
-                    },
+                    side_effect=synthetic_native_compile,
                 ),
                 mock.patch.object(
                     orchestrator_runtime,
@@ -744,7 +741,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                     return_value={"available": True, "hard_failures": []},
                 ),
                 mock.patch.object(OrchestratorRuntime, "_run_round_core", fake_core),
-                mock.patch.object(OrchestratorRuntime, "execute_repair_plan", fake_execute),
+                mock.patch.object(OrchestratorRuntime, "execute_repair_plan_phased", fake_execute),
             ):
                 result = OrchestratorRuntime(state_path=str(root / "data" / "state.json")).run_task(
                     task_spec=spec,
@@ -782,7 +779,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 encoding="utf-8",
             )
             pdf = root / "main.pdf"
-            pdf.write_bytes(b"%PDF fixture\n")
+            write_test_pdf(pdf)
             core_calls = {"count": 0}
             execute_calls = {"count": 0}
 
@@ -793,8 +790,8 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 visual_report = root / "data" / "visual_signal_report.json"
                 defect_report = root / "data" / "defect_report.json"
                 gatekeeper_report = root / "data" / "gatekeeper_decision.json"
-                page.write_bytes(b"png")
-                visual_report.write_text("{}", encoding="utf-8")
+                write_test_png(page)
+                visual_report.write_text(json.dumps({"summary": {"pages_analyzed": 8}}), encoding="utf-8")
                 defect_report.write_text("{}", encoding="utf-8")
                 gatekeeper_report.write_text(json.dumps({"decision": "CONTINUE"}), encoding="utf-8")
                 for offset, path in enumerate([pdf, page, visual_report, defect_report, gatekeeper_report]):
@@ -886,7 +883,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 main_tex.write_text(
                     "\\documentclass{article}\n"
                     "\\begin{document}\n"
-                    "First bounded repair applied.\n"
+                    "\\noindent Scope gate fixture.\n% First bounded repair applied.\n"
                     "\\end{document}\n",
                     encoding="utf-8",
                 )
@@ -919,12 +916,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 mock.patch.object(
                     orchestrator_runtime,
                     "compile_latex",
-                    return_value={
-                        "success": True,
-                        "pdf_path": str(pdf),
-                        "timeout": False,
-                        "log_file": "main.log",
-                    },
+                    side_effect=synthetic_native_compile,
                 ),
                 mock.patch.object(
                     orchestrator_runtime,
@@ -937,7 +929,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                     return_value={"available": True, "hard_failures": []},
                 ),
                 mock.patch.object(OrchestratorRuntime, "_run_round_core", fake_core),
-                mock.patch.object(OrchestratorRuntime, "execute_repair_plan", fake_execute),
+                mock.patch.object(OrchestratorRuntime, "execute_repair_plan_phased", fake_execute),
             ):
                 result = OrchestratorRuntime(state_path=str(root / "data" / "state.json")).run_task(
                     task_spec=spec,
@@ -945,15 +937,15 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 )
 
             self.assertEqual(execute_calls["count"], 1)
-            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["status"], "approval_required")  
             self.assertEqual(result["gatekeeper_decision"], "BLOCKED")
-            self.assertEqual(result["failure"]["failure_type"], "approval_scope_blocked")
+            self.assertEqual(result["failure"]["failure_type"], "approval_required")
             action = result["runtime_actions"]["repair_plan_executor"]
             self.assertTrue(action["skipped"])
-            self.assertEqual(action["reason"], "approval_scope_blocked")
-            self.assertEqual(action["approval_scope_gate"]["status"], "blocked")
+            self.assertEqual(action["reason"], "approval_required")
+            self.assertEqual(action["approval_scope_gate"]["status"], "approval_required")
             policy = result["repair_loop_policy"]
-            self.assertEqual(policy["stop_condition"], "approval_scope_blocked")
+            self.assertEqual(policy["stop_condition"], "approval_required")
             self.assertFalse(policy["next_round_allowed"])
             self.assertFalse(
                 policy["second_round_apply_readiness"]["checks"]["candidate_approval_scope_gate_pass"]
@@ -977,7 +969,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
             )
             original_sha = hashlib.sha256(main_tex.read_bytes()).hexdigest()
             pdf = root / "main.pdf"
-            pdf.write_bytes(b"%PDF fixture\n")
+            write_test_pdf(pdf)
 
             def fake_core(
                 self: OrchestratorRuntime,
@@ -986,12 +978,12 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 page_dir = root / "data" / "pages"
                 page_dir.mkdir(parents=True, exist_ok=True)
                 page = page_dir / "page_001.png"
-                page.write_bytes(b"png")
+                write_test_png(page)
                 visual_report = root / "data" / "visual_signal_report.json"
                 defect_report = root / "data" / "defect_report.json"
                 gatekeeper_report = root / "data" / "gatekeeper_decision.json"
                 repair_plan = root / "data" / "repair_plan.json"
-                visual_report.write_text("{}", encoding="utf-8")
+                visual_report.write_text(json.dumps({"summary": {"pages_analyzed": 8}}), encoding="utf-8")
                 defect_report.write_text("{}", encoding="utf-8")
                 gatekeeper_report.write_text("{}", encoding="utf-8")
                 repair_plan.write_text(
@@ -1087,22 +1079,23 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 )
 
             self.assertEqual(hashlib.sha256(main_tex.read_bytes()).hexdigest(), original_sha)
-            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["status"], "approval_required")  
             self.assertEqual(result["gatekeeper_decision"], "BLOCKED")
-            self.assertEqual(result["failure"]["failure_type"], "approval_scope_blocked")
+            self.assertEqual(result["failure"]["failure_type"], "approval_required")
             action = result["runtime_actions"]["repair_plan_executor"]
             self.assertTrue(action["skipped"])
-            self.assertEqual(action["reason"], "approval_scope_blocked")
-            self.assertEqual(action["approval_scope_gate"]["status"], "blocked")
+            self.assertEqual(action["reason"], "approval_required")
+            self.assertEqual(action["approval_scope_gate"]["status"], "approval_required")
             self.assertEqual(
                 action["approval_scope_gate"]["blocked_candidates"][0]["risk"]["operation"],
                 "float_movement_across_section_boundary",
             )
             self.assertNotIn("source_mutation_integrity", result["runtime_actions"])
             self.assertNotIn("post_repair_observe", result["runtime_actions"])
-            self.assertEqual(result["approval"]["status"], "approval_required")
-            self.assertEqual(result["repair_loop_policy"]["stop_condition"], "approval_scope_blocked")
-            self.assertEqual(result["repair_loop_policy"]["next_round_reason"], "approval_scope_blocked")
+            # 审批对象是任务级状态；候选级审批事实以 run_result.status 与 approval_scope_gate 为准
+            self.assertEqual(result["status"], "approval_required")
+            self.assertEqual(result["repair_loop_policy"]["stop_condition"], "approval_required")
+            self.assertEqual(result["repair_loop_policy"]["next_round_reason"], "approval_required_grant_fresh_approval_or_regenerate_plan")
             self.assertFalse(
                 result["repair_loop_policy"]["second_round_apply_readiness"]["checks"][
                     "candidate_approval_scope_gate_pass"
@@ -1123,7 +1116,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
             )
             original_sha = hashlib.sha256(main_tex.read_bytes()).hexdigest()
             pdf = root / "main.pdf"
-            pdf.write_bytes(b"%PDF fixture\n")
+            write_test_pdf(pdf)
 
             def fake_core(
                 self: OrchestratorRuntime,
@@ -1206,7 +1199,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
             self.assertEqual(action["input_artifacts"]["main_tex"], "main.tex")
             self.assertTrue(action["input_artifacts"]["rollback_target"].endswith("snapshot_manifest.json"))
             self.assertEqual(action["output_artifacts"], {})
-            self.assertEqual(result["approval"]["status"], "approval_required")
+            self.assertEqual(result["status"], "continue")
             self.assertTrue(result["approval"]["requires_approval"])
             self.assertFalse(result["approval"]["approval_granted"])
             self.assertEqual(result["approval"]["reason"], "dry_run_source_mutation")
@@ -1254,7 +1247,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 encoding="utf-8",
             )
             pdf = root / "main.pdf"
-            pdf.write_bytes(b"%PDF fixture\n")
+            write_test_pdf(pdf)
 
             def fake_core(
                 self: OrchestratorRuntime,
