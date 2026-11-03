@@ -259,7 +259,7 @@ def _active_part(line: str) -> str:
 
 
 def fix_orphan_begin_env(tex: str, log_text: str) -> Tuple[str, List[str]]:
-    """孤儿 \begin{env}：配对的 \end 被注释、区域无活内容 → 注释掉孤儿行和孤立 }。"""
+    r"""孤儿 \begin{env}：配对的 \end 被注释、区域无活内容 → 注释掉孤儿行和孤立 }。"""
     changes: List[str] = []
     log = log_text or ""
     if not _ORPHAN_BEGIN_LOG_RE.search(log):
