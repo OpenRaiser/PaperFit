@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"单 case 的 PaperFit 机器调用封装（回归 runner 的被测引擎入口）。"
+"""单 case 的 PaperFit 机器调用封装（回归 runner 的被测引擎入口）。"""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ class CaseRunResult:
     reasons: List[str] = field(default_factory=list)
     work_dir: Optional[Path] = None
     run_result: Dict[str, Any] = field(default_factory=dict)
-    
+
     run_status: str = RUN_STATUS_NOT_RUN
     candidate_render_status: str = RENDER_STATUS_FAILED
     repair_effect_status: str = REPAIR_EFFECT_NOT_RUN
@@ -102,7 +102,7 @@ def _coerce_output_text(value: Any) -> str:
 
 
 def _read_repair_execution_summary(project: Path, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    "读工作目录里的 repair_execution_report.json，归一成执行摘要。"
+    """读工作目录里的 repair_execution_report.json，归一成执行摘要。"""
     candidates: List[Path] = []
     artifacts = payload.get("artifacts")
     if isinstance(artifacts, dict):
@@ -124,9 +124,9 @@ def _read_repair_execution_summary(project: Path, payload: Dict[str, Any]) -> Op
         except ValueError:
             source = str(path)
         applied = int(data.get("applied_count") or 0)
-        
-        
-        
+
+
+
         status = str(data.get("status") or "")
         run_result = payload if isinstance(payload, dict) else {}
         totals = run_result.get("execution_totals")
@@ -210,8 +210,8 @@ def default_paperfit_runner(
                 },
             }
 
-        
-        
+
+
         payload["paperfit_process"] = {
             "command": command,
             "cwd": str(project),
@@ -322,7 +322,7 @@ def _render_action(run_payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _execution_summary(run_payload: Dict[str, Any]) -> Dict[str, Any]:
-    "归一读取修复执行摘要（）。"
+    """归一读取修复执行摘要（）。"""
     summary = run_payload.get("repair_execution_summary")
     if isinstance(summary, dict) and summary.get("status") is not None:
         return summary

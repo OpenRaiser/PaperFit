@@ -59,9 +59,9 @@ def evaluate_case(
     ref_eval = load_case_evaluation(reference_root, case_id)
     cand_eval = load_case_evaluation(candidate_root, case_id)
     context = case_context or {}
-    
-    
-    
+
+
+
     constraints = build_hard_constraints(cand_eval, reference_evaluation=ref_eval)
 
     comparison_path = case_out / f"comparison_{pair_tag}.png"

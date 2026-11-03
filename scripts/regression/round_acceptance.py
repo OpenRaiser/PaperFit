@@ -80,7 +80,7 @@ class AcceptanceDecision:
 
 
 def evaluate_round_acceptance(evidence: RoundEvidence) -> AcceptanceDecision:
-    "统一接受函数：所有条件都通过才接受。"
+    """统一接受函数：所有条件都通过才接受。"""
     reasons: List[str] = []
 
     # 0. 页数测量缺失 → fail-closed
@@ -107,7 +107,7 @@ def evaluate_round_acceptance(evidence: RoundEvidence) -> AcceptanceDecision:
                 f"overfull increased: {evidence.overfull_before} -> {evidence.overfull_after}"
             )
 
-    
+
     if evidence.severe_overfull_before is not None and evidence.severe_overfull_after is not None:
         if evidence.severe_overfull_after > evidence.severe_overfull_before:
             reasons.append(

@@ -133,7 +133,7 @@ class BaselinePdfProtectionTest(unittest.TestCase):
 
 
     def test_page_shrink_without_target_rejected_when_large(self):
-        "ICLR 回归：无页数预算时，单候选造成 12→10 页的大幅缩水必须拒绝"
+        """ICLR 回归：无页数预算时，单候选造成 12→10 页的大幅缩水必须拒绝"""
         accepted, reason = gate_decision(_evidence(12), _evidence(10), target_pages=None)
         self.assertFalse(accepted)
         self.assertIn("page swing too large", reason)
@@ -142,7 +142,7 @@ class BaselinePdfProtectionTest(unittest.TestCase):
 
 
 class FixLayoutExitCodeTest(unittest.TestCase):
-    "退出码契约（ 重定义）：旧 PDF 不再给任何非 done 状态打 0。"
+    """退出码契约（ 重定义）：旧 PDF 不再给任何非 done 状态打 0。"""
 
     def _report(self, status, pdf_path=None):
         runtime_actions = {}

@@ -28,7 +28,7 @@ PAPER_MAIN = (
 )
 
 
-def _make_archive(root: Path, name: str = "arXiv-2601.00001v1") -> Path:
+def _make_archive(root: Path, name: str = "example-paper-05") -> Path:
     source_dir = root / "src" / name
     (source_dir / "figs").mkdir(parents=True)
     (source_dir / "figs" / "fig.pdf").write_bytes(b"%PDF")
@@ -76,7 +76,7 @@ class BuildPackTest(unittest.TestCase):
                     {
                         "archive": str(archive),
                         "paper_id": "AAAI",
-                        "case_id": "arXiv-2601.00001v1",
+                        "case_id": "example-paper-05",
                         "venue_id": "AAAI",
                         "perturbation_ids": ["D1_long_token_overflow", "B2_shrink_graphics"],
                         "seed": 42,
@@ -89,7 +89,7 @@ class BuildPackTest(unittest.TestCase):
                 render_fn=_fake_render_ok,
             )
             self.assertEqual(manifest["summary"]["success"], 1)
-            case_dir = resolve_case_dir(pack_root, "AAAI", "arXiv-2601.00001v1")
+            case_dir = resolve_case_dir(pack_root, "AAAI", "example-paper-05")
             # 冻结工件齐全
             source_manifest = json.loads((case_dir / "source_manifest.json").read_text(encoding="utf-8"))
             self.assertTrue(source_manifest["page_hashes"])

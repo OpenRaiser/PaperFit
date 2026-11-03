@@ -35,12 +35,12 @@ def resolve_overfull_to_source(
     返回 [{overflow_pt, file, line_start, line_end, file_display}, ...]
     """
     results: List[Dict] = []
-    
+
     # 扫描日志，跟踪当前打开的文件栈
     # None 表示普通括号组，源文件上下文由最近的非空栈项提供。
     file_stack: List[Optional[str]] = [main_tex_name]
     in_box_dump = False
-    
+
     # 逐行扫描
     for line in log_text.splitlines():
         # 检测 overfull 警告
@@ -72,7 +72,7 @@ def resolve_overfull_to_source(
             # Even a standalone ')' can be a wrapped manuscript glyph. Only
             # TeX's blank diagnostic terminator ends this region.
             continue
-        
+
         pos = 0
         while pos < len(line):
             char = line[pos]
@@ -86,7 +86,7 @@ def resolve_overfull_to_source(
             elif char == ")" and (pos == 0 or line[pos - 1] != "\\") and len(file_stack) > 1:
                 file_stack.pop()
             pos += 1
-    
+
     return results
 
 

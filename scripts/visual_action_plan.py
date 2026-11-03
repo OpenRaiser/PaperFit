@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"统一视觉诊断协议：visual_action_plan.json。"
+"""统一视觉诊断协议：visual_action_plan.json。"""
 
 from __future__ import annotations
 

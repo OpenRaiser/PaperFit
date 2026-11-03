@@ -1372,7 +1372,7 @@ def _build_log_candidates(
     if int(summary.get("overfull_hbox_total") or 0) > 0:
         detailed_candidates = 0
         textheight_boost_applied = False
-        
+
         overflow_by_index: Dict[int, Any] = {}
         try:
             from overflow_objects import build_overflow_objects, index_by_warning
@@ -1387,8 +1387,8 @@ def _build_log_candidates(
             lines = str(warning.get("lines") or "").strip() or None
             line_number = int(lines.split("--", 1)[0]) if lines else None
 
-            
-            
+
+
             is_textheight_cascade = False
             if line_number is not None and not textheight_boost_applied and main_tex_content:
                 try:
@@ -1407,9 +1407,9 @@ def _build_log_candidates(
                     "scope": "table_overflow" if subtype == "alignment" else "overflow",
                 },
                 "defect_family": "D1",
-                
-                
-                
+
+
+
                 "priority_score": (
                     99 if is_textheight_cascade
                     else 97 if overflow_pt >= 100
@@ -1432,7 +1432,7 @@ def _build_log_candidates(
                 "evidence_sources": ["rule_report"],
             }
             if overflow_obj is not None:
-                
+
                 candidate.update(
                     {
                         "overflow_id": overflow_obj.overflow_id,
@@ -1469,7 +1469,7 @@ def _promotion_dedupe_key(
     page: Any,
     anchor: Any,
 ) -> tuple:
-    "去重键 = family + source_file + source_line + object_label + page。"
+    """去重键 = family + source_file + source_line + object_label + page。"""
     first_anchor = anchor[0] if isinstance(anchor, list) and anchor else {}
     if not isinstance(first_anchor, dict):
         first_anchor = {}
@@ -1483,7 +1483,7 @@ def _promotion_dedupe_key(
 
 
 def _promote_visual_action_plan(visual_signal_report: str) -> List[Dict[str, Any]]:
-    "从 visual_action_plan.json 提升 executable 条目为修复候选。"
+    """从 visual_action_plan.json 提升 executable 条目为修复候选。"""
     plan_path = Path(visual_signal_report).parent / "visual_action_plan.json"
     if not plan_path.is_file():
         return []
@@ -1493,8 +1493,8 @@ def _promote_visual_action_plan(visual_signal_report: str) -> List[Dict[str, Any
         return []
 
     candidates: List[Dict[str, Any]] = []
-    
-    
+
+
     seen_keys: set[tuple[str, str]] = set()
     family_counts: Dict[str, int] = {}
     for entry in plan.get("entries") or []:
@@ -1517,8 +1517,8 @@ def _promote_visual_action_plan(visual_signal_report: str) -> List[Dict[str, Any
             continue
         if family_counts.get(family, 0) >= 3:
             continue
-        
-        
+
+
         document_level_b1 = (family == "B1" and confidence >= 0.6 and not anchor
                              and document_scope_b1_authorized(entry))
         if family == "B1" and not anchor and not document_level_b1:
@@ -1666,7 +1666,7 @@ def generate_repair_plan(
         main_tex_content=main_tex_content,
     )
 
-    
+
     visual_plan_candidates = _promote_visual_action_plan(visual_signal_report)
 
     candidates = (
@@ -1694,8 +1694,8 @@ def generate_repair_plan(
             0 if _is_urgent_overflow_candidate(item) and not has_visual_b2_width_candidate else 1,
             -int(item.get("priority_score") or 0),
             -_candidate_severity_rank(str(item.get("severity") or "")),
-            
-            
+
+
             -float(item.get("overflow_amount") or 0.0),
             int(item.get("page") or 0) if item.get("page") is not None else 10**6,
             str((item.get("target") or {}).get("label") or ""),

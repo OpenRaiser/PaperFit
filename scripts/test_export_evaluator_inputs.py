@@ -52,7 +52,7 @@ def _build_case_dir(root: Path) -> Path:
         json.dumps(
             {
                 "benchmark_case": {
-                    "case_id": "example-paper-fe5d3e6f8d",
+                    "case_id": "example-paper-01",
                     "venue_id": "AAAI",
                     "template_name": "AAAI2026",
                     "profile": "hard",
@@ -82,11 +82,11 @@ class ExportEvaluatorInputsTest(unittest.TestCase):
                 project_root=project,
                 output_root=root / "runs" / "OURS",
                 paper_id="AAAI",
-                case_id="example-paper-fe5d3e6f8d",
+                case_id="example-paper-01",
                 case_dir=case_dir,
             )
 
-            case_out = root / "runs" / "OURS" / "AAAI" / "example-paper-fe5d3e6f8d"
+            case_out = root / "runs" / "OURS" / "AAAI" / "example-paper-01"
             self.assertTrue((case_out / "pages" / "page_001.png").is_file())
             self.assertEqual(summary["pages_copied"], 3)
             report = json.loads(

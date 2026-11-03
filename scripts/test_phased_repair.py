@@ -1,4 +1,4 @@
-"验收：分组批处理 + 原子接受。"
+"""验收：分组批处理 + 原子接受。"""
 
 from __future__ import annotations
 

@@ -93,10 +93,10 @@ def conflict_keys_for(candidate: Dict[str, Any]) -> List[str]:
         keys.append(f"object:{label}")
     if line_number not in (None, ""):
         keys.append(f"source-line:{line_number}")
-    
-    
-    
-    
+
+
+
+
     overflow_family = family in {"D1", "D2", "D3"}
     if scope and not (overflow_family and scope == "overflow"):
         keys.append(f"scope:{scope}")

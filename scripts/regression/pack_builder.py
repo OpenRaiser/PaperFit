@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"冻结 benchmark pack 生成器（B0 侧一次性生成并冻结）。"
+"""冻结 benchmark pack 生成器（B0 侧一次性生成并冻结）。"""
 
 from __future__ import annotations
 
@@ -208,7 +208,7 @@ def build_case(
     validated_perturbations: Optional[List[str]] = None,
     perturbation_source: Optional[str] = None,
 ) -> CaseBuildResult:
-    "构建并冻结一个 B0 case。compile_fn(project_root) / render_fn(project_root, pages_dir)。"
+    """构建并冻结一个 B0 case。compile_fn(project_root) / render_fn(project_root, pages_dir)。"""
     stage_status: Dict[str, str] = dict.fromkeys(STAGE_ORDER, "pending")
     result = CaseBuildResult(
         case_id=case_id,
@@ -398,8 +398,8 @@ def build_case(
             }
             source_manifest["page_hashes"] = page_hashes
             source_manifest["page_count"] = len(page_hashes)
-            
-            
+
+
             if applied_perturbations is None:
                 applied_perturbations = [
                     item.perturbation_id for item in injection_results if item.status == "success"

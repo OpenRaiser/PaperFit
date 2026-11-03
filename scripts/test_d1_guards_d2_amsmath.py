@@ -1,4 +1,4 @@
-"D1 安全守卫 + D2 amsmath 保障的真实回归测试。"
+"""D1 安全守卫 + D2 amsmath 保障的真实回归测试。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ PATH_TOKEN = "figures/num_judge_plot_results"
 CITE_TOKEN = "Wang2024HelpSteer2PreferenceCRForAligning"
 EQ_BODY = (
     BS + "mathcal{L}_{disturb} = x_{" + BS + "mathrm{BenchmarkOverflowSequenceAlphaBetaGammaDeltaEpsilon}}"
-    + " + y_{" + BS + "mathrm{AnotherVeryLongSubscriptSequenceForTesting}}" 
+    + " + y_{" + BS + "mathrm{AnotherVeryLongSubscriptSequenceForTesting}}"
 )
 
 

@@ -151,7 +151,7 @@ class PageDistanceTest(unittest.TestCase):
         self.assertTrue(d.accepted)
 
     def test_missing_page_measurement_fail_closed(self):
-        "Regression checks."
+        """Regression checks."""
         e = _good_evidence(target_pages=None, page_count_before=None, page_count_after=None)
         d = evaluate_round_acceptance(e)
         self.assertFalse(d.accepted)

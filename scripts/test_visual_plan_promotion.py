@@ -126,7 +126,7 @@ class VisualPlanPromotionTest(unittest.TestCase):
 
 
 class SameFamilyMultiPromotionTest(unittest.TestCase):
-    "Regression checks."
+    """Regression checks."""
 
     def _plan_with_two_b2(self, second_anchor_status="resolved"):
         return {

@@ -1,4 +1,4 @@
-"验收：溢出对象化、严重度排序、token 分类、锚点置信度。"
+"""验收：溢出对象化、严重度排序、token 分类、锚点置信度。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"回归测试：Windows 深路径下 pre-repair 快照与被测论文目录解耦。"
+"""回归测试：Windows 深路径下 pre-repair 快照与被测论文目录解耦。"""
 
 from __future__ import annotations
 

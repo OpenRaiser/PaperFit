@@ -1,4 +1,4 @@
-"验收：跨版本安全指标必须用可比分母。"
+"""验收：跨版本安全指标必须用可比分母。"""
 
 from __future__ import annotations
 
@@ -36,8 +36,8 @@ def _side(venues, budget_hits):
 
 class PairedSafetyTest(unittest.TestCase):
     def test_unequal_denominators_do_not_claim_paired_improvement(self):
-        
-        
+
+
         b0 = _side(["A", "B", "C", "D", "E", "F", "G", "H", "I"], [True, True, True, True, True, False, False, False, False])
         ours = _side(["A", "B", "C", "D", "E", "F", "G", "H"], [True, True, True, True, True, False, False, False])  # I 缺失
         cond1 = _aggregate_safety(b0)

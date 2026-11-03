@@ -937,7 +937,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 )
 
             self.assertEqual(execute_calls["count"], 1)
-            self.assertEqual(result["status"], "approval_required")  
+            self.assertEqual(result["status"], "approval_required")
             self.assertEqual(result["gatekeeper_decision"], "BLOCKED")
             self.assertEqual(result["failure"]["failure_type"], "approval_required")
             action = result["runtime_actions"]["repair_plan_executor"]
@@ -1079,7 +1079,7 @@ class RuntimeSourceChangingTest(unittest.TestCase):
                 )
 
             self.assertEqual(hashlib.sha256(main_tex.read_bytes()).hexdigest(), original_sha)
-            self.assertEqual(result["status"], "approval_required")  
+            self.assertEqual(result["status"], "approval_required")
             self.assertEqual(result["gatekeeper_decision"], "BLOCKED")
             self.assertEqual(result["failure"]["failure_type"], "approval_required")
             action = result["runtime_actions"]["repair_plan_executor"]

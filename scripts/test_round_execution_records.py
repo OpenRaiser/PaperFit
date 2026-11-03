@@ -1,4 +1,4 @@
-"验收：跨轮执行统计不可变。"
+"""验收：跨轮执行统计不可变。"""
 
 from __future__ import annotations
 

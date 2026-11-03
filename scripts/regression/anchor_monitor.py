@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"裁判锚点漂移报警器（零人工标注）。"
+"""裁判锚点漂移报警器（零人工标注）。"""
 
 from __future__ import annotations
 

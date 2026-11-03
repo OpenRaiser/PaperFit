@@ -560,9 +560,9 @@ class OrchestratorRuntime:
         output_path: str = "data/repair_execution_report.json",
         max_candidates: int = 3,
     ) -> Dict[str, Any]:
-        "分组批处理 + 原子接受。"
+        """分组批处理 + 原子接受。"""
         self.manager.load()
-        
+
         executable_plan = (self.manager.get("artifacts") or {}).get("repair_plan_executable")
         repair_plan_path = executable_plan or (
             ((self.manager.get("artifacts") or {}).get("repair_plan")) or "data/repair_plan.json"
@@ -1187,8 +1187,8 @@ class OrchestratorRuntime:
                         candidate_limit=DEFAULT_CANDIDATE_BATCH_LIMIT,
                     )
                     if candidate_scope_gate.get("status") != "pass":
-                        
-                        
+
+
                         gate_status_value = str(candidate_scope_gate.get("status") or "")
                         runtime_state = SOURCE_CHANGING_STATE_MACHINE.transition(runtime_state, "repair_skipped")
                         self._record_runtime_action(
@@ -1250,8 +1250,8 @@ class OrchestratorRuntime:
                         break
 
                     repair_round_count += 1
-                    
-                    
+
+
                     allowed_indices = {
                         int(entry["index"])
                         for entry in candidate_scope_gate.get("allowed_candidates") or []
@@ -1273,8 +1273,8 @@ class OrchestratorRuntime:
                                 self.set_artifact("repair_plan_executable", "data/repair_plan_executable.json")
                         except Exception:
                             pass
-                    
-                    
+
+
                     snapshot = create_pre_repair_snapshot(
                         project_root=project_root,
                         main_tex=task_spec.main_tex,
@@ -1334,8 +1334,8 @@ class OrchestratorRuntime:
                         max_candidates=DEFAULT_CANDIDATE_BATCH_LIMIT,
                     )
                     repair_summary = repair_state.get("repair_execution_summary") or {}
-                    
-                    
+
+
                     round_execution_records.append(
                         {
                             "round": repair_round_count,
@@ -1361,8 +1361,8 @@ class OrchestratorRuntime:
                             "candidate_outcomes": list(repair_summary.get("candidate_outcomes") or []),
                             "status": str(repair_summary.get("status") or ""),
                             "approval_gate_status": str(candidate_scope_gate.get("status") or ""),
-                            
-                            
+
+
                             "rollback_scope": "none",
                             "attributed_candidate": None,
                         }
@@ -1481,10 +1481,10 @@ class OrchestratorRuntime:
                         rollback_target=str(snapshot.get("rollback_target") or ""),
                     )
                     if post_repair_hard_guard_failure is not None:
-                        
-                        
-                        
-                        
+
+
+
+
                         attribution = self._attempt_candidate_level_rollback(
                             project_root=project_root,
                             task_spec=task_spec,
@@ -1510,12 +1510,12 @@ class OrchestratorRuntime:
                                 attribution or {},
                             )
                         else:
-                            
-                            
-                            
-                            
-                            
-                            
+
+
+
+
+
+
                             heal = self._heal_endmatter_float_intrusion(
                                 project_root=project_root,
                                 task_spec=task_spec,
@@ -1670,8 +1670,8 @@ class OrchestratorRuntime:
                         round_metrics=round_metrics,
                         rollback_streak=rollback_streak,
                     )
-                    
-                    
+
+
                     if round_metrics:
                         from regression.round_acceptance import evaluate_round_acceptance
 
@@ -1698,9 +1698,9 @@ class OrchestratorRuntime:
                             break
                         acceptance = evaluate_round_acceptance(acceptance_evidence)
                         if not acceptance.accepted and acceptance.rollback_required:
-                            
-                            
-                            
+
+
+
                             attribution = self._attempt_candidate_level_rollback(
                                 project_root=project_root,
                                 task_spec=task_spec,
@@ -1746,7 +1746,7 @@ class OrchestratorRuntime:
 
                     # 验收通过后才检查是否允许下一轮
                     if not (current_policy or {}).get("next_round_allowed"):
-                        
+
                         if (current_policy or {}).get("stop_condition") == "quality_regressed":
                             rollback_result = self._rollback_after_quality_regression(
                                 project_root=project_root,
@@ -1803,7 +1803,7 @@ class OrchestratorRuntime:
                     },
                 )
             status = "done" if runtime_state == "DONE" else ("blocked" if runtime_state == "BLOCKED" else "continue")
-            
+
             if status == "blocked":
                 failure_tracking = state.get("failure_tracking") or {}
                 if str(failure_tracking.get("last_failure_type") or "") == "approval_required":
@@ -1874,7 +1874,7 @@ class OrchestratorRuntime:
                                              "next_actions": state.get("next_actions") or []}
                 result_payload["repair_loop_policy"].update(stop_condition="source_review_pending",
                     next_round_allowed=False, next_round_reason="explicit_host_review_required")
-            
+
             result_payload["round_execution_records"] = [dict(rec) for rec in round_execution_records]
             result_payload["execution_totals"] = {
                 "rounds": len(round_execution_records),
@@ -2006,7 +2006,7 @@ class OrchestratorRuntime:
         emit_event: Callable[..., Dict[str, Any]],
         runtime_actions: Dict[str, Any],
     ) -> Dict[str, Any]:
-        "质量恶化（overfull/视觉缺陷增多）→ 恢复本轮前快照。"
+        """质量恶化（overfull/视觉缺陷增多）→ 恢复本轮前快照。"""
         output_path = "data/rollback_report_quality_regression.json"
         latest_metrics = round_metrics[-1] if round_metrics else {}
         try:
@@ -2163,9 +2163,9 @@ class OrchestratorRuntime:
         )
         return self.manager.load()
 
-    
-    
-    
+
+
+
 
     def _attempt_candidate_level_rollback(
         self,
@@ -2370,7 +2370,7 @@ class OrchestratorRuntime:
         *,
         fallback_scope: str = "full_round",
     ) -> None:
-        "把本轮回滚范围与归因候选写进不可变轮执行记录。"
+        """把本轮回滚范围与归因候选写进不可变轮执行记录。"""
         if not round_execution_records:
             return
         record = round_execution_records[-1]
@@ -3322,7 +3322,7 @@ class OrchestratorRuntime:
         return json.loads(path.read_text(encoding="utf-8"))
 
     def _round_structural_counts(self, state: Dict[str, Any]) -> Dict[str, int]:
-        "轮边界结构证据：图/表（crossrefs.floats）、label/引用（源码计数）。"
+        """轮边界结构证据：图/表（crossrefs.floats）、label/引用（源码计数）。"""
         counts = {"figures": 0, "tables": 0, "labels": 0, "refs": 0}
         try:
             crossrefs_path = Path.cwd() / str((state.get("artifacts") or {}).get("crossrefs_report") or "data/crossrefs.json")
@@ -3358,7 +3358,7 @@ class OrchestratorRuntime:
         }
 
     def _severe_overfull_counts(self, state: Dict[str, Any]) -> Optional[int]:
-        "≥100pt 的严重溢出计数（ 单独门禁）。"
+        """≥100pt 的严重溢出计数（ 单独门禁）。"""
         rule_report = state.get("rule_report") or {}
         warnings = rule_report.get("overfull_hbox") or []
         if not warnings:

@@ -618,9 +618,9 @@ def _fix_long_token_with_breaks(
     在 camelCase 边界、下划线、句点、斜杠处插入 \\allowbreak，
     不用 \\texttt 包裹（那会改变字体观感——终版方案 D1-A 第 5 条）。
     """
-    
-    
-    
+
+
+
     long_tokens: List[str] = []
     if line_number is not None:
         try:
@@ -1390,9 +1390,9 @@ def fix_equation_overflow(
         return tex_content, None
 
     modified_content = tex_content[:match.start()] + rewritten_equation + tex_content[match.end():]
-    
-    
-    
+
+
+
     if _uses_amsmath_envs(rewritten_equation) and not _amsmath_loaded(modified_content):
         insert_at = modified_content.find("\\begin{document}")
         if insert_at > 0:
@@ -1618,8 +1618,8 @@ def fix_overflow_defects(
                     overflow_amount=overflow_amount,
                 )
             elif str(defect.get("proposed_action") or "") == "remove_preamble_textheight_shrink" or _line_is_preamble_textheight_shrink(tex_content, line_number):
-                
-                
+
+
                 new_content, fix_result = _remove_preamble_textheight_shrink(
                     tex_content, line_number
                 )

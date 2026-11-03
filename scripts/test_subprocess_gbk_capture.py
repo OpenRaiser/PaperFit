@@ -1,4 +1,4 @@
-"Windows GBK 编码回归：子进程输出含非 GBK 字节时进程捕获必须可读。"
+"""Windows GBK 编码回归：子进程输出含非 GBK 字节时进程捕获必须可读。"""
 
 from __future__ import annotations
 

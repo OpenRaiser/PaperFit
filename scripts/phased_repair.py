@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"候选分组批处理 + 原子接受。"
+"""候选分组批处理 + 原子接受。"""
 
 from __future__ import annotations
 
@@ -99,12 +99,12 @@ def classify_action(proposed_action: str) -> str:
 
 
 def candidate_action_metadata(candidate: Dict[str, Any]) -> Dict[str, Any]:
-    "规格的候选元数据。"
+    """规格的候选元数据。"""
     action = str(candidate.get("proposed_action") or "")
     action_class = classify_action(action)
-    
-    
-    
+
+
+
     overflow_amount = float(candidate.get("overflow_amount") or 0.0)
     if action_class == "local_safe" and overflow_amount >= 50.0:
         action_class = "layout_sensitive"
@@ -144,8 +144,8 @@ class CandidateOutcome:
     rolled_back: bool = False
     reason: str = ""
     source_anchor: Optional[Dict[str, Any]] = None
-    
-    
+
+
     unit_index: Optional[int] = None
     page: Optional[int] = None
     rollback_edits: Optional[List[Dict[str, Any]]] = field(default=None)
@@ -283,8 +283,8 @@ def gate_decision(
         elif page_delta > 0:
             return False, f"page count grew: {before.page_count} -> {after.page_count}"
         elif abs(page_delta) >= 2:
-            
-            
+
+
             return False, (
                 f"page swing too large without a target budget: {before.page_count} -> {after.page_count} "
                 f"(delta {page_delta:+d}); needs target_pages to adjudicate"
@@ -488,7 +488,7 @@ def attribute_and_rollback_round_failure(
     failure_evidence: Dict[str, Any],
     verify_fn: Callable[[List[str]], Dict[str, Any]],
 ) -> Dict[str, Any]:
-    "轮级失败时的候选归因回滚。"
+    """轮级失败时的候选归因回滚。"""
     root = Path(project_root)
     report: Dict[str, Any] = {
         "schema_version": "1.0",
@@ -721,7 +721,7 @@ def execute_phased_repair(
         return objective
 
     def _record_unit_edits(unit_outcomes: List[CandidateOutcome], unit_index: int, rollback_target: str) -> None:
-        "接受后记录该单元的源码编辑范围（供轮级失败归因时单独撤销）。"
+        """接受后记录该单元的源码编辑范围（供轮级失败归因时单独撤销）。"""
         try:
             edits = collect_unit_rollback_edits(root, rollback_target)
         except Exception:

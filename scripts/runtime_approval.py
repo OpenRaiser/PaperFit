@@ -314,9 +314,9 @@ def build_candidate_approval_scope_gate(
     ]
 
     candidate_risks = []
-    blocked_candidates = []      
-    allowed_candidates = []      
-    deferred_candidates = []     
+    blocked_candidates = []
+    allowed_candidates = []
+    deferred_candidates = []
     scanned = 0
     batch_size = max(0, int(candidate_limit or 0))
     for index, candidate in enumerate(all_candidates, start=1):

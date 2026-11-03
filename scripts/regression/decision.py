@@ -72,7 +72,7 @@ def check_safety(
     tolerance_pp: float = 0.0,
     safety_paired: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
-    "安全指标回退检测。"
+    """安全指标回退检测。"""
     regressions: List[str] = []
     paired_metrics = (safety_paired or {}).get("metrics") or {}
     for key in SAFETY_KEYS:

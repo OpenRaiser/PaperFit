@@ -1,4 +1,4 @@
-"回归：同优先级 D 族候选必须按溢出量降序进批次。"
+"""回归：同优先级 D 族候选必须按溢出量降序进批次。"""
 
 import sys
 import unittest
@@ -78,7 +78,7 @@ class TestOverflowBatchSeverityOrder(unittest.TestCase):
 
 
 class TestLongTokenFixes(unittest.TestCase):
-    "Regression checks."
+    """Regression checks."""
 
     def test_interval_chunking_breaks_boundaryless_runs(self):
         # 56 连 X 没有任何自然边界：必须按固定间隔补断点，否则无法回行
@@ -122,7 +122,7 @@ class TestLongTokenFixes(unittest.TestCase):
 
 
 class TestCatastrophicOverflowPreemption(unittest.TestCase):
-    "Regression checks."
+    """Regression checks."""
 
     def test_catastrophic_detected(self):
         plan = {"candidates": [{"defect_family": "D1", "overflow_amount": 100.0}]}
@@ -146,7 +146,7 @@ class TestCatastrophicOverflowPreemption(unittest.TestCase):
 
 
 class TestResizeboxClamp(unittest.TestCase):
-    "Regression checks."
+    """Regression checks."""
 
     TEX = (
         "\\documentclass{article}\n\\begin{document}\n"

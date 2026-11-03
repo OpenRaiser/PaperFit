@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"端到端回归编排：冻结 pack → 真实 PaperFit → 双侧导出 → 报告。"
+"""端到端回归编排：冻结 pack → 真实 PaperFit → 双侧导出 → 报告。"""
 
 from __future__ import annotations
 
@@ -241,9 +241,9 @@ def export_ours_side(
     main_tex = work_dir / main_rel
     if not main_tex.is_file():
         return None
-    
-    
-    
+
+
+
     canonical_compile = None
     try:
         canonical_compile = compile_latex(work_dir, main_tex=main_tex, tolerant=True)
@@ -276,7 +276,7 @@ def export_ours_side(
 
 
 def _aggregate_safety(evaluation_reports: List[Dict[str, Any]]) -> Dict[str, Any]:
-    "按本侧可评估样本计算的条件比例（不得用于声称配对改进）。"
+    """按本侧可评估样本计算的条件比例（不得用于声称配对改进）。"""
     if not evaluation_reports:
         return {}
     total = len(evaluation_reports)
@@ -306,7 +306,7 @@ def _aggregate_safety(evaluation_reports: List[Dict[str, Any]]) -> Dict[str, Any
 def _paired_safety(
     b0_evaluations: List[Dict[str, Any]], ours_evaluations: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
-    "双侧都可评估的配对交集指标 + 样本记账。"
+    """双侧都可评估的配对交集指标 + 样本记账。"""
 
     def _index(evals: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         out: Dict[str, Dict[str, Any]] = {}
@@ -468,7 +468,7 @@ def run_mvp(
                 else pack_result["injection_status"] if pack_result["status"] != "injection_failed" else (pack_result.get("injection_status") or "failed")
             ),
             "b0_status": "layout_evaluable" if pack_result["status"] == "success" else "input_incomplete",
-            
+
             "candidate_status": "not_run",
             "run_status": RUN_STATUS_NOT_RUN,
             "candidate_render_status": RENDER_STATUS_FAILED,
@@ -490,8 +490,8 @@ def run_mvp(
                 runner=paperfit_runner,
                 max_rounds=max_rounds,
                 apply=apply,
-                
-                
+
+
                 target_pages=benchmark.get("target_pages"),
                 template=entry.get("venue_id"),
                 column_type=benchmark.get("column_type"),
@@ -693,8 +693,8 @@ def _run_vlm_revision_pairs(
     api_key = os.environ.get("BASELINE_VLM_API_KEY", "")
     model = os.environ.get("BASELINE_VLM_MODEL_NAME", "")
 
-    
-    
+
+
     records_by_case = {
         (str(r.get("paper_id") or ""), str(r.get("case_id") or "")): r for r in case_records
     }
@@ -760,7 +760,7 @@ def _run_vlm_revision_pairs(
             f"VLM revision pairs: {len(paired)} scored, "
             f"{len(uncertain_cases)} uncertain (excluded from CI)"
         )
-        
+
         try:
             (run_dir / "vlm_sample_accounting.json").write_text(
                 json.dumps(

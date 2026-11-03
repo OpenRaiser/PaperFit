@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"把 PaperFit 运行产物导出成官方评估器（evaluator/）的 method-root 输入布局。"
+"""把 PaperFit 运行产物导出成官方评估器（evaluator/）的 method-root 输入布局。"""
 
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ def export_case_inputs(
         render_report=render,
         case_dir=case_dir.resolve() if case_dir else None,
     )
-    
+
     report["paper_id"] = paper_id
     report["case_id"] = case_id
     report["case_status"] = case_status

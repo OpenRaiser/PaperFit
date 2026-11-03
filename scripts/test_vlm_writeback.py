@@ -1,4 +1,4 @@
-"Regression checks."
+"""Regression checks."""
 
 import contextlib
 import io

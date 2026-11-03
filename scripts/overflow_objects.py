@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"把 overfull 警告拆成可定位、可排序的结构化缺陷对象。"
+"""把 overfull 警告拆成可定位、可排序的结构化缺陷对象。"""
 
 from __future__ import annotations
 

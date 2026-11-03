@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"回归报告生成：decision + funnel + 分层 → regression_report.json / .md。"
+"""回归报告生成：decision + funnel + 分层 → regression_report.json / .md。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"B2 超宽图钳制修复器的真实回归测试。"
+"""B2 超宽图钳制修复器的真实回归测试。"""
 
 from __future__ import annotations
 

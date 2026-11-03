@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"真实论文扰动注入器（回归 benchmark pack 的 B0 生成器组件）。"
+"""真实论文扰动注入器（回归 benchmark pack 的 B0 生成器组件）。"""
 
 from __future__ import annotations
 

@@ -98,7 +98,7 @@ class ApplyRecoveryTest(unittest.TestCase):
 
 
 class OrphanBeginEnvTest(unittest.TestCase):
-    "Regression checks."
+    """Regression checks."""
 
     TEX = (
         "\\documentclass{article}\n\\begin{document}\n"

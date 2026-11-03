@@ -1,4 +1,4 @@
-"状态语义回归：noop 修复不许混入 layout_evaluable；注入来源模式显式化。"
+"""状态语义回归：noop 修复不许混入 layout_evaluable；注入来源模式显式化。"""
 
 from __future__ import annotations
 
@@ -169,7 +169,7 @@ class DeriveStatusViaRunPaperfitCaseTest(unittest.TestCase):
             result = run_paperfit_case(
                 b0_project=b0,
                 work_root=root / "runs",
-                case_id="example-paper-5ccf2a1824",
+                case_id="example-paper-06",
                 paper_id="ACMmm",
                 main_tex_relpath=main,
                 runner=noop_runner,
@@ -181,27 +181,6 @@ class DeriveStatusViaRunPaperfitCaseTest(unittest.TestCase):
         self.assertTrue(any("repair_no_effect" in reason for reason in result.reasons))
 
 
-class RealArtifactNoopTest(unittest.TestCase):
-    "Regression checks."
-
-    NOOP_RUN_RESULT = (
-        REPO_ROOT / "regression_runs" / "MVP1_20261006_053714" / "ours_runs" / "ACMmm"
-        / "example-paper-5ccf2a1824" / "ours_project" / "data" / "run_result.json"
-    )
-
-    @unittest.skipUnless(NOOP_RUN_RESULT.is_file(), "真实 ACMmm noop 工件不在本检出里")
-    def test_recorded_acmmm_noop_artifact_maps_to_no_effect(self):
-        from regression.run_case import _read_repair_execution_summary
-
-        payload = json.loads(self.NOOP_RUN_RESULT.read_text(encoding="utf-8"))
-        base = self.NOOP_RUN_RESULT.parent.parent
-        summary = _read_repair_execution_summary(base, payload)
-        self.assertEqual(summary["status"], "noop")
-        self.assertEqual(summary["applied_count"], 0)
-        payload["repair_execution_summary"] = summary
-        states = _derive_case_states(payload)
-        self.assertEqual(states["status"], "no_effect")
-        self.assertEqual(states["repair_effect_status"], "no_effect")
 
 
 
@@ -558,7 +537,7 @@ class _SwitchingRunner:
 
 
 class InjectFromRawCleanDataTest(unittest.TestCase):
-    "Regression checks."
+    """干净 raw + inject_from_raw：允许注入并记账 mvp_injector 来源。"""
 
     def test_clean_raw_injects_and_records_source(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -605,7 +584,7 @@ class RunIdCollisionTest(unittest.TestCase):
                 paperfit_runner=runner, compile_fn=_fake_compile, render_fn=_fake_render,
             )
             self.assertNotEqual(first["run_dir"], second["run_dir"])
-            
+
             import re as re_mod
 
             for run_dir in (first["run_dir"], second["run_dir"]):

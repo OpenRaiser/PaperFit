@@ -215,7 +215,7 @@ def _build_float_defects(plan: Dict[str, Any], max_candidates: int) -> List[Dict
             "object": label,
             "page": candidate.get("page") or 0,
             "line_number": None,
-            
+
             "finding_id": candidate.get("finding_id"),
         }
         if defect_family == "B1":
@@ -451,7 +451,7 @@ def _build_overflow_defects(
         # 透传 proposed_action 让 executor 的路由能识别 textheight 移除等特殊动作
         if candidate.get("proposed_action"):
             defect_entry["proposed_action"] = candidate["proposed_action"]
-        
+
         if candidate.get("finding_id"):
             defect_entry["finding_id"] = candidate["finding_id"]
         for field in ("source_anchor", "source_file", "overflow_id"):
@@ -641,7 +641,7 @@ def _has_urgent_overflow_candidates(plan: Dict[str, Any]) -> bool:
 
 
 def _has_catastrophic_overflow_candidates(plan: Dict[str, Any]) -> bool:
-    "≥100pt 的溢出是灾难级（内容冲出页面），优先级高于视觉 B2 宽度微调。"
+    """≥100pt 的溢出是灾难级（内容冲出页面），优先级高于视觉 B2 宽度微调。"""
     for candidate in plan.get("candidates") or []:
         if str(candidate.get("defect_family") or "") not in {"D1", "D2", "D3"}:
             continue
@@ -1083,8 +1083,8 @@ def execute_repair_plan(
     if Path(output_path).resolve() in protected_outputs:
         raise ValueError('repair report cannot replace a manuscript or repair plan input')
     if _plan_uses_conflict_batch(plan):
-        
-        
+
+
         actionable_plan = {"candidates": _actionable_candidates(plan), **{k: v for k, v in plan.items() if k != "candidates"}}
         catastrophic_overflow = _has_catastrophic_overflow_candidates(actionable_plan)
         if catastrophic_overflow:

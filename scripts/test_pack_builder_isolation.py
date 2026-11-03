@@ -1,4 +1,4 @@
-"回归：pack_builder 整批隔离——单 case 失败不许中止 10-case/200-case 批量。"
+"""回归：pack_builder 整批隔离——单 case 失败不许中止 10-case/200-case 批量。"""
 
 from __future__ import annotations
 
@@ -161,7 +161,7 @@ class PackBatchIsolationTest(unittest.TestCase):
             )
             self.assertEqual(failed_manifest["failure"]["status"], "pack_copy_failed")
             self.assertEqual(failed_manifest["stage_status"]["copy"], "failed")
-            
+
             self.assertIn("cannot find the path specified", failed_manifest["failure"]["error"])
             self.assertIn("s16_1p5b_dataset_breakdown", failed_manifest["failure"]["error"])
             self.assertEqual(failed_manifest["case_id"], CASE_IDS[2])
