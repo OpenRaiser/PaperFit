@@ -2,6 +2,8 @@
 
 <div align="center">
 
+<img src="plugins/paperfit/assets/paperfit-readme-banner.png" alt="PaperFit - Vision-in-the-Loop Academic Typesetting" width="980" />
+
 # PaperFit
 
 **Vision-in-the-Loop Academic Typesetting Agent System**
@@ -19,6 +21,7 @@ PaperFit 是面向 `Claude Code`、`Codex`、`Cursor` 的视觉闭环 LaTeX 排�
 <p>
   <a href="#为什么需要-paperfit"><b>为什么需要</b></a> ·
   <a href="#核心能力"><b>核心能力</b></a> ·
+  <a href="#真实效果展示"><b>效果展示</b></a> ·
   <a href="#快速开始"><b>快速开始</b></a> ·
   <a href="#安装"><b>安装</b></a> ·
   <a href="#使用方法"><b>使用方法</b></a> ·
@@ -54,6 +57,22 @@ PaperFit 把论文排版视为一个视觉闭环任务：先把 PDF 渲染成页
 | **页数控制** | 区分页数上限与精确目标，按约定的正文、参考文献和附录范围联合优化页数与可读性；语义修改另需用户授权。 |
 | **局部对象修复** | 针对单个表格、图、公式或页面问题执行更小范围的修复。 |
 | **跨宿主分发** | 同一套能力可安装到 `Claude Code`、`Codex`、`Cursor`。 |
+
+## 真实效果展示
+
+下面的案例来自 PaperFit 的真实排版修复效果展示。
+
+<p align="center">
+  <a href="plugins/paperfit/assets/paperfit-case1.png">
+    <img src="plugins/paperfit/assets/paperfit-case1.png" alt="PaperFit case 1 layout repair result" width="980" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="plugins/paperfit/assets/paperfit-case2.png">
+    <img src="plugins/paperfit/assets/paperfit-case2.png" alt="PaperFit case 2 layout repair result" width="980" />
+  </a>
+</p>
 
 ## 适合场景
 
